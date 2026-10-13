@@ -1,0 +1,22 @@
+name: pull requests
+
+# This repository is an export; nothing is merged here. Close each pull request with a pointer to
+# CONTRIBUTING.md. pull_request_target runs on the base branch's workflow with a write token and
+# must never check out the pull request's code; this one runs no code from it.
+on:
+  pull_request_target:
+    types: [opened, reopened]
+
+permissions:
+  pull-requests: write
+
+jobs:
+  close:
+    runs-on: ubuntu-latest
+    steps:
+      - run: |
+          gh pr comment "$PR" --repo "$GITHUB_REPOSITORY" --body "Thanks. This repository is a read-only export, so pull requests are closed automatically; see CONTRIBUTING.md for how a change gets in."
+          gh pr close "$PR" --repo "$GITHUB_REPOSITORY"
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR: ${{ github.event.pull_request.number }}

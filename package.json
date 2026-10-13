@@ -1,0 +1,27 @@
+{
+  "name": "dag",
+  "private": true,
+  "type": "module",
+  "workspaces": [
+    "packages/*"
+  ],
+  "scripts": {
+    "ci": "node packages/dagactions/src/cli.ts run scripts/ci.ts",
+    "release": "node packages/dagactions/src/cli.ts run scripts/release.ts",
+    "build:action": "cd packages/dagactions && bun run build:action",
+    "typecheck": "tsgo --noEmit",
+    "lint": "bun --bun eslint .",
+    "format": "prettier --write ."
+  },
+  "devDependencies": {
+    "@mrmeku/dagactions": "workspace:*",
+    "@mrmeku/dagraph": "workspace:*",
+    "@types/bun": "latest",
+    "@types/node": "^22.18.0",
+    "@typescript/native-preview": "^7.0.0-dev.20260131.1",
+    "eslint": "^10.0.1",
+    "prettier": "^3.8.1",
+    "prettier-plugin-organize-imports": "^4.3.0",
+    "typescript-eslint": "^8.54.0"
+  }
+}

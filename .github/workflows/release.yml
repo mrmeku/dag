@@ -1,0 +1,36 @@
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+  id-token: write # npm trusted publishing
+  checks: write # one check run per node
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          registry-url: https://registry.npmjs.org
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.4.2
+      - run: bun install --frozen-lockfile
+      - run: bun run build:action
+
+      # The release is the graph (scripts/release.ts): checks, packs, publishes, the action's
+      # build output pushed to mrmeku/dagactions, and the CAS saved under the release key so a
+      # re-run skips what already succeeded. npm authenticates through OIDC; the action repo
+      # through its deploy key, read from the environment and never part of a node.
+      - uses: ./packages/dagactions/action
+        with:
+          workflow: scripts/release.ts
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          ACTION_DEPLOY_KEY: ${{ secrets.ACTION_DEPLOY_KEY }}

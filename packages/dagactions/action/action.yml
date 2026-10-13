@@ -1,0 +1,22 @@
+name: dagactions
+description: Run a CI workflow as a dagraph DAG, with actions/cache restore and save as nodes in the graph.
+inputs:
+  workflow:
+    description: Path to the workflow file that default-exports defineWorkflow(...)
+    required: true
+  cas:
+    description: Local content-addressed cache directory
+    default: .dagactions/cas
+  journal:
+    description: Where the run records every settled node, for the post step
+    default: .dagactions/journal.json
+  force:
+    description: Ignore the cache for this run
+    default: "false"
+  only:
+    description: Comma-separated nodes to run, with their dependencies
+runs:
+  using: node24
+  main: dist/main.js
+  # At the end of the job, whatever became of main: the post steps a cancelled run did not reach.
+  post: dist/post.js

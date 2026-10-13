@@ -1,0 +1,67 @@
+import type { DagFs } from "@mrmeku/dagraph";
+import type { Ci, Sh } from "../ports.ts";
+
+/**
+ * Local adapter: the same reporter output as GitHub, rendered for a terminal. Groups become
+ * indented blocks, annotations become tagged lines, and the summary is written to a file.
+ * Context comes from git. This is what makes `bun run ci` on a laptop identical to the job.
+ */
+export function createLocalCi(opts: {
+  sh: Sh;
+  fs: DagFs;
+  summaryPath: string;
+  write?: (line: string) => void;
+}): Ci {
+  const write = opts.write ?? ((line) => console.log(line));
+  let written = false;
+  const git = async (...args: string[]) => (await opts.sh.run(["git", ...args])).stdout.trim();
+  return {
+    context: async () => ({
+      isCi: false,
+      provider: "local",
+      ref: await git("rev-parse", "--abbrev-ref", "HEAD"),
+      sha: await git("rev-parse", "HEAD"),
+      eventName: "local",
+      actor: (await git("config", "user.name")) || process.env.USER || "",
+    }),
+    group: (title, lines) => {
+      write(`▶ ${title}`);
+      for (const line of lines) write(`    ${line}`);
+    },
+    annotate: (level, title, message) => {
+      write(`[${level}] ${title}: ${message}`);
+    },
+    // Appends within a process, as $GITHUB_STEP_SUMMARY does, so a post pass's summary follows the run's.
+    summary: async (markdown) => {
+      const dir = opts.summaryPath.slice(0, opts.summaryPath.lastIndexOf("/"));
+      if (dir) await opts.fs.ensureDir(dir);
+      const before =
+        written && (await opts.fs.exists(opts.summaryPath))
+          ? await opts.fs.readText(opts.summaryPath)
+          : "";
+      written = true;
+      await opts.fs.writeText(opts.summaryPath, before + markdown);
+      write(`summary: ${opts.summaryPath}`);
+    },
+    // Check runs are a GitHub concept; the terminal groups already show live status.
+    check: async () => {},
+  };
+}
+
+/** A Ci that does nothing — for library users who only want the results. */
+export function nullCi(): Ci {
+  return {
+    context: async () => ({
+      isCi: false,
+      provider: "none",
+      ref: "",
+      sha: "",
+      eventName: "",
+      actor: "",
+    }),
+    group: () => {},
+    annotate: () => {},
+    summary: async () => {},
+    check: async () => {},
+  };
+}

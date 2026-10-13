@@ -1,0 +1,33 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+  checks: write # one check run per node in the PR Checks tab
+
+jobs:
+  ci:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.4.2
+      - run: bun install --frozen-lockfile
+      # The action's bundle is build output, never committed: built here from source.
+      - run: bun run build:action
+
+      # Everything else is in the graph (scripts/ci.ts): an actions/cache node restores the CAS,
+      # the checks run, and another saves it on main.
+      - uses: ./packages/dagactions/action
+        with:
+          workflow: scripts/ci.ts
+        env:
+          GITHUB_TOKEN: ${{ github.token }}

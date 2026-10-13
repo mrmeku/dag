@@ -1,0 +1,20 @@
+{
+  "name": "@mrmeku/dagraph",
+  "private": true,
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/mrmeku/dag.git",
+    "directory": "packages/dagraph"
+  },
+  "module": "src/index.ts",
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts",
+    "./fs": "./src/ports/fs.ts",
+    "./fs/node": "./src/ports/node-fs.ts"
+  },
+  "dependencies": {
+    "js-sha256": "^0.11.1"
+  }
+}

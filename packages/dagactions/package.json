@@ -1,0 +1,30 @@
+{
+  "name": "@mrmeku/dagactions",
+  "private": true,
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/mrmeku/dag.git",
+    "directory": "packages/dagactions"
+  },
+  "module": "src/index.ts",
+  "type": "module",
+  "engines": {
+    "node": ">=22.18"
+  },
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "bin": {
+    "dagactions": "./src/cli.ts"
+  },
+  "scripts": {
+    "test": "node --test \"src/**/*.test.ts\"",
+    "build:action": "bun build src/action/main.ts src/action/post.ts --target=node --format=esm --outdir action/dist"
+  },
+  "dependencies": {
+    "@actions/cache": "^6.3.0",
+    "@mrmeku/dagraph": "workspace:*",
+    "commander": "^14.0.3"
+  }
+}
