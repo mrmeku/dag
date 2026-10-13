@@ -1,5 +1,6 @@
 import { createMemoryDagFs, type MemoryDagFs } from "@mrmeku/dagraph";
 import type { AnnotationLevel, CheckUpdate, Ci, CiContext, Clock, Ports, Sh } from "../ports.ts";
+import { createMemoryActionsArtifact, type MemoryActionsArtifact } from "./actions-artifact.ts";
 import { createMemoryActionsCache, type MemoryActionsCache } from "./actions-cache.ts";
 
 export interface RecordedCi {
@@ -52,12 +53,20 @@ export function createTestPorts(
     sh?: Sh;
     clock?: Clock;
     actionsCache?: MemoryActionsCache;
+    actionsArtifact?: MemoryActionsArtifact;
     context?: Partial<CiContext>;
   } = {},
-): { ports: Ports; fs: MemoryDagFs; rec: RecordedCi; actionsCache: MemoryActionsCache } {
+): {
+  ports: Ports;
+  fs: MemoryDagFs;
+  rec: RecordedCi;
+  actionsCache: MemoryActionsCache;
+  actionsArtifact: MemoryActionsArtifact;
+} {
   const fs = createMemoryDagFs(opts.files);
   const rec = createRecordingCi(opts.context);
   const actionsCache = opts.actionsCache ?? createMemoryActionsCache();
+  const actionsArtifact = opts.actionsArtifact ?? createMemoryActionsArtifact();
   return {
     ports: {
       sh: opts.sh ?? okSh,
@@ -65,9 +74,11 @@ export function createTestPorts(
       clock: opts.clock ?? steppingClock(),
       ci: rec.ci,
       actionsCache,
+      actionsArtifact,
     },
     fs,
     rec,
     actionsCache,
+    actionsArtifact,
   };
 }

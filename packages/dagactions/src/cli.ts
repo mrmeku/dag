@@ -3,7 +3,8 @@ import { createNodeDagFs } from "@mrmeku/dagraph/fs/node";
 import { Command } from "commander";
 import { resolve } from "node:path";
 import { DEFAULT_CAS_DIR, DEFAULT_JOURNAL_PATH, DEFAULT_SUMMARY_PATH } from "./config.ts";
-import type { ActionsCache, Ci } from "./ports.ts";
+import type { ActionsArtifact, ActionsCache, Ci } from "./ports.ts";
+import { artifactServiceAvailable, nullActionsArtifact } from "./ports/actions-artifact.ts";
 import { nullActionsCache } from "./ports/actions-cache.ts";
 import { createGithubCi } from "./ports/github.ts";
 import { createLocalCi } from "./ports/local.ts";
@@ -30,6 +31,21 @@ async function pickActionsCache(onGithub: boolean, ci: Ci): Promise<ActionsCache
     "actions/cache is off: this step cannot reach the cache service; run dagactions as the action",
   );
   return nullActionsCache;
+}
+
+/** `@actions/artifact` likewise: the service takes the runtime token only the action receives. */
+async function pickActionsArtifact(onGithub: boolean, ci: Ci): Promise<ActionsArtifact> {
+  if (!onGithub) return nullActionsArtifact;
+  if (artifactServiceAvailable(process.env)) {
+    const { DefaultArtifactClient } = await import("@actions/artifact");
+    return new DefaultArtifactClient();
+  }
+  ci.annotate(
+    "notice",
+    "dagactions",
+    "actions/upload-artifact is off: this step cannot reach the artifact service; run dagactions as the action",
+  );
+  return nullActionsArtifact;
 }
 
 interface CommonOptions {
@@ -62,7 +78,14 @@ async function options(file: string, opts: CommonOptions): Promise<RunOptions> {
   const only = opts.only?.split(",").filter(Boolean);
   return {
     workflow: def.workflow,
-    ports: { sh, fs, clock: systemClock(), ci, actionsCache: await pickActionsCache(onGithub, ci) },
+    ports: {
+      sh,
+      fs,
+      clock: systemClock(),
+      ci,
+      actionsCache: await pickActionsCache(onGithub, ci),
+      actionsArtifact: await pickActionsArtifact(onGithub, ci),
+    },
     casBaseDir: opts.cas,
     journalPath: opts.journal,
     ...(only && { only }),

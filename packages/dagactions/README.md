@@ -72,7 +72,35 @@ npx dagactions run scripts/ci.ts [--force] [--only a,b] [--cas .dagactions/cas]
 
 ## actions/cache as DAG nodes
 
-`w.restoreCache` is `actions/cache/restore` and `w.saveCache` is `actions/cache/save`, with the actions' inputs (`path`, `key`, `restoreKeys`) and outputs (`cacheHit`, `cachePrimaryKey`, `cacheMatchedKey`). Match order, immutability, branch scope and quotas are GitHub's; see the [dependency caching reference](https://docs.github.com/en/actions/reference/workflows-and-actions/dependency-caching). Both nodes run every time. The save is a post step with the usual `if: cache-hit != 'true'` built in, and a save the service refuses is a warning, not a failure. Without a cache service, locally or in a `run:` step, every restore misses and every save is a no-op.
+`w.restoreCache` is `actions/cache/restore` and `w.saveCache` is `actions/cache/save`, with the actions' inputs (`path`, `key`, `restoreKeys`). Each node's output file holds what `@actions/cache` returned, as JSON: `cache.json` the key restored or null, `save.json` the entry's id, -1 when nothing was saved, or null when no save was attempted. Match order, immutability, branch scope and quotas are GitHub's; see the [dependency caching reference](https://docs.github.com/en/actions/reference/workflows-and-actions/dependency-caching). Both nodes run every time. The save is a post step with the usual `if: cache-hit != 'true'` built in, and a save the service refuses is a warning, not a failure. Without a cache service, locally or in a `run:` step, every restore misses and every save is a no-op.
+
+## actions/upload-artifact as a DAG node
+
+`w.uploadArtifact` is `actions/upload-artifact`, with the action's inputs (`artifact` for its `name`, `path`, `ifNoFilesFound`, `overwrite`) and `@actions/artifact`'s own `UploadArtifactOptions` as `options`. `artifact.json` holds the client's `UploadArtifactResponse` as returned: `id`, `size` and `digest`, or `{}` when nothing went up. `path` takes globs over the working tree and the outputs of deps, so a build product goes up straight from the CAS:
+
+```typescript
+const pack = w.run({
+  name: "pack",
+  cmd: ["npm", "pack", "--pack-destination", "$DAGACTIONS_OUT"],
+  outputs: { tarball: "pkg-1.0.0.tgz" },
+  deps: { install },
+});
+w.uploadArtifact({
+  name: "upload:tarball",
+  artifact: "tarball",
+  path: [pack.outputs.tarball],
+  deps: { pack },
+});
+w.uploadArtifact({
+  name: "upload:junit",
+  artifact: "junit",
+  path: ["reports/**/*.xml"],
+  deps: { tests: w.optional(tests) },
+  ifNoFilesFound: "ignore",
+});
+```
+
+An artifact belongs to the run, so the node runs every time and is never cached; its `deps` say when, and `w.optional` is the `if: always()` of a test report. The archive is rooted at the deepest directory holding every file, as the action roots it: one node's outputs sit at the top, outputs of several nodes keep their CAS paths. An upload the service refuses fails the node, as the action fails its step; a name the run already holds is refused unless `overwrite` is set, which matters when a failed job is re-run. Without a service, locally or in a `run:` step, nothing is uploaded and the log says so. Artifacts need no permission beyond the runner's own token. Retention, size and storage quotas are GitHub's; see [storing and sharing data from a workflow](https://docs.github.com/en/actions/writing-workflows/choosing-what-your-workflow-does/storing-and-sharing-data-from-a-workflow).
 
 ## How post cleanup steps work
 

@@ -16,10 +16,13 @@ import {
   run,
   runAll,
   saveCache,
+  uploadArtifact,
   type PostSpec,
+  type RestoreCacheRef,
   type RestoreCacheSpec,
   type RunRef,
   type RunSpec,
+  type UploadArtifactSpec,
 } from "./steps.ts";
 
 /** The concurrency groups a limits object declares, or `never` when it declares none. */
@@ -45,13 +48,15 @@ export interface Steps<G extends string = string> {
   /** A command as the `post:` of `main`: never cached, runs after its `deps`, and after a cancel. */
   post: <O extends string = never>(spec: PostSpec<G, O> & { name: string }) => RunRef<O>;
   /** `actions/cache/restore` as a node. */
-  restoreCache: (spec: RestoreCacheSpec) => NodeRef<string>;
+  restoreCache: (spec: RestoreCacheSpec) => RestoreCacheRef;
   /** `actions/cache/save` as its post step; `cache` is the restore node it saves for. */
   saveCache: (opts: {
     name: string;
-    cache: NodeRef<string>;
+    cache: RestoreCacheRef;
     deps: Record<string, NodeRef | OptionalRef | undefined>;
   }) => NodeRef<string>;
+  /** `actions/upload-artifact` as a node: globs and dep outputs up as one artifact of the run. */
+  uploadArtifact: (spec: UploadArtifactSpec) => NodeRef<string>;
   /** Mark a dep the consumer runs without when it failed: GitHub's `if: always()`. */
   optional: typeof optional;
 }
@@ -73,6 +78,7 @@ export function createSteps<G extends string>(
     post: (spec) => post(graph, ports, spec),
     restoreCache: (spec) => restoreCache(graph, ports, spec),
     saveCache: (opts) => saveCache(graph, ports, opts),
+    uploadArtifact: (spec) => uploadArtifact(graph, ports, spec),
     optional,
   };
 }

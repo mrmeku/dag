@@ -11,6 +11,7 @@ General programming principles:
 6. look up documentation for APIs on the web instead of trying to remember things from scratch
 7. write the program, reflect on its quality, simplicity, correctness, and ease of modification, and then go back and write a second version
 8. prefer idiomatic solutions — use the conventions, naming patterns, and standard approaches of the language/framework rather than inventing custom ones
+9. when wrapping a library, use its types: a port is a `Pick` of the library's own interface, and a JSON file that carries a library's result holds the library's return value verbatim. Never define a parallel type for data a library already types; add fields only where the library gives none
 
 ## Project
 

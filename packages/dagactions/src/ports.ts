@@ -1,3 +1,5 @@
+import type { ArtifactClient } from "@actions/artifact";
+import type * as cache from "@actions/cache";
 import type { DagFs } from "@mrmeku/dagraph";
 
 export interface ShResult {
@@ -24,19 +26,19 @@ export interface Clock {
 }
 
 /**
- * The cache service behind `actions/cache`, as the two functions of `@actions/cache`: that
- * module is itself an ActionsCache, and so is any client with the same two functions.
- * `restoreCache` resolves to the key it restored, or undefined on a miss; `saveCache` resolves
- * to the new entry's id. The toolkit's README has the rest.
+ * The cache service behind `actions/cache`: the two functions of `@actions/cache`, so that
+ * module is itself an ActionsCache and so is any client with the same two. `restoreCache`
+ * resolves to the key it restored, or undefined on a miss; `saveCache` to the new entry's id.
  */
-export interface ActionsCache {
-  restoreCache: (
-    paths: string[],
-    primaryKey: string,
-    restoreKeys?: string[],
-  ) => Promise<string | undefined>;
-  saveCache: (paths: string[], key: string) => Promise<number>;
-}
+export type ActionsCache = Pick<typeof cache, "restoreCache" | "saveCache">;
+
+/**
+ * The artifact service behind `actions/upload-artifact`: two methods of `@actions/artifact`'s
+ * client, so a `DefaultArtifactClient` is itself an ActionsArtifact. `uploadArtifact` zips the
+ * files with their paths relative to the root directory and resolves to the new artifact's id,
+ * size and digest; `deleteArtifact` rejects with an `ArtifactNotFoundError` for an unknown name.
+ */
+export type ActionsArtifact = Pick<ArtifactClient, "uploadArtifact" | "deleteArtifact">;
 
 export type AnnotationLevel = "error" | "warning" | "notice";
 
@@ -86,4 +88,5 @@ export interface Ports {
   clock: Clock;
   ci: Ci;
   actionsCache: ActionsCache;
+  actionsArtifact: ActionsArtifact;
 }

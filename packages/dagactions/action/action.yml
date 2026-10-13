@@ -1,5 +1,5 @@
 name: dagactions
-description: Run a CI workflow as a dagraph DAG, with actions/cache restore and save as nodes in the graph.
+description: Run a CI workflow as a dagraph DAG, with actions/cache restore and save and actions/upload-artifact as nodes in the graph.
 inputs:
   workflow:
     description: Path to the workflow file that default-exports defineWorkflow(...)

@@ -34,6 +34,8 @@ describe("release workflow", () => {
         actionCmd: cmdOf(by("release:action")),
         actionDeps: by("release:action").deps.sort(),
         releaseDeps: by("release").deps.sort(),
+        uploadConfigs: ["upload:dagraph", "upload:action"].map((n) => JSON.parse(by(n).config)),
+        uploadDeps: ["upload:dagraph", "upload:action"].map((n) => by(n).deps),
         saveDeps: { deps: by("save:cas").deps.sort(), optional: by("save:cas").optionalDeps },
         uncached: tagged.nodes.filter((n) => n.cacheable === false).map((n) => n.name),
         checksAfterRestore: tagged.nodes
@@ -57,6 +59,9 @@ describe("release workflow", () => {
           "test:dagactions",
           "test:dagraph",
           "typecheck",
+          "upload:action",
+          "upload:dagactions",
+          "upload:dagraph",
         ],
         restoreConfig: {
           v: 1,
@@ -95,8 +100,32 @@ describe("release workflow", () => {
         ],
         actionDeps: ["build:action", "gate"],
         releaseDeps: ["publish:dagactions", "publish:dagraph", "release:action"],
+        uploadConfigs: [
+          {
+            v: 1,
+            artifact: "dagraph-1.2.3",
+            path: [{ node: "pack:dagraph", output: "tarball" }],
+            ifNoFilesFound: "warn",
+          },
+          {
+            v: 1,
+            artifact: "action-1.2.3",
+            path: [
+              { node: "build:action", output: "main" },
+              { node: "build:action", output: "post" },
+            ],
+            ifNoFilesFound: "warn",
+          },
+        ],
+        uploadDeps: [["pack:dagraph"], ["build:action"]],
         saveDeps: { deps: ["release", "restore:cas"], optional: ["release"] },
-        uncached: ["restore:cas", "save:cas"],
+        uncached: [
+          "restore:cas",
+          "upload:dagraph",
+          "upload:dagactions",
+          "upload:action",
+          "save:cas",
+        ],
         checksAfterRestore: true,
       },
     );

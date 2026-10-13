@@ -2,9 +2,19 @@ import { execute, Graph, MemCache, optional } from "@mrmeku/dagraph";
 import assert from "node:assert/strict";
 import { describe, test } from "node:test";
 import type { Sh } from "./ports.ts";
+import { nullActionsArtifact } from "./ports/actions-artifact.ts";
 import { createMemoryActionsCache } from "./ports/actions-cache.ts";
 import { createTestPorts } from "./ports/memory.ts";
-import { gate, post, postNodes, restoreCache, run, runAll, saveCache } from "./steps.ts";
+import {
+  gate,
+  post,
+  postNodes,
+  restoreCache,
+  run,
+  runAll,
+  saveCache,
+  uploadArtifact,
+} from "./steps.ts";
 
 const CAS = "/cas";
 
@@ -59,7 +69,7 @@ describe("runAll + gate", () => {
 });
 
 describe("restoreCache + saveCache", () => {
-  test("a restore-key match restores the newest prefix match and saves the primary key; an exact hit saves nothing; a refused save warns", async () => {
+  test("a restore-key match restores the newest prefix match and saves the primary key; an exact hit saves nothing; a refused save warns; the outputs are what the toolkit returned", async () => {
     const service = createMemoryActionsCache(["pnpm-linux-old", "pnpm-linux-new", "cas-main-1"]);
     const { ports: p, fs, rec } = createTestPorts({ sh: fakeSh, actionsCache: service });
     const graph = new Graph();
@@ -118,26 +128,8 @@ describe("restoreCache + saveCache", () => {
         manifests: [...fs.files.keys()].filter((f) => f.endsWith("manifest.json")),
       },
       {
-        restored: {
-          pnpm: {
-            cacheHit: false,
-            cachePrimaryKey: "pnpm-linux-fresh",
-            cacheMatchedKey: "pnpm-linux-new",
-            path: ["~/.pnpm-store"],
-          },
-          cas: {
-            cacheHit: true,
-            cachePrimaryKey: "cas-main-1",
-            cacheMatchedKey: "cas-main-1",
-            path: [".cas"],
-          },
-          broken: { cacheHit: false, cachePrimaryKey: "broken", cacheMatchedKey: "", path: [] },
-        },
-        saved: {
-          pnpm: { key: "pnpm-linux-fresh", status: "saved" },
-          cas: { key: "cas-main-1", status: "skipped" },
-          broken: { key: "broken", status: "failed" },
-        },
+        restored: { pnpm: "pnpm-linux-new", cas: "cas-main-1", broken: null },
+        saved: { pnpm: 4, cas: null, broken: null },
         logs: [
           "Cache restored from key: pnpm-linux-new",
           "Cache not found for input keys: broken",
@@ -158,6 +150,154 @@ describe("restoreCache + saveCache", () => {
           ["pnpm-linux-fresh", ["~/.pnpm-store"]],
         ],
         manifests: [],
+      },
+    );
+  });
+});
+
+describe("uploadArtifact", () => {
+  test("dep outputs upload from the CAS rooted at their common directory; a taken name needs overwrite; a failed optional dep leaves no files; no service uploads nothing; the client's response is the output", async () => {
+    const {
+      ports: p,
+      fs,
+      rec,
+      actionsArtifact: service,
+    } = createTestPorts({
+      sh: {
+        run: async (cmd, opts) => {
+          const out = opts!.env!["DAGACTIONS_OUT"]!;
+          if (cmd[0] === "pack") await fs.writeText(`${out}/pkg.tgz`, "bytes");
+          if (cmd[0] === "bundle") await fs.writeText(`${out}/main.js`, "js");
+          return cmd[0] === "bad"
+            ? { code: 1, stdout: "", stderr: "", ok: false }
+            : { code: 0, stdout: "", stderr: "", ok: true };
+        },
+      },
+    });
+    const graph = new Graph();
+    const pack = run(graph, p, { name: "pack", cmd: ["pack"], outputs: { tarball: "pkg.tgz" } });
+    const bundle = run(graph, p, { name: "bundle", cmd: ["bundle"], outputs: { main: "main.js" } });
+    const bad = run(graph, p, { name: "bad", cmd: ["bad"], outputs: { report: "report.xml" } });
+    const first = uploadArtifact(graph, p, {
+      name: "upload:tarball",
+      artifact: "tarball",
+      path: [pack.outputs.tarball],
+      deps: { pack },
+      options: { retentionDays: 7 },
+    });
+    uploadArtifact(graph, p, {
+      name: "upload:again",
+      artifact: "tarball",
+      path: [pack.outputs.tarball],
+      deps: { pack, first },
+    });
+    const again = uploadArtifact(graph, p, {
+      name: "upload:overwrite",
+      artifact: "tarball",
+      path: [pack.outputs.tarball],
+      deps: { pack, first },
+      overwrite: true,
+    });
+    uploadArtifact(graph, p, {
+      name: "upload:both",
+      artifact: "both",
+      path: [pack.outputs.tarball, bundle.outputs.main],
+      deps: { pack, bundle, again },
+    });
+    uploadArtifact(graph, p, {
+      name: "upload:report",
+      artifact: "report",
+      path: [bad.outputs.report],
+      deps: { bad: optional(bad) },
+    });
+    uploadArtifact(graph, p, {
+      name: "upload:required",
+      artifact: "required",
+      path: [bad.outputs.report],
+      deps: { bad: optional(bad) },
+      ifNoFilesFound: "error",
+    });
+    uploadArtifact(
+      graph,
+      { ...p, actionsArtifact: nullActionsArtifact },
+      {
+        name: "upload:offline",
+        artifact: "offline",
+        path: [pack.outputs.tarball],
+        deps: { pack },
+      },
+    );
+    assert.throws(
+      () =>
+        uploadArtifact(graph, p, { name: "orphan", artifact: "x", path: [pack.outputs.tarball] }),
+      { message: "orphan uses pack.outputs.tarball, but pack is not in its deps" },
+    );
+
+    const results = await execute(graph, { cache: new MemCache(), fs: p.fs, casBaseDir: CAS });
+    const byName = new Map(results.map((r) => [r.name, r]));
+    const out = (name: string) => `${CAS}/${byName.get(name)!.actionKey}/out`;
+    const json = async (name: string) => {
+      const r = byName.get(name)!;
+      return r.status === "done"
+        ? JSON.parse(await fs.readText(r.outputs as string))
+        : r.status === "fail" && r.error.message;
+    };
+    const names = [
+      "upload:tarball",
+      "upload:again",
+      "upload:overwrite",
+      "upload:both",
+      "upload:report",
+      "upload:required",
+      "upload:offline",
+    ];
+    assert.deepEqual(
+      {
+        outputs: Object.fromEntries(await Promise.all(names.map(async (n) => [n, await json(n)]))),
+        log: await fs.readText(`${out("upload:tarball")}/stdout.log`),
+        warnings: rec.annotations,
+        uploads: [...service.uploads],
+        config: JSON.parse(graph.describe().find((n) => n.name === "upload:tarball")!.config),
+        uncached: graph
+          .describe()
+          .filter((n) => n.cacheable === false)
+          .map((n) => n.name),
+      },
+      {
+        outputs: {
+          "upload:tarball": { id: 1, size: 1 },
+          "upload:again": "an artifact with this name already exists: tarball",
+          "upload:overwrite": { id: 2, size: 1 },
+          "upload:both": { id: 3, size: 2 },
+          "upload:report": {},
+          "upload:required":
+            "No files were found with the provided path: bad.outputs.report. No artifacts will be uploaded.",
+          "upload:offline": {},
+        },
+        log: "Artifact tarball has been successfully uploaded! Final size is 1 bytes. Artifact ID is 1",
+        warnings: [
+          {
+            level: "warning",
+            title: "upload:report",
+            message:
+              "No files were found with the provided path: bad.outputs.report. No artifacts will be uploaded.",
+          },
+        ],
+        uploads: [
+          ["tarball", { files: [`${out("pack")}/pkg.tgz`], rootDirectory: out("pack") }],
+          [
+            "both",
+            { files: [`${out("pack")}/pkg.tgz`, `${out("bundle")}/main.js`], rootDirectory: CAS },
+          ],
+        ],
+        config: {
+          v: 1,
+          artifact: "tarball",
+          path: [{ node: "pack", output: "tarball" }],
+          ifNoFilesFound: "warn",
+          options: { retentionDays: 7 },
+        },
+        uncached: names,
       },
     );
   });

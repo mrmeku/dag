@@ -23,6 +23,7 @@
     "build:action": "bun build src/action/main.ts src/action/post.ts --target=node --format=esm --outdir action/dist"
   },
   "dependencies": {
+    "@actions/artifact": "^6.3.1",
     "@actions/cache": "^6.3.0",
     "@mrmeku/dagraph": "workspace:*",
     "commander": "^14.0.3"

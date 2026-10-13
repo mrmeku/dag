@@ -1,15 +1,17 @@
 /**
  * What the action's two entries share: inputs from INPUT_* variables, the resolve hook that
  * serves `@mrmeku/dagactions` from the running bundle (so the workflow file loads before
- * node_modules exists), and the ports: GitHub's reporter, and the toolkit as the cache service
- * when this process can reach it.
+ * node_modules exists), and the ports: GitHub's reporter, and the toolkit as the cache and
+ * artifact services when this process can reach them.
  */
+import { DefaultArtifactClient } from "@actions/artifact";
 import * as cache from "@actions/cache";
 import { createNodeDagFs } from "@mrmeku/dagraph/fs/node";
 import { registerHooks } from "node:module";
 import { resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { DEFAULT_CAS_DIR, DEFAULT_JOURNAL_PATH } from "../config.ts";
+import { artifactServiceAvailable, nullActionsArtifact } from "../ports/actions-artifact.ts";
 import { nullActionsCache } from "../ports/actions-cache.ts";
 import { createGithubCi } from "../ports/github.ts";
 import { createSh, systemClock } from "../ports/real.ts";
@@ -40,6 +42,13 @@ export async function actionOptions(bundleUrl: string): Promise<RunOptions> {
       "actions/cache is off: no cache service in this environment",
     );
   }
+  if (!artifactServiceAvailable(process.env)) {
+    ci.annotate(
+      "notice",
+      "dagactions",
+      "actions/upload-artifact is off: no artifact service in this environment",
+    );
+  }
   const only = input("only")?.split(",").filter(Boolean);
   return {
     workflow: def.workflow,
@@ -49,6 +58,9 @@ export async function actionOptions(bundleUrl: string): Promise<RunOptions> {
       clock: systemClock(),
       ci,
       actionsCache: cache.isFeatureAvailable() ? cache : nullActionsCache,
+      actionsArtifact: artifactServiceAvailable(process.env)
+        ? new DefaultArtifactClient()
+        : nullActionsArtifact,
     },
     casBaseDir: input("cas") ?? DEFAULT_CAS_DIR,
     journalPath: input("journal") ?? DEFAULT_JOURNAL_PATH,

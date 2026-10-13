@@ -18,6 +18,8 @@
  *   authenticates through trusted publishing, which also attaches provenance.
  * - action: the bundle (main and post entries) is an output of build:action; release:action
  *   pushes it to github.com/mrmeku/dagactions, the ref consumers use, and tags it.
+ * - upload: each tarball and the bundle go up as artifacts of the run as soon as they are built,
+ *   gate or no gate, so what a dry run or a failed publish would have shipped can be inspected.
  */
 import { defineWorkflow, type RunOutputs, type RunRef } from "@mrmeku/dagactions";
 import type { NodeRef } from "@mrmeku/dagraph";
@@ -59,6 +61,12 @@ export default defineWorkflow({
         inputs: sources,
         ...afterCas,
       });
+      w.uploadArtifact({
+        name: `upload:${pkg}`,
+        artifact: `${pkg}-${version}`,
+        path: [tarballs[pkg].outputs.tarball],
+        deps: { pack: tarballs[pkg] },
+      });
     }
     const bundle = w.run({
       name: "build:action",
@@ -75,6 +83,13 @@ export default defineWorkflow({
       outputs: { main: "main.js", post: "post.js" },
       inputs: sources,
       ...afterCas,
+    });
+
+    w.uploadArtifact({
+      name: "upload:action",
+      artifact: `action-${version}`,
+      path: [bundle.outputs.main, bundle.outputs.post],
+      deps: { bundle },
     });
 
     const published = {} as Record<Pkg, NodeRef<RunOutputs>>;

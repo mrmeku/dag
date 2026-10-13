@@ -1,3 +1,4 @@
+import type { UploadArtifactOptions, UploadArtifactResponse } from "@actions/artifact";
 import {
   hashBytes,
   type Graph,
@@ -7,10 +8,12 @@ import {
 } from "@mrmeku/dagraph";
 import { defineStep } from "./define-step.ts";
 import type { Ports } from "./ports.ts";
+import { glob } from "./ports/glob.ts";
 
 export { glob } from "./ports/glob.ts";
 
 type Deps = Record<string, NodeRef | OptionalRef | undefined>;
+type Inputs = Record<string, Outputs | undefined>;
 
 /* ------------------------------------------------------------------ hash */
 
@@ -57,6 +60,28 @@ export type RunRef<O extends string = never> = NodeRef<RunOutputs<O>> & {
 };
 
 type Arg = string | OutputRef;
+
+/** The dep role of each node the output refs in `args` name; a ref to a node outside `deps` is refused. */
+function outputRefRoles(name: string, args: Arg[], deps: Deps): Record<string, string> {
+  const roleOf = Object.fromEntries(
+    Object.entries(deps).flatMap(([role, ref]) => (ref ? [[ref.name, role]] : [])),
+  );
+  for (const arg of args)
+    if (typeof arg !== "string" && !(arg.node in roleOf))
+      throw new Error(
+        `${name} uses ${arg.node}.outputs.${arg.output}, but ${arg.node} is not in its deps`,
+      );
+  return roleOf;
+}
+
+/** The paths an output ref names at run time: none when it names an optional dep that failed. */
+function outputPaths(ref: OutputRef, roleOf: Record<string, string>, inputs: Inputs): string[] {
+  const out = inputs[roleOf[ref.node]!];
+  if (out === undefined) return [];
+  const path = typeof out === "object" && !Array.isArray(out) ? out[ref.output] : undefined;
+  if (path === undefined) throw new Error(`${ref.node} has no output ${ref.output}`);
+  return [path].flat();
+}
 
 /**
  * Everything a run node needs except its name. `G` is the set of concurrency groups the
@@ -108,14 +133,11 @@ export function run<O extends string = never>(
 ): RunRef<O> {
   const normalize = opts.normalize;
   const declared = opts.outputs ?? ({} as Record<O, string>);
-  const roleOf = Object.fromEntries(
-    Object.entries(opts.deps ?? {}).flatMap(([role, ref]) => (ref ? [[ref.name, role]] : [])),
+  const roleOf = outputRefRoles(
+    opts.name,
+    [...opts.cmd, ...Object.values(opts.env ?? {})],
+    opts.deps ?? {},
   );
-  for (const arg of [...opts.cmd, ...Object.values(opts.env ?? {})])
-    if (typeof arg !== "string" && !(arg.node in roleOf))
-      throw new Error(
-        `${opts.name} uses ${arg.node}.outputs.${arg.output}, but ${arg.node} is not in its deps`,
-      );
   const step = defineStep<RunParams, RunOutputs<O>, RunConfig>({
     config: {
       v: 4,
@@ -129,14 +151,10 @@ export function run<O extends string = never>(
     ...(opts.cacheable === false && { cacheable: false }),
     ...(normalize && { normalize: () => normalize }),
     action: (p) => async (_params, inputs, outputDir, ctx) => {
-      const resolve = (arg: Arg): string => {
-        if (typeof arg === "string") return arg.replace(/\$DAGACTIONS_OUT\b/g, outputDir);
-        const out = inputs[roleOf[arg.node]!];
-        if (out === undefined) return "";
-        const path = typeof out === "object" && !Array.isArray(out) ? out[arg.output] : undefined;
-        if (path === undefined) throw new Error(`${arg.node} has no output ${arg.output}`);
-        return [path].flat().join(":");
-      };
+      const resolve = (arg: Arg): string =>
+        typeof arg === "string"
+          ? arg.replace(/\$DAGACTIONS_OUT\b/g, outputDir)
+          : outputPaths(arg, roleOf, inputs).join(":");
       const env = Object.fromEntries(
         Object.entries(opts.env ?? {}).map(([k, v]) => [k, resolve(v)]),
       );
@@ -287,21 +305,15 @@ export interface RestoreCacheSpec {
   restoreKeys?: string[];
 }
 
-/** The outputs of `actions/cache/restore`, camel-cased, plus the paths `saveCache` needs. */
-export interface RestoreCacheOutputs {
-  cacheHit: boolean;
-  cachePrimaryKey: string;
-  /** The key restored: the primary key, a restore-key match, or "" on a miss. */
-  cacheMatchedKey: string;
-  path: string[];
-}
+/** What `restoreCache` returns: the node, and the spec `saveCache` saves by. */
+export type RestoreCacheRef = NodeRef<string> & { spec: RestoreCacheSpec };
 
 /**
- * `actions/cache/restore` as a node. It runs every time and writes its outputs to `cache.json`
- * for `saveCache` and the summary. A cached node that depends on it but reads nothing from it
- * declares `normalize` for the dep, so the matched key does not re-key it.
+ * `actions/cache/restore` as a node. It runs every time and writes what `@actions/cache` returned
+ * to `cache.json`: the key it restored, or null on a miss. A cached node that depends on it but
+ * reads nothing from it declares `normalize` for the dep, so the matched key does not re-key it.
  */
-export function restoreCache(graph: Graph, ports: Ports, spec: RestoreCacheSpec): NodeRef<string> {
+export function restoreCache(graph: Graph, ports: Ports, spec: RestoreCacheSpec): RestoreCacheRef {
   const restoreKeys = spec.restoreKeys ?? [];
   const step = defineStep<{ kind: string }, string, Omit<RestoreCacheSpec, "name"> & { v: number }>(
     {
@@ -309,14 +321,8 @@ export function restoreCache(graph: Graph, ports: Ports, spec: RestoreCacheSpec)
       cacheable: false,
       action: (p) => async (_params, _inputs, outputDir) => {
         const matched = await p.actionsCache.restoreCache(spec.path, spec.key, restoreKeys);
-        const outputs: RestoreCacheOutputs = {
-          cacheHit: matched === spec.key,
-          cachePrimaryKey: spec.key,
-          cacheMatchedKey: matched ?? "",
-          path: spec.path,
-        };
         const out = `${outputDir}/cache.json`;
-        await p.fs.writeText(out, JSON.stringify(outputs, null, 2));
+        await p.fs.writeText(out, JSON.stringify(matched ?? null));
         await p.fs.writeText(
           `${outputDir}/stdout.log`,
           matched
@@ -327,7 +333,7 @@ export function restoreCache(graph: Graph, ports: Ports, spec: RestoreCacheSpec)
       },
     },
   );
-  return step.addNode(graph, ports, { kind: spec.name });
+  return { ...step.addNode(graph, ports, { kind: spec.name }), spec };
 }
 
 interface SaveCacheParams {
@@ -338,43 +344,43 @@ interface SaveCacheParams {
 /**
  * `actions/cache/save` as the post step of a restore, with the `if: cache-hit != 'true'` every
  * example writes by hand. When else it runs is its deps: a required dep saves only when that
- * node succeeded, an optional one saves regardless (`if: always()`). A save the service refuses
- * is a warning, not a failure; an invalid key is a workflow bug and fails the node.
+ * node succeeded, an optional one saves regardless (`if: always()`). `save.json` holds what
+ * `@actions/cache` returned, the entry's id or -1 when it did not save, or null when it was not
+ * asked: a hit on the primary key, or a save the service refused, which is a warning, not a
+ * failure. An invalid key is a workflow bug and fails the node.
  */
 export function saveCache(
   graph: Graph,
   ports: Ports,
-  opts: { name: string; cache: NodeRef<string>; deps: Deps },
+  opts: { name: string; cache: RestoreCacheRef; deps: Deps },
 ): NodeRef<string> {
+  const { path, key } = opts.cache.spec;
   const step = defineStep<SaveCacheParams, string, string>({
-    config: "save-cache:v1",
+    config: "save-cache:v2",
     cacheable: false,
     action: (p) => async (_params, inputs, outputDir) => {
-      const restored = JSON.parse(
-        await p.fs.readText(inputs["cache"] as string),
-      ) as RestoreCacheOutputs;
-      const key = restored.cachePrimaryKey;
+      const matched = JSON.parse(await p.fs.readText(inputs["cache"] as string)) as string | null;
       const out = `${outputDir}/save.json`;
-      const done = async (status: string, line: string) => {
-        await p.fs.writeText(out, JSON.stringify({ key, status }, null, 2));
+      const done = async (id: number | null, line: string) => {
+        await p.fs.writeText(out, JSON.stringify(id));
         await p.fs.writeText(`${outputDir}/stdout.log`, line);
         return out;
       };
-      if (restored.cacheHit) {
-        return done("skipped", `Cache hit occurred on the primary key ${key}, not saving cache.`);
+      if (matched === key) {
+        return done(null, `Cache hit occurred on the primary key ${key}, not saving cache.`);
       }
       let id: number;
       try {
-        id = await p.actionsCache.saveCache(restored.path, key);
+        id = await p.actionsCache.saveCache(path, key);
       } catch (e) {
         if (e instanceof Error && e.name === "ValidationError") throw e;
         const message = e instanceof Error ? e.message : String(e);
         p.ci.annotate("warning", opts.name, message);
-        return done("failed", `Failed to save: ${message}`);
+        return done(null, `Failed to save: ${message}`);
       }
       // The toolkit returns -1 when it did not save: the key exists already, or there is no service.
-      if (id < 0) return done("not-saved", `Cache not saved with key: ${key}`);
-      return done("saved", `Cache saved with key: ${key}`);
+      if (id < 0) return done(id, `Cache not saved with key: ${key}`);
+      return done(id, `Cache saved with key: ${key}`);
     },
   });
   const ref = step.addNode(graph, ports, {
@@ -383,4 +389,113 @@ export function saveCache(
   });
   markPost(graph, ref);
   return ref;
+}
+
+/* ------------------------------------------------- actions/upload-artifact */
+
+/** The inputs of `actions/upload-artifact`: `name`, `path`, `if-no-files-found`, `overwrite`, and the client's own options. */
+export interface UploadArtifactSpec {
+  /** The node's name; `artifact` is the artifact's. */
+  name: string;
+  /** The artifact's name on the run page: no `"`, `:`, `<`, `>`, `|`, `*`, `?`, `\\` or `/`. */
+  artifact: string;
+  /** What goes in: globs over the working tree, as `w.glob` takes them, and outputs of nodes in `deps`. */
+  path: Arg[];
+  deps?: Deps;
+  /** What an empty `path` does: a warning and no artifact (the default), a failure, or nothing. */
+  ifNoFilesFound?: "warn" | "error" | "ignore";
+  /** Delete an artifact of the same name first: a re-run of a failed job shares its run's artifacts. */
+  overwrite?: boolean;
+  /** Handed to `@actions/artifact` as is: `retentionDays`, `compressionLevel`, `skipArchive`. */
+  options?: UploadArtifactOptions;
+}
+
+/** The deepest directory every file is under, the archive's root: `a/b/x` and `a/c/y` give `a`. */
+function commonDir(files: string[]): string {
+  const dirs = files.map((f) => f.split("/").slice(0, -1));
+  const first = dirs[0] ?? [];
+  const depth = dirs.reduce((n, d) => {
+    let i = 0;
+    while (i < n && d[i] === first[i]) i++;
+    return i;
+  }, first.length);
+  return first.slice(0, depth).join("/") || ".";
+}
+
+/**
+ * `actions/upload-artifact` as a node. Artifacts belong to a run, so it runs every time, never
+ * from the cache, and writes what `@actions/artifact` returned to `artifact.json`: the id, size
+ * and digest, or `{}` when nothing went up. `path` names the files: a glob is matched when the
+ * node runs, an output ref resolves to the file a dep produced, so `path: [pack.outputs.tarball]`
+ * uploads a tarball straight from the CAS. The archive is rooted at the deepest directory holding
+ * every file, as the action roots it, so one node's outputs sit at the top. An upload the service
+ * refuses fails the node, as the action fails its step; without a service, locally or in a
+ * `run:` step, nothing is uploaded and the log says so.
+ */
+export function uploadArtifact(
+  graph: Graph,
+  ports: Ports,
+  spec: UploadArtifactSpec,
+): NodeRef<string> {
+  const ifNoFilesFound = spec.ifNoFilesFound ?? "warn";
+  const roleOf = outputRefRoles(spec.name, spec.path, spec.deps ?? {});
+  const step = defineStep<
+    { kind: string; deps?: Deps },
+    string,
+    Omit<UploadArtifactSpec, "name" | "deps"> & { v: number }
+  >({
+    config: {
+      v: 1,
+      artifact: spec.artifact,
+      path: spec.path,
+      ifNoFilesFound,
+      ...(spec.overwrite !== undefined && { overwrite: spec.overwrite }),
+      ...(spec.options && { options: spec.options }),
+    },
+    cacheable: false,
+    action: (p) => async (_params, inputs, outputDir) => {
+      const files = (
+        await Promise.all(
+          spec.path.map((arg) =>
+            typeof arg === "string" ? glob([arg]) : outputPaths(arg, roleOf, inputs),
+          ),
+        )
+      ).flat();
+      const out = `${outputDir}/artifact.json`;
+      const done = async (uploaded: UploadArtifactResponse, line: string) => {
+        await p.fs.writeText(out, JSON.stringify(uploaded, null, 2));
+        await p.fs.writeText(`${outputDir}/stdout.log`, line);
+        return out;
+      };
+      if (files.length === 0) {
+        const shown = spec.path.map((a) =>
+          typeof a === "string" ? a : `${a.node}.outputs.${a.output}`,
+        );
+        const line = `No files were found with the provided path: ${shown.join(", ")}. No artifacts will be uploaded.`;
+        if (ifNoFilesFound === "error") throw new Error(line);
+        if (ifNoFilesFound === "warn") p.ci.annotate("warning", spec.name, line);
+        return done({}, line);
+      }
+      if (spec.overwrite) {
+        try {
+          await p.actionsArtifact.deleteArtifact(spec.artifact);
+        } catch (e) {
+          if (!(e instanceof Error && e.name === "ArtifactNotFoundError")) throw e;
+        }
+      }
+      const uploaded = await p.actionsArtifact.uploadArtifact(
+        spec.artifact,
+        files,
+        commonDir(files),
+        spec.options,
+      );
+      if (uploaded.id === undefined)
+        return done(uploaded, `Artifact ${spec.artifact} not uploaded: no artifact service`);
+      return done(
+        uploaded,
+        `Artifact ${spec.artifact} has been successfully uploaded! Final size is ${uploaded.size ?? 0} bytes. Artifact ID is ${uploaded.id}`,
+      );
+    },
+  });
+  return step.addNode(graph, ports, { kind: spec.name, ...(spec.deps && { deps: spec.deps }) });
 }

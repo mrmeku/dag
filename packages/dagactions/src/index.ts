@@ -7,6 +7,7 @@ export {
 export { defineStep } from "./define-step.ts";
 export { createJournal, readJournal, type Journal, type JournalEntry } from "./journal.ts";
 export type {
+  ActionsArtifact,
   ActionsCache,
   AnnotationLevel,
   Ci,
@@ -16,6 +17,12 @@ export type {
   Sh,
   ShResult,
 } from "./ports.ts";
+export {
+  artifactServiceAvailable,
+  createMemoryActionsArtifact,
+  nullActionsArtifact,
+  type MemoryActionsArtifact,
+} from "./ports/actions-artifact.ts";
 export {
   createMemoryActionsCache,
   nullActionsCache,
@@ -40,11 +47,12 @@ export {
   postNodes,
   type OutputRef,
   type PostSpec,
-  type RestoreCacheOutputs,
+  type RestoreCacheRef,
   type RestoreCacheSpec,
   type RunOutputs,
   type RunRef,
   type RunSpec,
+  type UploadArtifactSpec,
 } from "./steps.ts";
 export {
   createSteps,
