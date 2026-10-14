@@ -21,12 +21,13 @@ const NODES = [
 ];
 
 describe("reporter", () => {
-  test("live checks, groups with CAS logs, annotations, and the full summary", async () => {
+  test("live checks, groups with CAS logs, annotations, and the full summary; a tool's debug commands are not part of the log", async () => {
     const { ports, fs, rec } = createTestPorts({
       files: {
         "/cas/k1/out/stdout.log": "ok line 1\nok line 2\n",
         "/cas/k1/out/stderr.log": "warned\n",
         "/cas/k2/out/stdout.log": "from an earlier run\n",
+        "/cas/k3/out/stdout.log": "::debug::walking\n",
         "/cas/k3/out/stderr.log": "boom\n",
         "/cas/last-run.json": JSON.stringify({ durations: { a: 500, b: 2000 } }),
       },

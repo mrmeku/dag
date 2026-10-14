@@ -40,8 +40,8 @@ export interface Steps<G extends string = string> {
   ports: Ports;
   ctx: CiContext;
   glob: (...patterns: string[]) => Promise<string[]>;
-  /** One hash over the files' contents, for a cache key. */
-  hash: (...files: string[]) => Promise<string>;
+  /** The `hashFiles()` of a workflow file: one hash over the matched files' contents, for a cache key. */
+  hash: (...patterns: string[]) => Promise<string>;
   run: <O extends string = never>(spec: RunSpec<G, O> & { name: string }) => RunRef<O>;
   runAll: <K extends string>(specs: Record<K, RunSpec<G>>) => Record<K, RunRef>;
   gate: (opts: { name?: string; deps: Record<string, NodeRef> }) => NodeRef<string>;
@@ -71,7 +71,7 @@ export function createSteps<G extends string>(
     ports,
     ctx,
     glob: (...patterns) => glob(patterns),
-    hash: (...files) => hashFiles(ports, files),
+    hash: (...patterns) => hashFiles(patterns),
     run: (spec) => run(graph, ports, spec),
     runAll: (specs) => runAll(graph, ports, specs),
     gate: (opts) => gate(graph, ports, opts),

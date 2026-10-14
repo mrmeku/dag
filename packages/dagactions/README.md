@@ -70,6 +70,10 @@ npx dagactions run scripts/ci.ts [--force] [--only a,b] [--cas .dagactions/cas]
 
 `--only` runs the named nodes and their transitive dependencies, nothing else. `--force` ignores the CAS.
 
+## The toolkit underneath
+
+dagactions is the [actions toolkit](https://github.com/actions/toolkit) arranged as a graph, not a re-implementation of it. On GitHub, `@actions/core` writes the log groups, annotations and step summary, `@actions/github` supplies the context and the check runs, `@actions/cache` and `@actions/artifact` are the cache and artifact services, and `w.glob` and `w.hash` are `@actions/glob`: a pattern matches what the `path:` of `actions/cache` or `actions/upload-artifact` and the `hashFiles()` expression would match, hidden files included, and `w.hash` is `hashFiles()` byte for byte. The directories in `DEFAULT_EXCLUDES` (`config.ts`) are negated on every call. A negation filters but does not prune, so root a pattern below `node_modules`: `src/**` walks `src`, while `**` walks the whole tree, thirty seconds with a `node_modules` present. Each port is a `Pick` of the toolkit's own interface and each node's JSON output is what the toolkit returned.
+
 ## actions/cache as DAG nodes
 
 `w.restoreCache` is `actions/cache/restore` and `w.saveCache` is `actions/cache/save`, with the actions' inputs (`path`, `key`, `restoreKeys`). Each node's output file holds what `@actions/cache` returned, as JSON: `cache.json` the key restored or null, `save.json` the entry's id, -1 when nothing was saved, or null when no save was attempted. Match order, immutability, branch scope and quotas are GitHub's; see the [dependency caching reference](https://docs.github.com/en/actions/reference/workflows-and-actions/dependency-caching). Both nodes run every time. The save is a post step with the usual `if: cache-hit != 'true'` built in, and a save the service refuses is a warning, not a failure. Without a cache service, locally or in a `run:` step, every restore misses and every save is a no-op.

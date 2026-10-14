@@ -1,5 +1,6 @@
 import type { ArtifactClient } from "@actions/artifact";
 import type * as cache from "@actions/cache";
+import type { context } from "@actions/github";
 import type { DagFs } from "@mrmeku/dagraph";
 
 export interface ShResult {
@@ -42,15 +43,18 @@ export type ActionsArtifact = Pick<ArtifactClient, "uploadArtifact" | "deleteArt
 
 export type AnnotationLevel = "error" | "warning" | "notice";
 
-/** What the runner knows about the event it is running for. */
-export interface CiContext {
+/**
+ * What the runner knows about the event it is running for: the fields of `@actions/github`'s
+ * `Context` a workflow reads, plus the two the toolkit has no notion of, since it never runs
+ * anywhere but GitHub. Locally, git fills `ref`, `sha` and `actor`; the rest is `0` and `""`.
+ */
+export type CiContext = Pick<
+  typeof context,
+  "ref" | "sha" | "eventName" | "actor" | "runId" | "repo" | "serverUrl"
+> & {
   isCi: boolean;
   provider: string;
-  ref: string;
-  sha: string;
-  eventName: string;
-  actor: string;
-}
+};
 
 export type CheckConclusion = "success" | "failure" | "skipped" | "cancelled";
 

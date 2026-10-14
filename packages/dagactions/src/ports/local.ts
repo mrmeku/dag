@@ -23,6 +23,9 @@ export function createLocalCi(opts: {
       sha: await git("rev-parse", "HEAD"),
       eventName: "local",
       actor: (await git("config", "user.name")) || process.env.USER || "",
+      runId: 0,
+      repo: { owner: "", repo: "" },
+      serverUrl: "",
     }),
     group: (title, lines) => {
       write(`▶ ${title}`);
@@ -58,6 +61,9 @@ export function nullCi(): Ci {
       sha: "",
       eventName: "",
       actor: "",
+      runId: 0,
+      repo: { owner: "", repo: "" },
+      serverUrl: "",
     }),
     group: () => {},
     annotate: () => {},

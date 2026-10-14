@@ -6,7 +6,6 @@ import { DEFAULT_CAS_DIR, DEFAULT_JOURNAL_PATH, DEFAULT_SUMMARY_PATH } from "./c
 import type { ActionsArtifact, ActionsCache, Ci } from "./ports.ts";
 import { artifactServiceAvailable, nullActionsArtifact } from "./ports/actions-artifact.ts";
 import { nullActionsCache } from "./ports/actions-cache.ts";
-import { createGithubCi } from "./ports/github.ts";
 import { createLocalCi } from "./ports/local.ts";
 import { abortOnSignals, createSh, systemClock } from "./ports/real.ts";
 import { runPost, runWorkflow, type RunOptions } from "./runner.ts";
@@ -72,8 +71,9 @@ async function options(file: string, opts: CommonOptions): Promise<RunOptions> {
   const sh = createSh();
   const fs = createNodeDagFs();
   const onGithub = process.env.GITHUB_ACTIONS === "true";
+  // The GitHub adapter loads Octokit; a local run never needs it.
   const ci = onGithub
-    ? createGithubCi({ env: process.env, fs })
+    ? (await import("./ports/github.ts")).createGithubCi({ token: process.env.GITHUB_TOKEN })
     : createLocalCi({ sh, fs, summaryPath: opts.summary });
   const only = opts.only?.split(",").filter(Boolean);
   return {

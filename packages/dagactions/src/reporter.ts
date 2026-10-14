@@ -183,7 +183,9 @@ export function createReporter(
       const path = `${outputDirFor(opts.casBaseDir, actionKey)}/${file}`;
       return (await ports.fs.exists(path)) ? lines(await ports.fs.readText(path)) : [];
     };
-    const out = await read("stdout.log");
+    // A tool's own `::debug::` commands (the toolkit's globber writes one per file) are for the
+    // runner's debug mode alone; the group, the check and the summary show the log without them.
+    const out = (await read("stdout.log")).filter((l) => !l.startsWith("::debug::"));
     const err = await read("stderr.log");
     return err.length > 0 ? [...out, "── stderr ──", ...err] : out;
   };

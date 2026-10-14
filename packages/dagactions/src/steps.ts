@@ -1,28 +1,13 @@
 import type { UploadArtifactOptions, UploadArtifactResponse } from "@actions/artifact";
-import {
-  hashBytes,
-  type Graph,
-  type NodeRef,
-  type OptionalRef,
-  type Outputs,
-} from "@mrmeku/dagraph";
+import { type Graph, type NodeRef, type OptionalRef, type Outputs } from "@mrmeku/dagraph";
 import { defineStep } from "./define-step.ts";
 import type { Ports } from "./ports.ts";
 import { glob } from "./ports/glob.ts";
 
-export { glob } from "./ports/glob.ts";
+export { glob, hashFiles } from "./ports/glob.ts";
 
 type Deps = Record<string, NodeRef | OptionalRef | undefined>;
 type Inputs = Record<string, Outputs | undefined>;
-
-/* ------------------------------------------------------------------ hash */
-
-/** One hash over the given files' contents, for a cache key: `${prefix}-${await hashFiles(...)}`. */
-export async function hashFiles(ports: Ports, paths: string[]): Promise<string> {
-  const sorted = [...paths].sort();
-  const lines = await Promise.all(sorted.map(async (p) => `${p}:${await ports.fs.hashFile(p)}`));
-  return hashBytes(lines.join("\n"));
-}
 
 /* ------------------------------------------------------------------ run */
 
@@ -454,13 +439,11 @@ export function uploadArtifact(
     },
     cacheable: false,
     action: (p) => async (_params, inputs, outputDir) => {
-      const files = (
-        await Promise.all(
-          spec.path.map((arg) =>
-            typeof arg === "string" ? glob([arg]) : outputPaths(arg, roleOf, inputs),
-          ),
-        )
-      ).flat();
+      const patterns = spec.path.filter((a) => typeof a === "string");
+      const files = [
+        ...(patterns.length ? await glob(patterns) : []),
+        ...spec.path.flatMap((a) => (typeof a === "string" ? [] : outputPaths(a, roleOf, inputs))),
+      ];
       const out = `${outputDir}/artifact.json`;
       const done = async (uploaded: UploadArtifactResponse, line: string) => {
         await p.fs.writeText(out, JSON.stringify(uploaded, null, 2));

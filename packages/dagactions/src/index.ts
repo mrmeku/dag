@@ -28,7 +28,7 @@ export {
   nullActionsCache,
   type MemoryActionsCache,
 } from "./ports/actions-cache.ts";
-export { createGithubCi, escapeData, escapeProperty } from "./ports/github.ts";
+export { createGithubCi, flattenGroups } from "./ports/github.ts";
 export { createLocalCi, nullCi } from "./ports/local.ts";
 export {
   createRecordingCi,
