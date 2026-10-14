@@ -20,6 +20,24 @@ Object.assign(process.env, {
 });
 const { createGithubCi } = await import("./github.ts");
 
+/** What the toolkit writes to stdout while `f` runs, line by line. */
+const stdoutOf = (f: () => void): string[] => {
+  let out = "";
+  const write = process.stdout.write;
+  process.stdout.write = ((chunk: string | Uint8Array) => {
+    out += String(chunk);
+    return true;
+  }) as typeof process.stdout.write;
+  try {
+    f();
+  } finally {
+    process.stdout.write = write;
+  }
+  return out.split("\n").slice(0, -1);
+};
+
+const RUN_LOG = "[run log](https://github.com/acme/app/actions/runs/42)";
+
 type Call = { method: string; url: string; body: unknown };
 const recording = (calls: Call[], status: number): typeof fetch =>
   (async (url, init) => {
@@ -35,7 +53,7 @@ const recording = (calls: Call[], status: number): typeof fetch =>
   }) as typeof fetch;
 
 describe("github adapter", () => {
-  test("the context is the toolkit's; check runs target the PR head sha, update by id, carry the flattened log, and create directly when never started", async () => {
+  test("the context is the toolkit's; check runs target the PR head sha, update by id, link to the run, and create directly when never started", async () => {
     const calls: Call[] = [];
     const ci = createGithubCi({ token: "t", fetch: recording(calls, 201) });
     await ci.check({ name: "typecheck", status: "in_progress", startedAt: "T0" });
@@ -46,7 +64,6 @@ describe("github adapter", () => {
       startedAt: "T0",
       completedAt: "T1",
       summary: "done in 1.0s",
-      details: "```text\n::group::a.test.ts:\n(pass) a\n::endgroup::\n$ tsgo --noEmit\n```",
     });
     await ci.check({
       name: "gate",
@@ -90,8 +107,7 @@ describe("github adapter", () => {
               completed_at: "T1",
               output: {
                 title: "typecheck: done in 1.0s",
-                summary: "done in 1.0s",
-                text: "```text\na.test.ts:\n(pass) a\n$ tsgo --noEmit\n```",
+                summary: `done in 1.0s\n\n${RUN_LOG}`,
               },
             },
           },
@@ -106,7 +122,7 @@ describe("github adapter", () => {
               completed_at: "T2",
               output: {
                 title: "gate: dependency typecheck failed",
-                summary: "dependency typecheck failed\nmore",
+                summary: `dependency typecheck failed\nmore\n\n${RUN_LOG}`,
               },
             },
           },
@@ -121,5 +137,43 @@ describe("github adapter", () => {
     await ci.check({ name: "a", status: "in_progress", startedAt: "T0" });
     await ci.check({ name: "b", status: "in_progress", startedAt: "T1" });
     assert.equal(calls.length, 1);
+  });
+
+  test("a group's tool groups are flattened, and a stop-commands it leaves open is resumed before it ends", () => {
+    const ci = createGithubCi();
+    const out = stdoutOf(() => {
+      ci.group("✔ build (1.2s)", [
+        "line 1",
+        "::group::a.test.ts:",
+        "token",
+        "::endgroup::",
+        "::stop-commands::Never-Resumed",
+      ]);
+      ci.group("✔ quiet (0.1s)", ["::stop-commands::paused", "plain", "::PAUSED::"]);
+    });
+    assert.deepEqual(out, [
+      "::group::✔ build (1.2s)",
+      "line 1",
+      "a.test.ts:",
+      "token",
+      "::stop-commands::Never-Resumed",
+      "::Never-Resumed::",
+      "::endgroup::",
+      "::group::✔ quiet (0.1s)",
+      "::stop-commands::paused",
+      "plain",
+      "::PAUSED::",
+      "::endgroup::",
+    ]);
+  });
+
+  test("a check run's summary keeps the tail GitHub accepts, then the link to the run's log", async () => {
+    const calls: Call[] = [];
+    const ci = createGithubCi({ token: "t", fetch: recording(calls, 201) });
+    const long = `${"x".repeat(70_000)}END`;
+    await ci.check({ name: "n", status: "completed", conclusion: "failure", summary: long });
+    const { summary } = (calls[0]!.body as { output: { summary: string } }).output;
+    const [kept, link] = summary.split("\n\n");
+    assert.deepEqual([kept!.length, kept!.endsWith("END"), link], [65_000, true, RUN_LOG]);
   });
 });

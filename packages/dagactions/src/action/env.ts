@@ -52,6 +52,7 @@ export async function actionOptions(bundleUrl: string): Promise<RunOptions> {
       actionsArtifact: artifactServiceAvailable(process.env)
         ? new DefaultArtifactClient()
         : nullActionsArtifact,
+      env: process.env,
     },
     casBaseDir: core.getInput("cas") || DEFAULT_CAS_DIR,
     journalPath: core.getInput("journal") || DEFAULT_JOURNAL_PATH,

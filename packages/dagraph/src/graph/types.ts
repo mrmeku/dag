@@ -23,7 +23,12 @@ export type InputsFor<P> = P extends { deps: infer D }
     }
   : Record<string, never>;
 
-/** What the executor tells a running action: the signal fires when the execution is cancelled. */
+/**
+ * What the executor tells a running action. The signal fires when the execution is cancelled
+ * (with the execution signal's reason) or when the node's `timeoutMs` elapses (with a
+ * "TimeoutError" DOMException, as `AbortSignal.timeout` aborts). Once it fires the node cannot
+ * succeed, whatever the action returns.
+ */
 export interface ActionContext {
   signal?: AbortSignal;
 }
@@ -63,6 +68,13 @@ export interface Node {
    * work such as integration tests.
    */
   cacheable?: boolean;
+  /**
+   * How long the action may run, in ms, before its signal aborts with a "TimeoutError". Counted
+   * from the action's start: queueing, input hashing and the cache lookup do not count. A node
+   * whose timeout fired fails whatever its action returns and is never cached. Not in the action
+   * key: a deadline is a statement to the executor, not about the output.
+   */
+  timeoutMs?: number;
 }
 
 /** A Node with an executable action — the unit of work the executor actually runs. */

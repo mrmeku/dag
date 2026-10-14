@@ -127,15 +127,35 @@ w.post({
 });
 ```
 
-A post step runs every time and is never cached. A graph has no end of job, so `deps` says what the post waits for: `w.optional(tests)` is `if: always()`, and `deps: {}` is right after `main`. A failed `main` has no post.
+A post step runs every time and is never cached. A graph has no end of job, so `deps` says what the post waits for: `w.optional(tests)` is `if: always()`, and `deps: {}` is right after `main`. A failed `main` has no post. A post step the cancel lands on runs again in the post pass, so make its command safe to repeat, as `docker rm -f` is.
 
 ## How cancellation works
 
-GitHub cancels a job with SIGINT to the step, SIGTERM 7500 ms later and a tree kill 2500 ms after that, then runs every action's `post` in its own process; see [workflow cancellation](https://docs.github.com/en/actions/reference/workflows-and-actions/workflow-cancellation). dagactions does the same, on GitHub and under Ctrl-C. Nodes still waiting settle as `cancelled`, running commands get SIGINT, SIGTERM and SIGKILL in turn (grace periods in `config.ts`, sized to fit inside GitHub's window), and the process exits with 130 once they have stopped. The run journals every node as it settles, so the action's `post` entry can then run the post steps the run did not reach. Locally, `dagactions run` does that itself after Ctrl-C.
+GitHub cancels a job with SIGINT to the step, SIGTERM 7500 ms later and a tree kill 2500 ms after that, then runs every action's `post` in its own process; see [workflow cancellation](https://docs.github.com/en/actions/reference/workflows-and-actions/workflow-cancellation). dagactions does the same, on GitHub and under Ctrl-C. Nodes still waiting settle as `cancelled`, running commands get SIGINT, SIGTERM and SIGKILL in turn and settle as `cancelled` whatever they exit with (grace periods in `config.ts`, sized to fit inside GitHub's window), and the process exits with 130 once they have stopped. The run journals every node as it settles, so the action's `post` entry can then run the post steps the run did not finish: those it never reached and those the cancel landed on. Locally, `dagactions run` does that itself after Ctrl-C.
+
+## How timeouts work
+
+`timeoutMinutes` is a step's `timeout-minutes`, on `w.run`, `w.runAll` and `w.post`:
+
+```typescript
+w.run({ name: "test", cmd: ["pnpm", "test"], inputs: src, timeoutMinutes: 15 });
+```
+
+When it elapses, the command is interrupted as a cancel interrupts it, and the step fails with the runner's own message, "The action 'test' has timed out after 15 minutes.", whatever the command exits with. Its check run concludes `timed_out`. As on GitHub, a timeout is a failure, not a cancel: the run goes on, required dependents are skipped and `w.optional` ones run. A timed-out step is never cached, and the timeout is not in the cache key, so changing it re-runs nothing. A post step's clock is its own. The whole run's limit stays the job's `timeout-minutes` in the YAML, which reaches dagactions as a cancel. A process a command leaves behind holding its output, such as a server started with `&`, holds the step up for at most `STREAM_DRAIN_GRACE_MS` after the command exits.
+
+## How secrets work
+
+A command inherits the action step's environment, as a `run:` step inherits the job's, less what a `run:` step never sees: the action's inputs (`INPUT_*`), `GITHUB_TOKEN`, the runner's `ACTIONS_RUNTIME_TOKEN`, `ACTIONS_RUNTIME_URL`, `ACTIONS_CACHE_URL` and `ACTIONS_RESULTS_URL`. Put a secret in the action step's `env:` and let the command read it from there, never from `cmd` or `env`, which are in the cache key.
+
+The runner masks every secret of the job, `GITHUB_TOKEN` and its own tokens before any step runs, in the log and the step summary, and a command masks a value it makes by printing `::add-mask::<value>`, as on GitHub; a workflow body calls `core.setSecret(value)`. dagactions writes command output nowhere else: a node's log sits beside the CAS (`.dagactions/cas.logs`), never in it, so a `w.saveCache` of the CAS cannot upload it to a cache any pull request can restore, forks included; cache `.dagactions/cas`, not all of `.dagactions`. A check run links to the run's log instead of carrying it.
+
+Masking hides an accidental print; it is not a boundary against a command that means to leak. A declared output, a file under `$DAGACTIONS_OUT`, is never rewritten, as GitHub never masks artifacts or caches. If a secret ever reached a saved CAS, rotate it and delete the cache entries (`gh cache delete`): a new key does not stop a pull request from restoring an old one.
 
 ## How it reports
 
-The reporter turns the engine's event stream into GHA output: a line when a node's action starts, with its duration in the last run, and none for a cached node; one collapsible group per node that ran, emitted when the node settles so concurrent output never interleaves, with the command's stdout and stderr in the order it wrote them; one plain line per node that was skipped or cancelled; an annotation per failure; a step summary, headed `## dagactions · <workflow file>`; and one check run per node in the PR Checks tab, live. Check runs need `checks: write` and `GITHUB_TOKEN` in the step env, and are silently off without them.
+The reporter turns the engine's event stream into GHA output: a line when a node's action starts, with its duration in the last run, and none for a cached node; one collapsible group per node that ran, emitted when the node settles so concurrent output never interleaves, with the command's stdout and stderr in the order it wrote them; one plain line per node that was skipped or cancelled; an annotation per failure; a step summary, headed `## dagactions · <workflow file>`; and one check run per node in the PR Checks tab, live, linking to the run's log. Check runs need `checks: write` and `GITHUB_TOKEN` in the step env, and are silently off without them.
+
+A node's log is replayed, and the runner reads the workflow commands in it as it reads a `run:` step's. Logs never go into the cache, so on a fresh runner a cached node shows none. A `::stop-commands::` a command leaves open is resumed at the end of its group, as GitHub ends one with its step. A node the cancel interrupted shows the log it wrote before it stopped.
 
 The log ends with a recap outside any group, so it is what a failed step shows last:
 
@@ -150,7 +170,7 @@ A failure's cause is a failed node with no failed dependency: `gate` above faile
 
 ### Choosing what the summary shows
 
-The step summary is drawn by a list of renderers, top to bottom, under a `## dagactions` heading. A renderer is a function: the reporter calls it with the run's data, a `RunReport`, and it returns markdown lines; `[]` draws nothing. The report holds every node with its status, timing, previous duration, error and outputs, and `log(name)` reads a node's log back from the CAS.
+The step summary is drawn by a list of renderers, top to bottom, under a `## dagactions` heading. A renderer is a function: the reporter calls it with the run's data, a `RunReport`, and it returns markdown lines; `[]` draws nothing. The report holds every node with its status, timing, previous duration, error and outputs, and `log(name)` reads a node's log back.
 
 | renderer             | draws                                                                                                         |
 | -------------------- | ------------------------------------------------------------------------------------------------------------- |

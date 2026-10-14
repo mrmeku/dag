@@ -1,6 +1,7 @@
 import { outputDirFor, type ExecEvent, type ExecResult, type Node } from "@mrmeku/dagraph";
-import { CHECK_TEXT_LINES, LAST_RUN_FILE, LOG_FILE, STATUS_ICON } from "./config.ts";
+import { LAST_RUN_FILE, STATUS_ICON } from "./config.ts";
 import type { CheckConclusion, CheckUpdate, Ports } from "./ports.ts";
+import { logPath } from "./steps.ts";
 import {
   DEFAULT_SUMMARY_RENDERERS,
   footer,
@@ -41,6 +42,21 @@ function errorText(e: unknown): string {
   return e instanceof Error ? e.message : String(e);
 }
 
+function isTimeout(e: unknown): boolean {
+  return e instanceof Error && e.name === "TimeoutError";
+}
+
+/** A failure's message; a timeout in the words of GitHub's runner. */
+function failureText(node: Node | undefined, e: unknown): string {
+  if (!isTimeout(e) || node?.timeoutMs === undefined) return errorText(e);
+  const minutes = node.timeoutMs / 60_000;
+  const after =
+    minutes >= 1
+      ? `${+minutes.toFixed(2)} minute${minutes === 1 ? "" : "s"}`
+      : formatDuration(node.timeoutMs);
+  return `The action '${node.name}' has timed out after ${after}.`;
+}
+
 function lines(text: string): string[] {
   const t = text.trimEnd();
   return t ? t.split("\n") : [];
@@ -79,15 +95,16 @@ export function createReporter(
   };
 
   const logLines = async (actionKey: string): Promise<string[]> => {
-    const path = `${outputDirFor(opts.casBaseDir, actionKey)}/${LOG_FILE}`;
-    const all = (await ports.fs.exists(path)) ? lines(await ports.fs.readText(path)) : [];
+    const path = logPath(outputDirFor(opts.casBaseDir, actionKey));
+    if (!actionKey || !(await ports.fs.exists(path))) return [];
+    const all = lines(await ports.fs.readText(path));
     // A tool's own `::debug::` commands (the toolkit's globber writes one per file) are for the
     // runner's debug mode alone; the group, the check and the summary show the log without them.
     return all.filter((l) => !l.startsWith("::debug::"));
   };
 
-  const failureBody = async (actionKey: string, message: string): Promise<string[]> => [
-    ...(actionKey ? await logLines(actionKey) : []),
+  const failureBody = (log: string[], message: string): string[] => [
+    ...log,
     "── error ──",
     ...lines(message),
   ];
@@ -103,6 +120,7 @@ export function createReporter(
     const dur = start !== undefined ? formatDuration(end - start) : "";
     let summary: string;
     let body: string[];
+    let conclusion = CONCLUSION[ev.type];
     switch (ev.type) {
       case "done":
         body = await logLines(ev.actionKey);
@@ -115,8 +133,10 @@ export function createReporter(
         summary = "cached";
         break;
       case "fail": {
-        const message = errorText(ev.error);
-        body = await failureBody(ev.actionKey, message);
+        const message = failureText(ev.node, ev.error);
+        if (isTimeout(ev.error)) conclusion = "timed_out";
+        const log = await logLines(ev.actionKey);
+        body = failureBody(log, message);
         ports.ci.group(`${STATUS_ICON.fail} ${name} (${dur})`, body);
         ports.ci.annotate("error", name, message);
         summary = message;
@@ -129,21 +149,19 @@ export function createReporter(
         break;
       case "cancelled":
         summary = "cancelled";
-        body = [];
-        ports.ci.info(`${STATUS_ICON.cancelled} ${name}: cancelled`);
+        // A node the cancel interrupted shows what it printed before it stopped.
+        body = await logLines(ev.actionKey);
+        if (ev.actionKey) ports.ci.group(`${STATUS_ICON.cancelled} ${name} (cancelled)`, body);
+        else ports.ci.info(`${STATUS_ICON.cancelled} ${name}: cancelled`);
         break;
     }
-    // The node's log becomes the check's own page on GitHub.
-    const details =
-      body.length > 0 ? ["```text", ...body.slice(-CHECK_TEXT_LINES), "```"].join("\n") : undefined;
     queueCheck({
       name,
       status: "completed",
-      conclusion: CONCLUSION[ev.type],
+      conclusion,
       ...(start !== undefined && { startedAt: iso(start) }),
       completedAt: iso(end),
       summary,
-      ...(details && { details }),
     });
   };
 
@@ -192,17 +210,18 @@ export function createReporter(
     );
   };
 
+  const nodeOf = new Map(opts.nodes.map((n) => [n.name, n]));
   const logOf = async (r: ExecResult): Promise<string[]> => {
     switch (r.status) {
       case "done":
       case "cached":
         return logLines(r.actionKey);
       case "fail":
-        return failureBody(r.actionKey, r.error.message);
+        return failureBody(await logLines(r.actionKey), failureText(nodeOf.get(r.name), r.error));
       case "dep-failed":
         return [r.error.message];
       case "cancelled":
-        return [];
+        return logLines(r.actionKey);
     }
   };
 
@@ -223,7 +242,8 @@ export function createReporter(
           status: r.status,
           ...(t && { start: t.start, duration: t.end - t.start }),
           ...(before !== undefined && { previous: before }),
-          ...((r.status === "fail" || r.status === "dep-failed") && { error: r.error.message }),
+          ...(r.status === "fail" && { error: failureText(n, r.error) }),
+          ...(r.status === "dep-failed" && { error: r.error.message }),
           ...((r.status === "done" || r.status === "cached") && { outputs: r.outputs }),
         },
       ];

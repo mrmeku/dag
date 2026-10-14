@@ -62,6 +62,7 @@ export function createTestPorts(
     actionsCache?: MemoryActionsCache;
     actionsArtifact?: MemoryActionsArtifact;
     context?: Partial<CiContext>;
+    env?: Record<string, string | undefined>;
   } = {},
 ): {
   ports: Ports;
@@ -82,6 +83,7 @@ export function createTestPorts(
       ci: rec.ci,
       actionsCache,
       actionsArtifact,
+      env: opts.env ?? {},
     },
     fs,
     rec,

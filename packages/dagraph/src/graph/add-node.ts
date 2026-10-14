@@ -37,12 +37,14 @@ export function addNode<P extends BaseParams, R extends Outputs>({
   name,
   normalize,
   params,
+  timeoutMs,
 }: {
   graph: Graph;
   name: string;
   config: string;
   concurrencyGroup?: string;
   cacheable?: boolean;
+  timeoutMs?: number;
   params: P;
   action: ActionFunc<P, R>;
   normalize?: Normalizers<P>;
@@ -57,6 +59,7 @@ export function addNode<P extends BaseParams, R extends Outputs>({
     config,
     ...(concurrencyGroup && { concurrencyGroup }),
     ...(cacheable === false && { cacheable }),
+    ...(timeoutMs !== undefined && { timeoutMs }),
     ...(params.inputs && params.inputs.length > 0 && { inputs: params.inputs }),
     params,
     action: (rawInputs, outputDir, ctx) =>

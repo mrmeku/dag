@@ -1,15 +1,21 @@
 import { spawn } from "node:child_process";
-import { CHILD_SIGINT_GRACE_MS, CHILD_SIGTERM_GRACE_MS } from "../config.ts";
+import { CHILD_SIGINT_GRACE_MS, CHILD_SIGTERM_GRACE_MS, STREAM_DRAIN_GRACE_MS } from "../config.ts";
 import type { Clock, Sh, ShResult } from "../ports.ts";
 
 /**
  * The real shell. A cancelled command is interrupted the way GitHub's runner interrupts a step:
  * SIGINT, SIGTERM after `sigintGraceMs`, SIGKILL after `sigtermGraceMs` more. A command killed
  * by a signal resolves with code -1 and the signal's name on stderr and at the end of `output`.
+ * A process the command left behind holding its output (a server started with `&`) is cut off
+ * `streamDrainGraceMs` after the command exits, so neither it nor a killed command's orphan keeps
+ * the node running.
  */
-export function createSh(opts: { sigintGraceMs?: number; sigtermGraceMs?: number } = {}): Sh {
+export function createSh(
+  opts: { sigintGraceMs?: number; sigtermGraceMs?: number; streamDrainGraceMs?: number } = {},
+): Sh {
   const sigintGraceMs = opts.sigintGraceMs ?? CHILD_SIGINT_GRACE_MS;
   const sigtermGraceMs = opts.sigtermGraceMs ?? CHILD_SIGTERM_GRACE_MS;
+  const streamDrainGraceMs = opts.streamDrainGraceMs ?? STREAM_DRAIN_GRACE_MS;
   return {
     run: (cmd, runOpts) =>
       new Promise<ShResult>((resolve) => {
@@ -49,6 +55,14 @@ export function createSh(opts: { sigintGraceMs?: number; sigtermGraceMs?: number
         proc.on("error", (e) =>
           settle({ code: -1, stdout: "", stderr: e.message, output: e.message, ok: false }),
         );
+        proc.on("exit", () => {
+          timers.push(
+            setTimeout(() => {
+              proc.stdout.destroy();
+              proc.stderr.destroy();
+            }, streamDrainGraceMs),
+          );
+        });
         proc.on("close", (code, killedBy) => {
           const c = code ?? -1;
           const withKill = (text: string) =>

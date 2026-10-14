@@ -13,14 +13,15 @@ export interface ShResult {
 }
 
 /**
- * Runs external commands. Never throws on a non-zero exit; the caller reads `code`. When
+ * Runs external commands. Never throws on a non-zero exit; the caller reads `code`. `env` is
+ * merged over the inherited environment, and an `undefined` value removes a variable. When
  * `signal` fires the command is interrupted (SIGINT, then SIGTERM, then SIGKILL after the
  * grace periods in config.ts) and resolves with its exit status as usual.
  */
 export interface Sh {
   run: (
     cmd: string[],
-    opts?: { cwd?: string; env?: Record<string, string>; signal?: AbortSignal },
+    opts?: { cwd?: string; env?: Record<string, string | undefined>; signal?: AbortSignal },
   ) => Promise<ShResult>;
 }
 
@@ -58,7 +59,7 @@ export type CiContext = Pick<
   provider: string;
 };
 
-export type CheckConclusion = "success" | "failure" | "skipped" | "cancelled";
+export type CheckConclusion = "success" | "failure" | "skipped" | "cancelled" | "timed_out";
 
 /** One node's live status, as a provider "check" (GitHub: a check run in the PR Checks tab). */
 export interface CheckUpdate {
@@ -69,8 +70,6 @@ export interface CheckUpdate {
   completedAt?: string;
   /** One line of status, e.g. "done in 1.2s". */
   summary?: string;
-  /** Markdown body for the check's own page: the node's log. */
-  details?: string;
 }
 
 /**
@@ -96,4 +95,9 @@ export interface Ports {
   ci: Ci;
   actionsCache: ActionsCache;
   actionsArtifact: ActionsArtifact;
+  /**
+   * The environment `sh` hands its commands, which `w.secrets` reads and the run step withholds
+   * from: `process.env` with createSh.
+   */
+  env: Readonly<Record<string, string | undefined>>;
 }

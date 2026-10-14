@@ -113,9 +113,10 @@ function replay(name: string, entry: Journal[string] | undefined): ProcessNodeRe
 }
 
 /**
- * The action's `post:`: run the post steps the main run's journal shows as not reached, with
- * the rest of the graph replayed from the journal so the engine's dependency rules apply as
- * they would have. Nothing runs after an ordinary run, since every post step is journaled.
+ * The action's `post:`: run the post steps the main run's journal shows as not finished (never
+ * reached, or cancelled while they ran), with the rest of the graph replayed from the journal so
+ * the engine's dependency rules apply as they would have. Nothing runs after an ordinary run,
+ * since every post step is journaled.
  */
 export async function runPost(opts: Omit<RunOptions, "force" | "signal">): Promise<RunOutcome> {
   const { ports } = opts;

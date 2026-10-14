@@ -3,6 +3,8 @@ export {
   DEFAULT_EXCLUDES,
   DEFAULT_JOURNAL_PATH,
   DEFAULT_SUMMARY_PATH,
+  RUNNER_ENDPOINTS,
+  RUNNER_TOKENS,
 } from "./config.ts";
 export { defineStep } from "./define-step.ts";
 export { createJournal, readJournal, type Journal, type JournalEntry } from "./journal.ts";
@@ -43,6 +45,7 @@ export { runPost, runWorkflow, type RunOptions, type RunOutcome, type Workflow }
 export { selectNodes } from "./select.ts";
 export {
   hashFiles,
+  logPath,
   markPost,
   postNodes,
   type OutputRef,

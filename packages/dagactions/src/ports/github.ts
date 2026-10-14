@@ -1,6 +1,24 @@
 import * as core from "@actions/core";
 import * as github from "@actions/github";
+import { CHECK_TEXT_MAX_CHARS } from "../config.ts";
 import type { CheckUpdate, Ci } from "../ports.ts";
+
+/**
+ * The token of a `::stop-commands::` the lines leave open. On GitHub one ends with its step, and
+ * every node's log replays in this one step, so the group that opened it resumes it.
+ */
+export function openStopToken(lines: string[]): string | undefined {
+  let token: string | undefined;
+  for (const raw of lines.flatMap((l) => l.split("\r"))) {
+    // .NET's TrimStart, which the runner uses, also strips U+0085.
+    const line = raw.replace(/^[\s\u0085]+/, "");
+    const lower = line.toLowerCase();
+    if (token === undefined && lower.startsWith("::stop-commands::")) token = line.slice(17);
+    else if (token !== undefined && lower.startsWith(`::${token.toLowerCase()}::`))
+      token = undefined;
+  }
+  return token;
+}
 
 /**
  * GitHub does not nest log groups: a tool's own `::group::` inside a node's group would end the
@@ -16,7 +34,10 @@ export function flattenGroups(lines: string[]): string[] {
  * GitHub Actions adapter: `@actions/core` for log groups, annotations and the step summary,
  * `@actions/github` for the context and the check runs (needs `GITHUB_TOKEN` and `checks: write`;
  * silently off without the token, and switched off after the first API failure so a flaky API
- * can never fail the build). `fetch` is Octokit's, injectable for tests.
+ * can never fail the build). `fetch` is Octokit's, injectable for tests. A group's lines are a
+ * command's output, replayed: the runner reads its workflow commands, `::add-mask::` included,
+ * as it reads a `run:` step's. A check run carries no log, which the runner never masks there:
+ * it links to the run's. Its summary keeps the tail GitHub accepts.
  */
 export function createGithubCi(
   opts: { token?: string | undefined; fetch?: typeof fetch } = {},
@@ -26,6 +47,13 @@ export function createGithubCi(
     ? github.getOctokit(opts.token, opts.fetch && { request: { fetch: opts.fetch } })
     : undefined;
   const checkIds = new Map<string, number>();
+  // A check run the Actions token creates gets its own page as its details_url, whatever is
+  // sent, so the link to the run's log goes in the summary, which GitHub renders as markdown.
+  const runLog = `[run log](${ctx.serverUrl}/${ctx.repo.owner}/${ctx.repo.repo}/actions/runs/${ctx.runId})`;
+  const tail = (s: string) =>
+    s.length > CHECK_TEXT_MAX_CHARS
+      ? s.slice(-CHECK_TEXT_MAX_CHARS).replace(/^[\uDC00-\uDFFF]/, "")
+      : s;
   let checksOff = octokit === undefined;
   // On pull_request events GITHUB_SHA is the merge commit; check runs must target the PR head
   // to show up on the PR.
@@ -53,8 +81,7 @@ export function createGithubCi(
         ...(u.completedAt && { completed_at: u.completedAt }),
         output: {
           title: `${u.name}: ${(u.summary ?? u.conclusion ?? "").split("\n")[0]}`,
-          summary: u.summary ?? "",
-          ...(u.details && { text: flattenGroups(u.details.split("\n")).join("\n") }),
+          summary: `${tail(u.summary ?? "")}\n\n${runLog}`,
         },
       };
       const id = checkIds.get(u.name);
@@ -89,8 +116,11 @@ export function createGithubCi(
       serverUrl: ctx.serverUrl,
     }),
     group: (title, lines) => {
+      const shown = flattenGroups(lines);
+      const open = openStopToken(shown);
       core.startGroup(title);
-      for (const line of flattenGroups(lines)) core.info(line);
+      for (const line of shown) core.info(line);
+      if (open !== undefined) core.info(`::${open}::`);
       core.endGroup();
     },
     info: (line) => core.info(line),

@@ -1,13 +1,19 @@
+import { Graph } from "@mrmeku/dagraph";
 import assert from "node:assert/strict";
 import { describe, test } from "node:test";
+import { STATUS_ICON } from "./config.ts";
 import { readJournal } from "./journal.ts";
 import type { Sh } from "./ports.ts";
 import { createMemoryActionsCache } from "./ports/actions-cache.ts";
-import { createTestPorts } from "./ports/memory.ts";
+import { createTestPorts, okSh, type RecordedCi } from "./ports/memory.ts";
 import { runPost, runWorkflow } from "./runner.ts";
-import { defineWorkflow } from "./workflow.ts";
+import { createSteps, defineWorkflow } from "./workflow.ts";
 
 const CAS = "/cas";
+
+/** The lines of the first logged group whose title starts with `title`. */
+const groupLines = (log: RecordedCi["log"], title: string) =>
+  log.flatMap((e) => (typeof e !== "string" && e.title.startsWith(title) ? [e.lines] : []))[0];
 const JOURNAL = "/state/journal.json";
 
 describe("cancel, then post", () => {
@@ -105,6 +111,7 @@ describe("cancel, then post", () => {
           .map((e) => (typeof e === "string" ? e : e.title))
           .filter((t) => t.startsWith("dagactions") || t.startsWith("▷")),
         summaries: rec.summaries,
+        slowLog: groupLines(rec.log, `${STATUS_ICON.cancelled} slow`),
       },
       {
         run: {
@@ -114,7 +121,7 @@ describe("cancel, then post", () => {
             "restore:bun": "done",
             "up:db": "done",
             fast: "done",
-            slow: "fail",
+            slow: "cancelled",
             after: "cancelled",
             "save:bun": "cancelled",
             "down:db": "cancelled",
@@ -124,7 +131,7 @@ describe("cancel, then post", () => {
           "restore:bun": "done",
           "up:db": "done",
           fast: "done",
-          slow: "fail",
+          slow: "cancelled",
           after: "cancelled",
           "save:bun": "cancelled",
           "down:db": "cancelled",
@@ -140,7 +147,7 @@ describe("cancel, then post", () => {
           "▷ up:db",
           "▷ fast",
           "▷ slow",
-          "dagactions · ✖\uFE0E slow failed · built 3 · cached 0 · failed 1 · skipped 0 · cancelled 3 · wall 7.0s",
+          "dagactions · ◼\uFE0E cancelled, 4 nodes not run · built 3 · cached 0 · failed 0 · skipped 0 · cancelled 4 · wall 7.0s",
           "dagactions · post · 2 of 2 post steps owed",
           "▷ down:db",
           "▷ save:bun",
@@ -155,7 +162,7 @@ describe("cancel, then post", () => {
             "restore:bun done",
             "up:db done",
             "fast done",
-            "slow fail",
+            "slow cancelled",
             "after cancelled",
             "save:bun cancelled",
             "down:db cancelled",
@@ -163,6 +170,7 @@ describe("cancel, then post", () => {
           ].join("\n"),
           ["## dagactions · post", "", "save:bun done", "down:db done", ""].join("\n"),
         ],
+        slowLog: ["killed by SIGINT"],
       },
     );
   });
@@ -207,6 +215,166 @@ describe("progress", () => {
         "",
         "dagactions · ✔\uFE0E all 2 nodes succeeded · built 2 · cached 0 · failed 0 · skipped 0 · wall 3.0s",
       ],
+    );
+  });
+});
+
+describe("cancel during a save", () => {
+  test("a save the cancel lands on finishes in the run, and the post pass does not save again", async () => {
+    const controller = new AbortController();
+    const service = createMemoryActionsCache();
+    const { ports } = createTestPorts({ actionsCache: service });
+    let saves = 0;
+    const save = service.saveCache;
+    service.saveCache = async (paths, key) => {
+      saves++;
+      controller.abort();
+      return save(paths, key);
+    };
+    const workflow = defineWorkflow({
+      build: (w) => {
+        const cas = w.restoreCache({ name: "restore:cas", path: [".cas"], key: "cas-1" });
+        w.saveCache({ name: "save:cas", cache: cas, deps: {} });
+      },
+    }).workflow;
+    const common = { workflow, ports, casBaseDir: CAS, journalPath: JOURNAL };
+    const run = await runWorkflow({ ...common, signal: controller.signal });
+    const post = await runPost(common);
+    const status = (rs: { name: string; status: string }[]) =>
+      Object.fromEntries(rs.map((r) => [r.name, r.status]));
+    assert.deepEqual(
+      {
+        run: status(run.results),
+        post: status(post.results),
+        saves,
+        saved: [...service.entries.keys()],
+      },
+      {
+        run: { "restore:cas": "done", "save:cas": "cancelled" },
+        post: { "save:cas": "done" },
+        saves: 1,
+        saved: ["cas-1"],
+      },
+    );
+  });
+});
+
+describe("timeoutMinutes", () => {
+  test("a step that outlives its timeout fails in the runner's words with a timed_out check, whatever it exits with; it is never cached, and the timeout is not in the key", async () => {
+    const { ports, rec } = createTestPorts();
+    // `hang` runs until interrupted, then exits 0 with what it printed, as a trapped SIGINT does.
+    ports.sh = {
+      run: (cmd, opts) =>
+        cmd[0] === "hang"
+          ? new Promise((resolve) =>
+              opts!.signal!.addEventListener("abort", () =>
+                resolve({
+                  code: 0,
+                  stdout: "partial\n",
+                  stderr: "",
+                  output: "partial\n",
+                  ok: true,
+                }),
+              ),
+            )
+          : okSh.run(cmd, opts),
+    };
+    const workflow = (lintMinutes: number) =>
+      defineWorkflow({
+        build: (w) => {
+          const test = w.run({ name: "test", cmd: ["hang"], timeoutMinutes: 0.0005 });
+          w.run({ name: "lint", cmd: ["ok"], timeoutMinutes: lintMinutes });
+          w.run({ name: "report", cmd: ["ok"], deps: { test: w.optional(test) } });
+        },
+      }).workflow;
+    const common = { ports, casBaseDir: CAS, journalPath: JOURNAL };
+    const first = await runWorkflow({ ...common, workflow: workflow(10) });
+    const second = await runWorkflow({ ...common, workflow: workflow(20) });
+    const status = (rs: { name: string; status: string }[]) =>
+      Object.fromEntries(rs.map((r) => [r.name, r.status]));
+    const w = createSteps(new Graph(), ports, await ports.ci.context());
+    const rejected = [0, -1, Number.NaN, 40_000].filter((timeoutMinutes) => {
+      try {
+        w.run({ name: `t${timeoutMinutes}`, cmd: ["ok"], timeoutMinutes });
+        return false;
+      } catch (e) {
+        return e instanceof RangeError;
+      }
+    });
+    const message = "The action 'test' has timed out after 30ms.";
+    assert.deepEqual(
+      {
+        first: status(first.results),
+        second: status(second.results),
+        annotations: rec.annotations,
+        checks: rec.checks
+          .filter((c) => c.name === "test" && c.status === "completed")
+          .map((c) => [c.conclusion, c.summary]),
+        log: groupLines(rec.log, `${STATUS_ICON.fail} test`),
+        rejected,
+      },
+      {
+        first: { test: "fail", lint: "done", report: "done" },
+        second: { test: "fail", lint: "cached", report: "cached" },
+        annotations: [
+          { level: "error", title: "test", message },
+          { level: "error", title: "test", message },
+        ],
+        checks: [
+          ["timed_out", message],
+          ["timed_out", message],
+        ],
+        log: ["partial", "── error ──", message],
+        rejected: [0, -1, Number.NaN, 40_000],
+      },
+    );
+  });
+});
+
+describe("secrets", () => {
+  test("the runner's credentials and the action's inputs reach no command, and nothing a command prints lands in the CAS", async () => {
+    const env: Record<string, string> = {
+      NPM_TOKEN: "npm-s3cret",
+      GITHUB_TOKEN: "ghs-token",
+      ACTIONS_RUNTIME_TOKEN: "runtime-token",
+      INPUT_WORKFLOW: "scripts/ci.ts",
+    };
+    const { ports, fs } = createTestPorts({ env });
+    const seen: Array<Record<string, string | undefined>> = [];
+    ports.sh = {
+      run: async (_cmd, opts) => {
+        const { DAGACTIONS_OUT: _, ...rest } = opts!.env!;
+        seen.push(rest);
+        const output = "token npm-s3cret\n";
+        return { code: 0, stdout: output, stderr: "", output, ok: true };
+      },
+    };
+    const workflow = defineWorkflow({
+      build: (w) => void w.run({ name: "publish", cmd: ["publish"] }),
+    }).workflow;
+    await runWorkflow({ workflow, ports, casBaseDir: CAS, journalPath: JOURNAL });
+    assert.deepEqual(
+      {
+        seen,
+        inCas: [...fs.files]
+          .filter(([path, data]) => path.startsWith(`${CAS}/`) && String(data).includes("s3cret"))
+          .map(([path]) => path),
+      },
+      {
+        seen: [
+          Object.fromEntries(
+            [
+              "GITHUB_TOKEN",
+              "ACTIONS_RUNTIME_TOKEN",
+              "ACTIONS_RUNTIME_URL",
+              "ACTIONS_CACHE_URL",
+              "ACTIONS_RESULTS_URL",
+              "INPUT_WORKFLOW",
+            ].map((k) => [k, undefined]),
+          ),
+        ],
+        inCas: [],
+      },
     );
   });
 });

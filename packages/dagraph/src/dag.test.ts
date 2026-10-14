@@ -11,6 +11,7 @@ import {
   optional,
   validateNoCycles,
   type BaseParams,
+  type NodeRef,
   type OptionalRef,
   type RunnableNode,
 } from "./graph/index.ts";
@@ -1413,10 +1414,9 @@ describe("Graph", () => {
     expect(received).toEqual([undefined, "captions.srt"]);
   });
 
-  test("cancel: waiting nodes settle as cancelled, running ones get the signal, dependents of both never start", async () => {
+  test("cancel: waiting nodes settle as cancelled; a running one is cancelled whatever its action returns, never cached; dependents never start", async () => {
     const fs = createMemoryDagFs();
-    const g = new Graph();
-    const controller = new AbortController();
+    const cache = new MemCache();
     const seen: string[] = [];
     const action = (name: string, body: (signal?: AbortSignal) => Promise<void>) =>
       defineAction<null, { kind: string; deps?: Record<string, { name: string }> }, string>({
@@ -1427,45 +1427,200 @@ describe("Graph", () => {
           return write(fs, `${name}.txt`, name);
         },
       });
-    // `slow` runs until cancelled; `quick` finishes before the cancel and `after` depends on it.
-    const slow = action(
-      "slow",
-      (signal) =>
-        new Promise((_, reject) =>
-          signal!.addEventListener("abort", () => reject(new Error("interrupted"))),
-        ),
+    // `slow` traps the cancel and returns normally, as a command that exits 0 on SIGINT does.
+    let cancelling = true;
+    const slow = action("slow", (signal) =>
+      cancelling
+        ? new Promise((resolve) => signal!.addEventListener("abort", () => resolve()))
+        : Promise.resolve(),
     );
     const quick = action("quick", async () => {});
     const after = action("after", async () => {});
     const never = action("never", async () => {});
+    const g = new Graph();
     const slowRef = slow.addNode(g, null, { kind: "slow" });
     const quickRef = quick.addNode(g, null, { kind: "quick" });
     after.addNode(g, null, { kind: "after", deps: { quick: quickRef } });
     never.addNode(g, null, { kind: "never", deps: { slow: slowRef } });
+    const controller = new AbortController();
     const events: string[] = [];
-    const results = await execute(g, ctx(new MemCache(), fs), {
+    const results = await execute(g, ctx(cache, fs), {
       scheduler: throttledScheduler({ maxParallelism: 2 }),
       signal: controller.signal,
       onEvent: (e) => {
-        if (e.type === "settled") events.push(e.node.name);
+        if (e.type === "start" || e.type === "cancelled") events.push(`${e.type}:${e.node.name}`);
         // quick settles first; `after` is then ready, and the cancel lands before it starts.
         if (e.type === "settled" && e.node.name === "quick") controller.abort();
       },
     });
+    cancelling = false;
+    const rerun = await execute(g, ctx(cache, fs));
+    const statuses = (rs: ExecResult[]) => Object.fromEntries(rs.map((r) => [r.name, r.status]));
     expect({
       ran: seen,
-      statuses: Object.fromEntries(results.map((r) => [r.name, r.status])),
-      slowError:
-        results.find((r) => r.name === "slow")!.status === "fail" &&
-        (results.find((r) => r.name === "slow") as { error: Error }).error.message,
+      statuses: statuses(results),
+      started: results.filter((r) => r.actionKey !== "").map((r) => r.name),
+      events,
       tally: tally(results),
+      rerun: statuses(rerun),
     }).toEqual({
-      ran: ["slow", "quick"],
-      statuses: { slow: "fail", quick: "done", after: "cancelled", never: "cancelled" },
-      slowError: "interrupted",
-      tally: { done: 1, cached: 0, fail: 1, depFailed: 0, cancelled: 2 },
+      ran: ["slow", "quick", "slow", "after", "never"],
+      statuses: { slow: "cancelled", quick: "done", after: "cancelled", never: "cancelled" },
+      started: ["quick", "slow"],
+      events: ["start:slow", "start:quick", "cancelled:after", "cancelled:slow", "cancelled:never"],
+      tally: { done: 1, cached: 0, fail: 0, depFailed: 0, cancelled: 3 },
+      rerun: { quick: "cached", slow: "done", after: "done", never: "done" },
     });
-    expect(events.length).toBe(4);
+  });
+
+  test("timeoutMs: the action's signal aborts with a TimeoutError, the node fails whatever it returns and is never cached, and the timeout is not in the key", async () => {
+    const fs = createMemoryDagFs();
+    const cache = new MemCache();
+    const reasons: string[] = [];
+    const node = (name: string, timeoutMs: number, body: (signal: AbortSignal) => Promise<void>) =>
+      defineAction<null, { kind: string; deps?: Record<string, NodeRef | OptionalRef> }, string>({
+        config: "1",
+        timeoutMs,
+        action: () => async (_p, _i, _dir, ctx) => {
+          await body(ctx!.signal!);
+          return write(fs, `${name}.txt`, name);
+        },
+      });
+    // `hung` waits for its signal and then returns normally, as a test runner that exits 0 on SIGINT does.
+    const build = (quickTimeoutMs: number) => {
+      const g = new Graph();
+      const hung = node(
+        "hung",
+        20,
+        (signal) =>
+          new Promise((resolve) =>
+            signal.addEventListener("abort", () => {
+              reasons.push((signal.reason as Error).name);
+              resolve();
+            }),
+          ),
+      ).addNode(g, null, { kind: "hung" });
+      node("quick", quickTimeoutMs, async () => {}).addNode(g, null, { kind: "quick" });
+      node("needs", 1000, async () => {}).addNode(g, null, { kind: "needs", deps: { hung } });
+      node("report", 1000, async () => {}).addNode(g, null, {
+        kind: "report",
+        deps: { hung: optional(hung) },
+      });
+      return g;
+    };
+    const first = await execute(build(1000), ctx(cache, fs));
+    const second = await execute(build(5000), ctx(cache, fs));
+    const summarize = (rs: ExecResult[]) =>
+      Object.fromEntries(
+        rs.map((r) => [
+          r.name,
+          r.status === "fail" ? [r.status, r.error.name, r.error.message] : r.status,
+        ]),
+      );
+    expect({
+      first: summarize(first),
+      second: summarize(second),
+      reasons,
+      timeoutOnNode: build(1000)
+        .describe()
+        .map((n) => [n.name, n.timeoutMs]),
+    }).toEqual({
+      first: {
+        hung: ["fail", "TimeoutError", "timed out after 20 ms"],
+        quick: "done",
+        needs: "dep-failed",
+        report: "done",
+      },
+      second: {
+        hung: ["fail", "TimeoutError", "timed out after 20 ms"],
+        quick: "cached",
+        needs: "dep-failed",
+        report: "cached",
+      },
+      reasons: ["TimeoutError", "TimeoutError"],
+      timeoutOnNode: [
+        ["hung", 20],
+        ["quick", 1000],
+        ["needs", 1000],
+        ["report", 1000],
+      ],
+    });
+  });
+
+  test("timeoutMs: a cancel that lands after the node's own timeout still decides, as on GitHub", async () => {
+    const fs = createMemoryDagFs();
+    const controller = new AbortController();
+    const g = new Graph();
+    defineAction<null, { kind: string }, string>({
+      config: "1",
+      timeoutMs: 10,
+      action: () => async (_p, _i, _dir, ctx) => {
+        await new Promise((resolve) => ctx!.signal!.addEventListener("abort", resolve));
+        controller.abort();
+        return write(fs, "late.txt", "late");
+      },
+    }).addNode(g, null, { kind: "late" });
+    const events: string[] = [];
+    const [result] = await execute(g, ctx(new MemCache(), fs), {
+      signal: controller.signal,
+      onEvent: (e) => void (e.type !== "settled" && events.push(e.type)),
+    });
+    expect({ status: result!.status, started: result!.actionKey !== "", events }).toEqual({
+      status: "cancelled",
+      started: true,
+      events: ["dispatch", "start", "cancelled"],
+    });
+  });
+
+  test("a cancel that lands while the node's output directory is made holds the action back", async () => {
+    const controller = new AbortController();
+    const fs = createMemoryDagFs();
+    const slowMkdir: DagFs = {
+      ...fs,
+      ensureDir: async (path) => {
+        controller.abort();
+        await fs.ensureDir(path);
+      },
+    };
+    const g = new Graph();
+    let ran = false;
+    defineAction<null, { kind: string }, string>({
+      config: "1",
+      action: () => async () => {
+        ran = true;
+        return write(fs, "x.txt", "x");
+      },
+    }).addNode(g, null, { kind: "x" });
+    const results = await execute(g, ctx(new MemCache(), slowMkdir), { signal: controller.signal });
+    expect({ ran, results }).toEqual({
+      ran: false,
+      results: [{ name: "x", actionKey: "", status: "cancelled" }],
+    });
+  });
+
+  test("timeoutMs must be a whole number of ms that setTimeout honors", () => {
+    const add = (timeoutMs: number) => () =>
+      new Graph().add({
+        name: "n",
+        kind: "n",
+        deps: [],
+        config: "1",
+        timeoutMs,
+        params: p("n"),
+        action: async () => "n",
+      });
+    const rejected = [0, -1, 1.5, Number.NaN, Infinity, 2 ** 31].filter((t) => {
+      try {
+        add(t)();
+        return false;
+      } catch (e) {
+        return e instanceof RangeError;
+      }
+    });
+    expect({ rejected, accepted: [add(1)(), add(2 ** 31 - 1)()] }).toEqual({
+      rejected: [0, -1, 1.5, Number.NaN, Infinity, 2 ** 31],
+      accepted: ["n", "n"],
+    });
   });
 
   describe("cycle prevention", () => {

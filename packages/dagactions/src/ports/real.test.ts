@@ -67,3 +67,37 @@ describe("createSh output", () => {
     );
   });
 });
+
+describe("createSh with a process left behind", () => {
+  test("a command that exits while a background process holds its output settles after the drain grace, with what it printed", async () => {
+    const sh = createSh({ streamDrainGraceMs: 200 });
+    const started = Date.now();
+    const r = await sh.run(["sh", "-c", "sleep 30 & echo $!"]);
+    const elapsed = Date.now() - started;
+    process.kill(Number(r.stdout.trim()));
+    assert.deepEqual(
+      {
+        ok: r.ok,
+        code: r.code,
+        printedPid: /^\d+\n$/.test(r.stdout),
+        settledEarly: elapsed < 5000,
+      },
+      { ok: true, code: 0, printedPid: true, settledEarly: true },
+    );
+  });
+});
+
+describe("createSh env", () => {
+  test("an undefined value removes an inherited variable; a string sets one", async () => {
+    process.env.DAGACTIONS_TEST_INHERITED = "inherited";
+    try {
+      const r = await createSh().run(
+        ["sh", "-c", 'echo "${DAGACTIONS_TEST_INHERITED-unset} ${DAGACTIONS_TEST_SET-unset}"'],
+        { env: { DAGACTIONS_TEST_INHERITED: undefined, DAGACTIONS_TEST_SET: "set" } },
+      );
+      assert.equal(r.stdout, "unset set\n");
+    } finally {
+      delete process.env.DAGACTIONS_TEST_INHERITED;
+    }
+  });
+});

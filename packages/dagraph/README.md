@@ -76,6 +76,23 @@ A fingerprint that captures exactly what the action reads is as sound as the con
 - `force` re-runs the selected nodes even when they are cached. Their dependents re-run only if the output actually changed.
 - `cacheOnly` runs none of the selected nodes: one without a verified cache entry fails with `NOT_CACHED` and its dependents dep-fail. With a predicate that exempts cheap "check" nodes, this reports the cache's state and validates cached results without doing any real work.
 
+## Timeouts and cancellation
+
+An action receives an `AbortSignal` in its context. It fires when the execution's `signal` is aborted, or when the node's `timeoutMs` elapses, counted from the action's start:
+
+```typescript
+const transcribe = defineAction<Ctx, TranscribeParams, string>({
+  config: "whisper-v1",
+  timeoutMs: 15 * 60_000,
+  action:
+    (ctx) =>
+    async (_params, inputs, outputDir, { signal } = {}) =>
+      ctx.whisper.transcribe(inputs.download.audio, outputDir, { signal }),
+});
+```
+
+Once the signal has fired, what the action returns no longer decides, as on GitHub's runner: a process that traps the interrupt and exits 0 has still not finished its work. A node the execution's signal interrupts settles as `cancelled`; one whose own timeout fired fails with an error named `TimeoutError`; if both fired, the cancel decides. Neither is cached. Nodes still waiting when the execution is cancelled settle as `cancelled` without starting. The engine never abandons a running action, so an action that ignores its signal still holds its slot until it returns. The timeout is not in the action key, and a whole-execution deadline is `execute(graph, ctx, { signal: AbortSignal.timeout(ms) })`.
+
 ## What belongs in the engine
 
 The engine stays small by a single test: if a node could do it, add a node. A node has a name, a config, dependencies, an action and outputs. Anything you can express with those does not need a new concept in the engine, however natural it would be to give it one.

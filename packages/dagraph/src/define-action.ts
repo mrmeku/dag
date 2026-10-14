@@ -50,6 +50,8 @@ export function defineAction<Ctx, P extends BaseParams, R extends Outputs, C = s
   concurrencyGroup?: string;
   /** `false` runs the node every time; see `Node.cacheable`. */
   cacheable?: boolean;
+  /** How long the action may run before its signal aborts; see `Node.timeoutMs`. Not in the key. */
+  timeoutMs?: number;
   action: (ctx: Ctx, config: C) => ActionFunc<P, R>;
   /** Fingerprints for deps this action reads only part of; see `Node.normalize`. */
   normalize?: (ctx: Ctx) => Normalizers<P>;
@@ -64,6 +66,7 @@ export function defineAction<Ctx, P extends BaseParams, R extends Outputs, C = s
         config: configStr,
         ...(spec.concurrencyGroup && { concurrencyGroup: spec.concurrencyGroup }),
         ...(spec.cacheable === false && { cacheable: false }),
+        ...(spec.timeoutMs !== undefined && { timeoutMs: spec.timeoutMs }),
         params,
         action: spec.action(ctx, spec.config),
         ...(spec.normalize && { normalize: spec.normalize(ctx) }),

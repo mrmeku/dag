@@ -1,6 +1,6 @@
 import type { UploadArtifactOptions, UploadArtifactResponse } from "@actions/artifact";
 import { type Graph, type NodeRef, type OptionalRef, type Outputs } from "@mrmeku/dagraph";
-import { LOG_FILE } from "./config.ts";
+import { ACTION_INPUT_ENV, RUNNER_ENDPOINTS, RUNNER_TOKENS } from "./config.ts";
 import { defineStep } from "./define-step.ts";
 import type { Ports } from "./ports.ts";
 import { glob } from "./ports/glob.ts";
@@ -9,6 +9,16 @@ export { glob, hashFiles } from "./ports/glob.ts";
 
 type Deps = Record<string, NodeRef | OptionalRef | undefined>;
 type Inputs = Record<string, Outputs | undefined>;
+
+/* ------------------------------------------------------------------ logs */
+
+/**
+ * Where a step stores its log, stdout and stderr as they arrived, for the reporter: beside the
+ * CAS, never in it, since the CAS goes into a cache any pull request can restore and nothing
+ * masks what a command printed. `/cas/<key>/out` keeps it in `/cas.logs/<key>.log`.
+ */
+export const logPath = (outputDir: string): string =>
+  outputDir.replace(/\/([^/]+)\/out$/, ".logs/$1.log");
 
 /* ------------------------------------------------------------------ run */
 
@@ -69,6 +79,9 @@ function outputPaths(ref: OutputRef, roleOf: Record<string, string>, inputs: Inp
   return [path].flat();
 }
 
+/** The longest timeout setTimeout can keep: 2^31 - 1 ms. */
+const MAX_TIMEOUT_MINUTES = 35_791;
+
 /**
  * Everything a run node needs except its name. `G` is the set of concurrency groups the
  * workflow's limits declare; the facade from defineWorkflow narrows it so a misspelled group,
@@ -78,7 +91,11 @@ export interface RunSpec<G extends string = string, O extends string = never> {
   /** The command and its arguments, no shell. `$DAGACTIONS_OUT` is the output directory; an `OutputRef` is the path it names. */
   cmd: Arg[];
   cwd?: string;
-  /** Variables for the command, in the cache key like the command itself: secrets stay in the process environment. */
+  /**
+   * Variables for the command, in the cache key like the command itself, merged over what it
+   * inherits: the step's environment, less the action's inputs and the runner's credentials.
+   * Secrets stay in the inherited environment, out of the key.
+   */
   env?: Record<string, Arg>;
   /**
    * Files the command writes under `$DAGACTIONS_OUT`, by role: `{ tarball: "pkg-1.0.0.tgz" }`. Each
@@ -90,6 +107,12 @@ export interface RunSpec<G extends string = string, O extends string = never> {
   /** Upstream nodes the command needs. Ordering lives here, nowhere else. */
   deps?: Deps;
   group?: G;
+  /**
+   * GitHub's `timeout-minutes` for the step. When it elapses the command is interrupted as a
+   * cancel interrupts it, and the step fails ("The action 'test' has timed out after 15 minutes.")
+   * whatever the command exits with. Fractions are allowed. Unset is no limit. Not in the cache key.
+   */
+  timeoutMinutes?: number;
   /** `false` for nondeterministic commands (integration tests): run every time, never cache. */
   cacheable?: boolean;
   /** Anything else the result depends on that no file captures, such as the tool's version. */
@@ -117,6 +140,11 @@ export function run<O extends string = never>(
   ports: Ports,
   opts: RunSpec<string, O> & { name: string },
 ): RunRef<O> {
+  const minutes = opts.timeoutMinutes;
+  if (minutes !== undefined && !(minutes > 0 && minutes <= MAX_TIMEOUT_MINUTES))
+    throw new RangeError(
+      `${opts.name}: timeoutMinutes must be more than 0 and at most ${MAX_TIMEOUT_MINUTES}, got ${minutes}`,
+    );
   const normalize = opts.normalize;
   const declared = opts.outputs ?? ({} as Record<O, string>);
   const roleOf = outputRefRoles(
@@ -135,22 +163,26 @@ export function run<O extends string = never>(
     },
     ...(opts.group && { concurrencyGroup: opts.group }),
     ...(opts.cacheable === false && { cacheable: false }),
+    ...(minutes !== undefined && { timeoutMs: Math.max(1, Math.round(minutes * 60_000)) }),
     ...(normalize && { normalize: () => normalize }),
     action: (p) => async (_params, inputs, outputDir, ctx) => {
       const resolve = (arg: Arg): string =>
         typeof arg === "string"
           ? arg.replace(/\$DAGACTIONS_OUT\b/g, outputDir)
           : outputPaths(arg, roleOf, inputs).join(":");
-      const env = Object.fromEntries(
-        Object.entries(opts.env ?? {}).map(([k, v]) => [k, resolve(v)]),
-      );
+      const withheld = [
+        ...RUNNER_TOKENS,
+        ...RUNNER_ENDPOINTS,
+        ...Object.keys(p.env).filter((k) => ACTION_INPUT_ENV.test(k)),
+      ].map((k) => [k, undefined]);
+      const env = Object.entries(opts.env ?? {}).map(([k, v]) => [k, resolve(v)]);
       const argv = opts.cmd.map(resolve);
       const r = await p.sh.run(argv, {
         ...(opts.cwd && { cwd: opts.cwd }),
-        env: { ...env, DAGACTIONS_OUT: outputDir },
+        env: { ...Object.fromEntries([...withheld, ...env]), DAGACTIONS_OUT: outputDir },
         ...(ctx?.signal && { signal: ctx.signal }),
       });
-      await p.fs.writeText(`${outputDir}/${LOG_FILE}`, r.output);
+      await p.fs.writeText(logPath(outputDir), r.output);
       const result = `${outputDir}/result.json`;
       await p.fs.writeText(
         result,
@@ -234,18 +266,19 @@ export function gate(
 
 /* ------------------------------------------------------------------ post */
 
-const POSTS = new WeakMap<Graph, Set<string>>();
+// On the graph's node map, which every subgraph view of it shares.
+const POSTS = new WeakMap<ReadonlyMap<string, unknown>, Set<string>>();
 
 /** Register a node as a post step: `dagactions post` runs it when a cancelled run did not. */
 export function markPost(graph: Graph, ref: NodeRef): void {
-  let names = POSTS.get(graph);
-  if (!names) POSTS.set(graph, (names = new Set()));
+  let names = POSTS.get(graph.getNodes());
+  if (!names) POSTS.set(graph.getNodes(), (names = new Set()));
   names.add(ref.name);
 }
 
 /** The names of the graph's post steps. */
 export function postNodes(graph: Graph): string[] {
-  return [...(POSTS.get(graph) ?? [])];
+  return [...(POSTS.get(graph.getNodes()) ?? [])];
 }
 
 /** A post step is a run step with a `main`; it runs every time, so it is never cacheable. */
@@ -309,7 +342,7 @@ export function restoreCache(graph: Graph, ports: Ports, spec: RestoreCacheSpec)
         const out = `${outputDir}/cache.json`;
         await p.fs.writeText(out, JSON.stringify(matched ?? null));
         await p.fs.writeText(
-          `${outputDir}/${LOG_FILE}`,
+          logPath(outputDir),
           matched
             ? `Cache restored from key: ${matched}`
             : `Cache not found for input keys: ${[spec.key, ...restoreKeys].join(", ")}`,
@@ -348,12 +381,17 @@ export function saveCache(
       const out = `${outputDir}/save.json`;
       const done = async (id: number | null, line: string) => {
         await p.fs.writeText(out, JSON.stringify(id));
-        await p.fs.writeText(`${outputDir}/${LOG_FILE}`, line);
+        await p.fs.writeText(logPath(outputDir), line);
         return out;
       };
       if (matched === key) {
         return done(null, `Cache hit occurred on the primary key ${key}, not saving cache.`);
       }
+      // The post pass runs a save the cancel landed on in this same directory; one that finished is not repeated.
+      const prior = (await p.fs.exists(out))
+        ? (JSON.parse(await p.fs.readText(out)) as number | null)
+        : null;
+      if (prior !== null && prior >= 0) return done(prior, `Cache saved with key: ${key}`);
       let id: number;
       try {
         id = await p.actionsCache.saveCache(path, key);
@@ -447,7 +485,7 @@ export function uploadArtifact(
       const out = `${outputDir}/artifact.json`;
       const done = async (uploaded: UploadArtifactResponse, line: string) => {
         await p.fs.writeText(out, JSON.stringify(uploaded, null, 2));
-        await p.fs.writeText(`${outputDir}/${LOG_FILE}`, line);
+        await p.fs.writeText(logPath(outputDir), line);
         return out;
       };
       if (files.length === 0) {

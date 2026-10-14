@@ -1,6 +1,9 @@
 import { validateNoCycles } from "./topology.ts";
 import type { AnalysisResult, Node, RunnableNode } from "./types.ts";
 
+/** The longest delay setTimeout honors; a longer one fires at once. */
+const MAX_TIMEOUT_MS = 2_147_483_647;
+
 /**
  * Mutable DAG container. Nodes are added incrementally via add() and namespaced via subgraph().
  * The graph validates deps exist on add but defers cycle detection to analyze()/execute().
@@ -15,7 +18,7 @@ export class Graph {
   }
 
   /**
-   * Register a node in the graph. Validates no duplicate names and that all deps exist.
+   * Register a node in the graph. Validates no duplicate names, that all deps exist, and the timeout.
    * Returns the fully-qualified name (including scope prefix).
    */
   add(def: RunnableNode): string {
@@ -44,6 +47,12 @@ export class Graph {
         `Duplicate node name "${name}". A node with this name already exists.\n` +
           `  Hint: This may be a conflict between a subgraph node (via graph.subgraph("${scope}"))\n` +
           `  and a manually-named node. Check for hardcoded names that match the scope:kind pattern.`,
+      );
+    }
+    const t = prefixed.timeoutMs;
+    if (t !== undefined && !(Number.isInteger(t) && t > 0 && t <= MAX_TIMEOUT_MS)) {
+      throw new RangeError(
+        `node "${name}": timeoutMs must be a whole number of ms from 1 to ${MAX_TIMEOUT_MS}, got ${t}`,
       );
     }
     for (const d of prefixed.deps) {

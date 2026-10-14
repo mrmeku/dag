@@ -148,7 +148,7 @@ export class ExecState {
         this.failed.add(event.node.name);
         this.execResults.set(event.node.name, {
           name: event.node.name,
-          actionKey: "",
+          actionKey: event.actionKey,
           status: "cancelled",
         });
         return;
@@ -210,14 +210,16 @@ export class ExecState {
             type: "fail",
             node,
             actionKey: result.actionKey,
-            error: new Error(result.error),
+            error: result.timedOut
+              ? Object.assign(new Error(result.error), { name: "TimeoutError" })
+              : new Error(result.error),
             elapsed: result.elapsed,
           },
         ];
       case "dep-failed":
         return [{ type: "dep-failed", node, error: new Error(result.error) }];
       case "cancelled":
-        return [{ type: "cancelled", node }];
+        return [{ type: "cancelled", node, actionKey: result.actionKey }];
     }
   }
 }

@@ -4,9 +4,13 @@ import type { Node, Outputs } from "./graph/index.ts";
 export type ExecResult = { name: string; actionKey: string } & (
   | { status: "done"; outputs: Outputs; contentHash: string }
   | { status: "cached"; outputs: Outputs; contentHash: string }
+  /** A node whose `timeoutMs` elapsed fails with an error named "TimeoutError". */
   | { status: "fail"; error: Error }
   | { status: "dep-failed"; error: Error }
-  /** Never started: the execution was cancelled while the node was waiting to run. */
+  /**
+   * The execution was cancelled before the node finished: while it waited (`actionKey` is "")
+   * or while its action ran. Either way it produced nothing and nothing was cached.
+   */
   | { status: "cancelled" }
 );
 
@@ -34,8 +38,9 @@ export type ProcessNodeResult = ProcessNodeResultBase &
   (
     | { status: "done"; outputs: Outputs; contentHash: string; elapsed: number }
     | { status: "cached"; outputs: Outputs; contentHash: string }
-    | { status: "fail"; error: string; elapsed: number }
+    | { status: "fail"; error: string; elapsed: number; timedOut?: true }
     | { status: "dep-failed"; error: string }
+    /** `actionKey` is "" when the action never started. */
     | { status: "cancelled" }
   );
 
@@ -57,4 +62,5 @@ export type ExecEvent =
     }
   | { type: "fail"; node: Node; actionKey: string; error: unknown; elapsed: number }
   | { type: "dep-failed"; node: Node; error: unknown }
-  | { type: "cancelled"; node: Node };
+  /** `actionKey` is "" when the node never started. */
+  | { type: "cancelled"; node: Node; actionKey: string };

@@ -1,6 +1,7 @@
 import type { ExecEvent, ExecResult, Node } from "@mrmeku/dagraph";
 import assert from "node:assert/strict";
 import { describe, test } from "node:test";
+import { STATUS_ICON } from "./config.ts";
 import { createTestPorts, steppingClock } from "./ports/memory.ts";
 import { createReporter } from "./reporter.ts";
 import {
@@ -54,9 +55,9 @@ const RESULTS: ExecResult[] = [
 async function play(summary?: readonly SummaryRenderer[]) {
   const { ports, fs, rec } = createTestPorts({
     files: {
-      "/cas/k1/out/output.log": "ok line 1\nwarned\nok line 2\n",
-      "/cas/k2/out/output.log": "from an earlier run\n",
-      "/cas/k3/out/output.log": "::debug::walking\nboom\n",
+      "/cas.logs/k1.log": "ok line 1\nwarned\nok line 2\n",
+      "/cas.logs/k2.log": "from an earlier run\n",
+      "/cas.logs/k3.log": "::debug::walking\nboom\n",
       "/cas/last-run.json": JSON.stringify({ durations: { a: 500, b: 2000, c: 3000 } }),
     },
     clock: steppingClock(1_000_000, 1000),
@@ -79,6 +80,51 @@ const CLASSDEFS = [
 ];
 
 describe("reporter", () => {
+  test("a timeout of a minute or more reads in minutes with a timed_out check", async () => {
+    const { ports, rec } = createTestPorts({
+      files: { "/cas.logs/k2.log": "partial\n" },
+    });
+    const slow = { ...node("slow", "test"), timeoutMs: 900_000 };
+    const half = { ...node("half", "test"), timeoutMs: 90_000 };
+    const reporter = createReporter(ports, { casBaseDir: CAS, nodes: [slow, half] });
+    const timedOut = () => Object.assign(new Error("timed out"), { name: "TimeoutError" });
+    const events: ExecEvent[] = [
+      { type: "dispatch", node: slow },
+      { type: "fail", node: slow, actionKey: "k2", error: timedOut(), elapsed: 1 },
+      { type: "dispatch", node: half },
+      { type: "fail", node: half, actionKey: "", error: timedOut(), elapsed: 1 },
+    ];
+    for (const ev of events) reporter.onEvent(ev);
+    await reporter.finish([
+      { name: "slow", actionKey: "k2", status: "fail", error: timedOut() },
+      { name: "half", actionKey: "", status: "fail", error: timedOut() },
+    ]);
+    assert.deepEqual(
+      {
+        groups: rec.log.filter((e) => typeof e !== "string"),
+        conclusions: rec.checks
+          .filter((c) => c.status === "completed")
+          .map((c) => [c.name, c.conclusion]),
+      },
+      {
+        groups: [
+          {
+            title: `${STATUS_ICON.fail} slow (1.0s)`,
+            lines: ["partial", "── error ──", "The action 'slow' has timed out after 15 minutes."],
+          },
+          {
+            title: `${STATUS_ICON.fail} half (1.0s)`,
+            lines: ["── error ──", "The action 'half' has timed out after 1.5 minutes."],
+          },
+        ],
+        conclusions: [
+          ["slow", "timed_out"],
+          ["half", "timed_out"],
+        ],
+      },
+    );
+  });
+
   test("start lines, live checks, groups with CAS logs, plain lines for what did not run, annotations, the default summary and the closing recap; a cached node never starts, last-run.json is read only once a node settles, and a tool's debug commands are not part of the log", async () => {
     const { fs, rec, failed, markdown } = await play();
 
@@ -115,7 +161,6 @@ describe("reporter", () => {
             startedAt: "1970-01-01T00:16:40.000Z",
             completedAt: "1970-01-01T00:16:41.000Z",
             summary: "done in 1.0s",
-            details: "```text\nok line 1\nwarned\nok line 2\n```",
           },
           {
             name: "b",
@@ -124,7 +169,6 @@ describe("reporter", () => {
             startedAt: "1970-01-01T00:16:42.000Z",
             completedAt: "1970-01-01T00:16:43.000Z",
             summary: "cached",
-            details: "```text\nfrom an earlier run\n```",
           },
           {
             name: "c",
@@ -133,7 +177,6 @@ describe("reporter", () => {
             startedAt: "1970-01-01T00:16:44.000Z",
             completedAt: "1970-01-01T00:16:45.000Z",
             summary: "exit 1\nlast line",
-            details: "```text\nboom\n── error ──\nexit 1\nlast line\n```",
           },
           {
             name: "d",

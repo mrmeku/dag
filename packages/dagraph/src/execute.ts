@@ -35,8 +35,9 @@ export interface ExecuteOptions {
   scheduler?: Scheduler;
   /**
    * Cancels the execution: nodes still waiting settle as `cancelled` and nothing new starts.
-   * Nodes already running get the signal through their action context and settle as they do.
-   * The returned results are complete either way.
+   * Nodes already running get the signal through their action context and settle as
+   * `cancelled` whatever their action returns; nothing they produce is cached. The returned
+   * results are complete either way.
    */
   signal?: AbortSignal;
 }
@@ -47,7 +48,7 @@ const selects = (sw: NodeSwitch | undefined, node: Node) =>
 /**
  * Run an entire DAG to completion. This is the primary entry point for dagraph — call it with a
  * built Graph, an ExecutionContext (cache + fs), and optional scheduling overrides. Returns
- * per-node results (done, cached, fail, dep-failed).
+ * per-node results (done, cached, fail, dep-failed, cancelled).
  */
 export async function execute(
   graph: Graph,

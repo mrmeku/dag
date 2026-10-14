@@ -86,6 +86,7 @@ async function options(file: string, opts: CommonOptions): Promise<RunOptions> {
       ci,
       actionsCache: await pickActionsCache(onGithub, ci),
       actionsArtifact: await pickActionsArtifact(onGithub, ci),
+      env: process.env,
     },
     casBaseDir: opts.cas,
     journalPath: opts.journal,

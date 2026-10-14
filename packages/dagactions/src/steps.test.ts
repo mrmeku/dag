@@ -7,6 +7,7 @@ import { createMemoryActionsCache } from "./ports/actions-cache.ts";
 import { createTestPorts } from "./ports/memory.ts";
 import {
   gate,
+  logPath,
   post,
   postNodes,
   restoreCache,
@@ -51,7 +52,7 @@ describe("runAll + gate", () => {
       {
         good: goodResult.status === "done" && {
           outputs: goodResult.outputs,
-          log: await p.fs.readText(`${CAS}/${goodKey}/out/output.log`),
+          log: await p.fs.readText(`${CAS}.logs/${goodKey}.log`),
           result: JSON.parse(await p.fs.readText(`${CAS}/${goodKey}/out/result.json`)),
         },
         bad: badResult.status === "fail" && badResult.error.message,
@@ -105,7 +106,7 @@ describe("restoreCache + saveCache", () => {
       return r.status === "done" ? JSON.parse(await fs.readText(r.outputs as string)) : r.status;
     };
     const log = async (name: string) =>
-      fs.readText(`${CAS}/${byName.get(name)!.actionKey}/out/output.log`);
+      fs.readText(`${CAS}.logs/${byName.get(name)!.actionKey}.log`);
 
     assert.deepEqual(
       {
@@ -256,7 +257,7 @@ describe("uploadArtifact", () => {
     assert.deepEqual(
       {
         outputs: Object.fromEntries(await Promise.all(names.map(async (n) => [n, await json(n)]))),
-        log: await fs.readText(`${out("upload:tarball")}/output.log`),
+        log: await fs.readText(logPath(out("upload:tarball"))),
         warnings: rec.annotations,
         uploads: [...service.uploads],
         config: JSON.parse(graph.describe().find((n) => n.name === "upload:tarball")!.config),
@@ -307,11 +308,13 @@ describe("uploadArtifact", () => {
 
 describe("declared outputs", () => {
   test("a declared file under $DAGACTIONS_OUT is an output, a consumer names it as outputs.<key> in an argument or env, a dep it did not declare is refused, and a missing file fails", async () => {
-    const seen: Array<{ cmd: string[]; env: Record<string, string> | undefined }> = [];
+    const seen: Array<{ cmd: string[]; env: Record<string, string | undefined> | undefined }> = [];
     const { ports: p, fs } = createTestPorts({
       sh: {
         run: async (cmd, opts) => {
-          seen.push({ cmd, env: opts?.env });
+          // What reaches the command; the names it withholds are the secrets test's business.
+          const env = Object.entries(opts?.env ?? {}).filter(([, v]) => v !== undefined);
+          seen.push({ cmd, env: Object.fromEntries(env) });
           if (cmd[0] === "pack")
             await fs.writeText(`${opts!.env!["DAGACTIONS_OUT"]}/pkg.tgz`, "bytes");
           return { code: 0, stdout: "", stderr: "", output: "", ok: true };
