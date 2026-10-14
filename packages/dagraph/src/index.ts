@@ -29,7 +29,7 @@ export type {
   Outputs,
   RunnableNode,
 } from "./graph/index.ts";
-export { mermaidBody, scopeOf, type MermaidOptions } from "./mermaid.ts";
+export { mermaidBody, mermaidQuote, scopeOf, type MermaidOptions } from "./mermaid.ts";
 export { orchestrate, type RunNode, type Scheduler } from "./orchestrate.ts";
 export { createMemoryDagFs, type MemoryDagFs } from "./ports/memory-fs.ts";
 export { outputDirFor } from "./process-node.ts";

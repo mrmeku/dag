@@ -1,5 +1,6 @@
 import type { UploadArtifactOptions, UploadArtifactResponse } from "@actions/artifact";
 import { type Graph, type NodeRef, type OptionalRef, type Outputs } from "@mrmeku/dagraph";
+import { LOG_FILE } from "./config.ts";
 import { defineStep } from "./define-step.ts";
 import type { Ports } from "./ports.ts";
 import { glob } from "./ports/glob.ts";
@@ -103,8 +104,8 @@ export interface RunSpec<G extends string = string, O extends string = never> {
 
 /**
  * The generic step: run a command; a non-zero exit fails the node. Its outputs are `result.json`
- * (command, cwd, exit code) and the files it declared under `$DAGACTIONS_OUT`. The logs are written
- * beside them for the reporter but are not outputs, so a timing line never re-keys a consumer.
+ * (command, cwd, exit code) and the files it declared under `$DAGACTIONS_OUT`. The log is written
+ * beside them for the reporter but is not an output, so a timing line never re-keys a consumer.
  * The command and `env` are in the cache key; the files it reads come in through `inputs`,
  * upstream results through `deps`. A dep's output is named where the command takes it,
  * `["npm", "publish", pack.outputs.tarball]` or `env: { TARBALL: pack.outputs.tarball }`, and
@@ -125,7 +126,7 @@ export function run<O extends string = never>(
   );
   const step = defineStep<RunParams, RunOutputs<O>, RunConfig>({
     config: {
-      v: 4,
+      v: 5,
       cmd: opts.cmd,
       cwd: opts.cwd ?? "",
       ...(opts.env && { env: opts.env }),
@@ -149,8 +150,7 @@ export function run<O extends string = never>(
         env: { ...env, DAGACTIONS_OUT: outputDir },
         ...(ctx?.signal && { signal: ctx.signal }),
       });
-      await p.fs.writeText(`${outputDir}/stdout.log`, r.stdout);
-      await p.fs.writeText(`${outputDir}/stderr.log`, r.stderr);
+      await p.fs.writeText(`${outputDir}/${LOG_FILE}`, r.output);
       const result = `${outputDir}/result.json`;
       await p.fs.writeText(
         result,
@@ -309,7 +309,7 @@ export function restoreCache(graph: Graph, ports: Ports, spec: RestoreCacheSpec)
         const out = `${outputDir}/cache.json`;
         await p.fs.writeText(out, JSON.stringify(matched ?? null));
         await p.fs.writeText(
-          `${outputDir}/stdout.log`,
+          `${outputDir}/${LOG_FILE}`,
           matched
             ? `Cache restored from key: ${matched}`
             : `Cache not found for input keys: ${[spec.key, ...restoreKeys].join(", ")}`,
@@ -348,7 +348,7 @@ export function saveCache(
       const out = `${outputDir}/save.json`;
       const done = async (id: number | null, line: string) => {
         await p.fs.writeText(out, JSON.stringify(id));
-        await p.fs.writeText(`${outputDir}/stdout.log`, line);
+        await p.fs.writeText(`${outputDir}/${LOG_FILE}`, line);
         return out;
       };
       if (matched === key) {
@@ -447,7 +447,7 @@ export function uploadArtifact(
       const out = `${outputDir}/artifact.json`;
       const done = async (uploaded: UploadArtifactResponse, line: string) => {
         await p.fs.writeText(out, JSON.stringify(uploaded, null, 2));
-        await p.fs.writeText(`${outputDir}/stdout.log`, line);
+        await p.fs.writeText(`${outputDir}/${LOG_FILE}`, line);
         return out;
       };
       if (files.length === 0) {

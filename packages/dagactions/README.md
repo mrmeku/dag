@@ -135,4 +135,69 @@ GitHub cancels a job with SIGINT to the step, SIGTERM 7500 ms later and a tree k
 
 ## How it reports
 
-The reporter turns the engine's event stream into GHA output: a line when a node's action starts, with its duration in the last run, and none for a cached node; one collapsible group per node, emitted when the node settles so concurrent output never interleaves; an annotation per failure; a step summary with the DAG colored by status, durations and cache savings; and one check run per node in the PR Checks tab, live. Check runs need `checks: write` and `GITHUB_TOKEN` in the step env, and are silently off without them.
+The reporter turns the engine's event stream into GHA output: a line when a node's action starts, with its duration in the last run, and none for a cached node; one collapsible group per node that ran, emitted when the node settles so concurrent output never interleaves, with the command's stdout and stderr in the order it wrote them; one plain line per node that was skipped or cancelled; an annotation per failure; a step summary, headed `## dagactions · <workflow file>`; and one check run per node in the PR Checks tab, live. Check runs need `checks: write` and `GITHUB_TOKEN` in the step env, and are silently off without them.
+
+The log ends with a recap outside any group, so it is what a failed step shows last:
+
+```
+dagactions · scripts/ci.ts · ✖ test:unit failed · built 1 · cached 4 · failed 2 · skipped 1 · wall 9.8s
+failed: test:unit, gate
+skipped, dependency failed: deploy
+reproduce: npx dagactions run scripts/ci.ts --only test:unit
+```
+
+A failure's cause is a failed node with no failed dependency: `gate` above failed because `test:unit` did, so the headline and the reproduce line name `test:unit` alone.
+
+### Choosing what the summary shows
+
+The step summary is drawn by a list of renderers, top to bottom, under a `## dagactions` heading. A renderer is a function: the reporter calls it with the run's data, a `RunReport`, and it returns markdown lines; `[]` draws nothing. The report holds every node with its status, timing, previous duration, error and outputs, and `log(name)` reads a node's log back from the CAS.
+
+| renderer             | draws                                                                                                         |
+| -------------------- | ------------------------------------------------------------------------------------------------------------- |
+| `renderStatus`       | the outcome as a headline, then counts, wall time, parallelism, cache hits and the time they saved            |
+| `renderTimeline`     | a gantt of the nodes that ran: what happened when, and what overlapped                                        |
+| `renderCriticalPath` | the longest chain by duration, of nodes that took `CRITICAL_PATH_FLOOR_MS` (1s) or more; hidden when none did |
+| `renderDag`          | the DAG colored by status                                                                                     |
+| `renderFailures`     | each failed node's log tail, and a line per skipped or cancelled node, causes first                           |
+| `renderTable`        | node, status, duration and the change against the previous run                                                |
+
+`DEFAULT_SUMMARY_RENDERERS` is all of them but the table. A workflow sets its own list with `summary`, mixing these with renderers of its own; one of yours can call a built-in, on a filtered report if it likes.
+
+```typescript
+import {
+  defineWorkflow,
+  formatDuration,
+  renderDag,
+  renderFailures,
+  renderTimeline,
+  type RunReport,
+} from "@mrmeku/dagactions";
+
+// What the table showed that nothing else does: the nodes slower than last run.
+const renderSlower = (r: RunReport) => {
+  const rows = r.nodes.flatMap((n) =>
+    n.status === "done" && n.duration !== undefined && n.previous && n.duration > n.previous * 1.2
+      ? `- ${n.name}: ${formatDuration(n.previous)} → ${formatDuration(n.duration)}`
+      : [],
+  );
+  return rows.length > 0 ? ["### slower than last run", "", ...rows] : [];
+};
+
+// A built-in, wrapped: the DAG without the cache plumbing, folded.
+const renderFoldedDag = (r: RunReport) => [
+  "<details><summary>DAG</summary>",
+  "",
+  ...renderDag({ ...r, nodes: r.nodes.filter((n) => !/^(restore|save):/.test(n.name)) }),
+  "",
+  "</details>",
+];
+
+export default defineWorkflow({
+  summary: [renderTimeline, renderFoldedDag, renderSlower, renderFailures],
+  build: async (w) => {
+    // ...
+  },
+});
+```
+
+`[...DEFAULT_SUMMARY_RENDERERS, renderTable]` is the default with the table back at the bottom, and `summary: []` leaves the summary empty. A renderer that throws leaves a note in its place and a warning annotation, and never changes the run's outcome. The post pass draws the post steps it ran with the same list. Past `SUMMARY_BUDGET_BYTES` (900,000 UTF-8 bytes, under GitHub's 1 MiB cap), the log blocks (` ```text ` fences) are dropped first, then each block that no longer fits, so the renderers listed first keep their room.

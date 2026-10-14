@@ -1,19 +1,14 @@
-import {
-  mermaidBody,
-  outputDirFor,
-  tally,
-  type ExecEvent,
-  type ExecResult,
-  type Node,
-} from "@mrmeku/dagraph";
-import {
-  CHECK_TEXT_LINES,
-  FAILURE_LOG_LINES,
-  LAST_RUN_FILE,
-  MAX_GRAPH_NODES,
-  SUMMARY_BUDGET_BYTES,
-} from "./config.ts";
+import { outputDirFor, type ExecEvent, type ExecResult, type Node } from "@mrmeku/dagraph";
+import { CHECK_TEXT_LINES, LAST_RUN_FILE, LOG_FILE, STATUS_ICON } from "./config.ts";
 import type { CheckConclusion, CheckUpdate, Ports } from "./ports.ts";
+import {
+  DEFAULT_SUMMARY_RENDERERS,
+  footer,
+  formatDuration,
+  renderSummary,
+  type NodeReport,
+  type SummaryRenderer,
+} from "./summary.ts";
 
 type Settled = Extract<
   ExecEvent,
@@ -30,13 +25,6 @@ interface LastRun {
   durations: Record<string, number>;
 }
 
-const ICON: Record<Status, string> = {
-  done: "✓",
-  cached: "⚡",
-  fail: "✗",
-  "dep-failed": "⊘",
-  cancelled: "◌",
-};
 const CONCLUSION: Record<Status, CheckConclusion> = {
   done: "success",
   cached: "success",
@@ -44,28 +32,6 @@ const CONCLUSION: Record<Status, CheckConclusion> = {
   "dep-failed": "skipped",
   cancelled: "cancelled",
 };
-const MERMAID_CLASS: Record<Status, string> = {
-  done: "done",
-  cached: "cached",
-  fail: "fail",
-  "dep-failed": "skipped",
-  cancelled: "skipped",
-};
-const MERMAID_CLASSDEFS = [
-  "classDef done fill:#dcfce7,stroke:#16a34a,color:#14532d",
-  "classDef cached fill:#f1f5f9,stroke:#94a3b8,color:#475569",
-  "classDef fail fill:#fee2e2,stroke:#dc2626,color:#7f1d1d",
-  "classDef skipped fill:#f8fafc,stroke:#cbd5e1,stroke-dasharray:4 4,color:#94a3b8",
-];
-
-export function formatDuration(ms: number): string {
-  return ms < 1000 ? `${ms}ms` : `${(ms / 1000).toFixed(1)}s`;
-}
-
-function formatDelta(now: number, before: number): string {
-  const pct = Math.round(((now - before) / before) * 100);
-  return pct === 0 ? "±0%" : pct > 0 ? `+${pct}%` : `${pct}%`;
-}
 
 function iso(ms: number): string {
   return new Date(ms).toISOString();
@@ -81,95 +47,23 @@ function lines(text: string): string[] {
 }
 
 /**
- * The DAG as a mermaid flowchart colored by status: the engine's `mermaidBody` with status
- * icons and classes. Past MAX_GRAPH_NODES it draws one node per kind with counts instead,
- * because GitHub refuses very large diagrams.
- */
-export function dagMermaid(
-  nodes: Node[],
-  statusOf: (name: string) => Status | undefined,
-): string[] {
-  if (nodes.length > MAX_GRAPH_NODES) {
-    const kinds = [...new Set(nodes.map((n) => n.kind))];
-    const id = (kind: string) => `k${kinds.indexOf(kind)}`;
-    const out = ["```mermaid", "flowchart LR"];
-    for (const kind of kinds) {
-      const members = nodes.filter((n) => n.kind === kind);
-      const counts = (["done", "cached", "fail", "dep-failed", "cancelled"] as Status[])
-        .map((s) => [s, members.filter((n) => statusOf(n.name) === s).length] as const)
-        .filter(([, c]) => c > 0)
-        .map(([s, c]) => `${ICON[s]}${c}`)
-        .join(" ");
-      out.push(`  ${id(kind)}["${kind} ×${members.length}: ${counts}"]`);
-    }
-    const byName = new Map(nodes.map((n) => [n.name, n]));
-    const edges = new Set<string>();
-    for (const n of nodes) {
-      for (const d of n.deps) {
-        const from = id(byName.get(d)!.kind);
-        const to = id(n.kind);
-        if (from !== to) edges.add(`  ${from} --> ${to}`);
-      }
-    }
-    out.push(...edges, "```");
-    return out;
-  }
-  const { lines: body } = mermaidBody(nodes, {
-    label: (n, scope) => {
-      const status = statusOf(n.name);
-      return `${status ? ICON[status] : "·"} ${scope ? n.name.slice(scope.length + 1) : n.name}`;
-    },
-    classOf: (n) => {
-      const status = statusOf(n.name);
-      return status && MERMAID_CLASS[status];
-    },
-  });
-  return ["```mermaid", "flowchart LR", ...body, ...MERMAID_CLASSDEFS.map((c) => `  ${c}`), "```"];
-}
-
-/** Longest chain through the DAG by node duration: the one worth speeding up. */
-export function criticalPath(
-  nodes: Node[],
-  durationOf: (name: string) => number | undefined,
-): { names: string[]; total: number } | null {
-  const total = new Map<string, number>();
-  const via = new Map<string, string | undefined>();
-  for (const n of nodes) {
-    const own = durationOf(n.name);
-    if (own === undefined) continue;
-    let best = 0;
-    let bestDep: string | undefined;
-    for (const d of n.deps) {
-      const t = total.get(d) ?? 0;
-      if (t > best) {
-        best = t;
-        bestDep = d;
-      }
-    }
-    total.set(n.name, own + best);
-    via.set(n.name, bestDep);
-  }
-  let end: string | undefined;
-  for (const [name, t] of total) if (end === undefined || t > total.get(end)!) end = name;
-  if (end === undefined || total.get(end) === 0) return null;
-  const names: string[] = [];
-  for (let cur: string | undefined = end; cur !== undefined; cur = via.get(cur)) names.unshift(cur);
-  return { names, total: total.get(end)! };
-}
-
-/**
  * Turns dagraph's event stream into CI output: a line when a node's action starts, with its
  * duration in the last run; a live check per node (in_progress when its action starts, completed
- * at settle); one collapsible group per node emitted when it settles so concurrent nodes never
- * interleave; an annotation per failure; and a markdown summary: status line with
- * wall time, parallelism and cache savings; the DAG colored by status; failures with their log
- * tails; a node table with durations and the change against the previous run; the critical
- * path; and a gantt of what ran. Logs are read back from the CAS, which is why cached and failed
- * nodes still show their output.
+ * at settle); one collapsible group per node that ran, emitted when it settles so concurrent
+ * nodes never interleave; a plain line for a node that did not run; an annotation per failure;
+ * a markdown summary drawn by the renderers in `summary` (summary.ts); and a closing recap in
+ * the log. `rerun` is the command that ran this workflow, for the recap's reproduce line. Logs
+ * are read back from the CAS, which is why cached and failed nodes still show their output.
  */
 export function createReporter(
   ports: Ports,
-  opts: { casBaseDir: string; nodes: Node[]; title?: string },
+  opts: {
+    casBaseDir: string;
+    nodes: Node[];
+    title?: string;
+    rerun?: string;
+    summary?: readonly SummaryRenderer[];
+  },
 ) {
   const started = new Map<string, number>();
   const timing = new Map<string, Timing>();
@@ -185,15 +79,11 @@ export function createReporter(
   };
 
   const logLines = async (actionKey: string): Promise<string[]> => {
-    const read = async (file: string) => {
-      const path = `${outputDirFor(opts.casBaseDir, actionKey)}/${file}`;
-      return (await ports.fs.exists(path)) ? lines(await ports.fs.readText(path)) : [];
-    };
+    const path = `${outputDirFor(opts.casBaseDir, actionKey)}/${LOG_FILE}`;
+    const all = (await ports.fs.exists(path)) ? lines(await ports.fs.readText(path)) : [];
     // A tool's own `::debug::` commands (the toolkit's globber writes one per file) are for the
     // runner's debug mode alone; the group, the check and the summary show the log without them.
-    const out = (await read("stdout.log")).filter((l) => !l.startsWith("::debug::"));
-    const err = await read("stderr.log");
-    return err.length > 0 ? [...out, "── stderr ──", ...err] : out;
+    return all.filter((l) => !l.startsWith("::debug::"));
   };
 
   const failureBody = async (actionKey: string, message: string): Promise<string[]> => [
@@ -216,18 +106,18 @@ export function createReporter(
     switch (ev.type) {
       case "done":
         body = await logLines(ev.actionKey);
-        ports.ci.group(`✓ ${name} (${dur})`, body);
+        ports.ci.group(`${STATUS_ICON.done} ${name} (${dur})`, body);
         summary = `done in ${dur}`;
         break;
       case "cached":
         body = await logLines(ev.actionKey);
-        ports.ci.group(`⚡ ${name} (cached)`, body);
+        ports.ci.group(`${STATUS_ICON.cached} ${name} (cached)`, body);
         summary = "cached";
         break;
       case "fail": {
         const message = errorText(ev.error);
         body = await failureBody(ev.actionKey, message);
-        ports.ci.group(`✗ ${name} (${dur})`, body);
+        ports.ci.group(`${STATUS_ICON.fail} ${name} (${dur})`, body);
         ports.ci.annotate("error", name, message);
         summary = message;
         break;
@@ -235,12 +125,12 @@ export function createReporter(
       case "dep-failed":
         summary = errorText(ev.error);
         body = [];
-        ports.ci.group(`⊘ ${name} (dependency failed)`, [summary]);
+        ports.ci.info(`${STATUS_ICON["dep-failed"]} ${name}: skipped, ${summary}`);
         break;
       case "cancelled":
         summary = "cancelled";
         body = [];
-        ports.ci.group(`◌ ${name} (cancelled)`, []);
+        ports.ci.info(`${STATUS_ICON.cancelled} ${name}: cancelled`);
         break;
     }
     // The node's log becomes the check's own page on GitHub.
@@ -302,114 +192,57 @@ export function createReporter(
     );
   };
 
+  const logOf = async (r: ExecResult): Promise<string[]> => {
+    switch (r.status) {
+      case "done":
+      case "cached":
+        return logLines(r.actionKey);
+      case "fail":
+        return failureBody(r.actionKey, r.error.message);
+      case "dep-failed":
+        return [r.error.message];
+      case "cancelled":
+        return [];
+    }
+  };
+
   const finish = async (results: ExecResult[]): Promise<{ failed: number; markdown: string }> => {
     await logs;
     await checks;
-    const sorted = [...results].sort((a, b) => a.name.localeCompare(b.name));
-    const statusOf = (name: string) => results.find((r) => r.name === name)?.status;
-    const durationOf = (name: string) => {
-      const t = timing.get(name);
-      return t ? t.end - t.start : undefined;
-    };
-    const counts = tally(results);
-    const prev = await lastRun();
-
-    const all = [...timing.values()];
-    const wall = all.length
-      ? Math.max(...all.map((t) => t.end)) - Math.min(...all.map((t) => t.start))
-      : 0;
-    const executed = sorted.filter((r) => r.status === "done" || r.status === "fail");
-    const busy = executed.reduce((s, r) => s + (durationOf(r.name) ?? 0), 0);
-    const cachedNodes = sorted.filter((r) => r.status === "cached");
-    const saved = cachedNodes.reduce((s, r) => s + (prev?.durations[r.name] ?? 0), 0);
-    const hitDenominator = counts.cached + counts.done;
-
-    const statusLine = [
-      `built **${counts.done}** · cached **${counts.cached}** · failed **${counts.fail}** · skipped **${counts.depFailed}**${counts.cancelled > 0 ? ` · cancelled **${counts.cancelled}**` : ""}`,
-      `wall ${formatDuration(wall)}`,
-      ...(wall > 0 ? [`parallelism ${(busy / wall).toFixed(1)}×`] : []),
-      ...(hitDenominator > 0
-        ? [
-            `cache ${counts.cached}/${hitDenominator} hits${saved > 0 ? `, ${formatDuration(saved)} saved` : ""}`,
-          ]
-        : []),
-    ].join(" · ");
-
-    const cp = criticalPath(opts.nodes, durationOf);
-    const md = [`## ${opts.title ?? "dagactions"}`, "", statusLine, ""];
-    if (cp) md.push(`critical path: ${cp.names.join(" → ")} (${formatDuration(cp.total)})`, "");
-    md.push(...dagMermaid(opts.nodes, statusOf));
-
-    const failures = sorted.filter((r) => r.status !== "done" && r.status !== "cached");
-    const failureBlocks: string[] = [];
-    for (const r of failures) {
-      if (r.status === "dep-failed") {
-        failureBlocks.push(`- ⊘ ${r.name}: skipped, dependency failed`);
-        continue;
-      }
-      if (r.status === "cancelled") {
-        failureBlocks.push(`- ◌ ${r.name}: cancelled`);
-        continue;
-      }
-      const dur = durationOf(r.name);
-      const body = (await failureBody(r.actionKey, r.error.message)).slice(-FAILURE_LOG_LINES);
-      failureBlocks.push(
-        `<details><summary>✗ ${r.name}${dur !== undefined ? ` (${formatDuration(dur)})` : ""}</summary>`,
-        "",
-        "```text",
-        ...body,
-        "```",
-        "",
-        "</details>",
-        "",
-      );
-    }
-    if (failures.length > 0) md.push("", "### failures", "", ...failureBlocks);
-
-    md.push(
-      "",
-      "| node | status | duration | vs last |",
-      "| --- | --- | --- | --- |",
-      ...sorted.map((r) => {
-        const d = durationOf(r.name);
-        const before = prev?.durations[r.name];
-        const delta =
-          r.status === "done" && d !== undefined && before ? formatDelta(d, before) : "";
-        return `| ${r.name} | ${r.status} | ${d !== undefined ? formatDuration(d) : ""} | ${delta} |`;
-      }),
-    );
-
-    if (executed.length > 0) {
-      md.push(
-        "",
-        "```mermaid",
-        "gantt",
-        "  title node timeline",
-        "  dateFormat x",
-        "  axisFormat %M:%S",
-        "  section nodes",
-        ...executed
-          .filter((r) => timing.has(r.name))
-          .map((r) => {
-            const t = timing.get(r.name)!;
-            return `  ${r.name.replace(/:/g, "/")} :${r.status === "fail" ? "crit" : "active"}, ${t.start}, ${t.end}`;
-          }),
-        "```",
-      );
-    }
-
-    let markdown = md.join("\n") + "\n";
-    if (markdown.length > SUMMARY_BUDGET_BYTES) {
-      markdown = markdown.replace(
-        /```text\n[\s\S]*?```/g,
-        "_(log omitted: summary over the 1 MiB budget)_",
-      );
-    }
-
+    const lastDurations = (await lastRun())?.durations ?? {};
     await writeLastRun();
-
+    const byName = new Map(results.map((r) => [r.name, r]));
+    const nodes = opts.nodes.flatMap((n): NodeReport[] => {
+      const r = byName.get(n.name);
+      if (!r) return [];
+      const t = timing.get(n.name);
+      const before = lastDurations[n.name];
+      return [
+        {
+          ...n,
+          status: r.status,
+          ...(t && { start: t.start, duration: t.end - t.start }),
+          ...(before !== undefined && { previous: before }),
+          ...((r.status === "fail" || r.status === "dep-failed") && { error: r.error.message }),
+          ...((r.status === "done" || r.status === "cached") && { outputs: r.outputs }),
+        },
+      ];
+    });
+    const log = async (name: string) => {
+      const r = byName.get(name);
+      return r ? logOf(r) : [];
+    };
+    const title = opts.title ?? "dagactions";
+    const markdown = await renderSummary(
+      title,
+      { nodes, log },
+      opts.summary ?? DEFAULT_SUMMARY_RENDERERS,
+      (message) => ports.ci.annotate("warning", "dagactions summary", message),
+    );
     await ports.ci.summary(markdown);
-    return { failed: failures.length, markdown };
+    for (const line of ["", ...footer(title, nodes, opts.rerun)]) ports.ci.info(line);
+    const failed = results.filter((r) => r.status !== "done" && r.status !== "cached").length;
+    return { failed, markdown };
   };
 
   return { onEvent, finish };

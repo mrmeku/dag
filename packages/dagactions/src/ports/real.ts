@@ -5,7 +5,7 @@ import type { Clock, Sh, ShResult } from "../ports.ts";
 /**
  * The real shell. A cancelled command is interrupted the way GitHub's runner interrupts a step:
  * SIGINT, SIGTERM after `sigintGraceMs`, SIGKILL after `sigtermGraceMs` more. A command killed
- * by a signal resolves with code -1 and the signal's name on stderr.
+ * by a signal resolves with code -1 and the signal's name on stderr and at the end of `output`.
  */
 export function createSh(opts: { sigintGraceMs?: number; sigtermGraceMs?: number } = {}): Sh {
   const sigintGraceMs = opts.sigintGraceMs ?? CHILD_SIGINT_GRACE_MS;
@@ -15,7 +15,8 @@ export function createSh(opts: { sigintGraceMs?: number; sigtermGraceMs?: number
       new Promise<ShResult>((resolve) => {
         const signal = runOpts?.signal;
         if (signal?.aborted) {
-          resolve({ code: -1, stdout: "", stderr: "cancelled before start", ok: false });
+          const message = "cancelled before start";
+          resolve({ code: -1, stdout: "", stderr: message, output: message, ok: false });
           return;
         }
         const [bin, ...args] = cmd;
@@ -24,8 +25,9 @@ export function createSh(opts: { sigintGraceMs?: number; sigtermGraceMs?: number
           env: runOpts?.env ? { ...process.env, ...runOpts.env } : process.env,
           stdio: ["ignore", "pipe", "pipe"],
         });
-        const out: Buffer[] = [];
-        const err: Buffer[] = [];
+        const out: string[] = [];
+        const err: string[] = [];
+        const all: string[] = [];
         const timers: NodeJS.Timeout[] = [];
         const onAbort = () => {
           proc.kill("SIGINT");
@@ -38,18 +40,26 @@ export function createSh(opts: { sigintGraceMs?: number; sigtermGraceMs?: number
           signal?.removeEventListener("abort", onAbort);
           resolve(result);
         };
-        proc.stdout.on("data", (chunk: Buffer) => out.push(chunk));
-        proc.stderr.on("data", (chunk: Buffer) => err.push(chunk));
-        proc.on("error", (e) => settle({ code: -1, stdout: "", stderr: e.message, ok: false }));
+        proc.stdout
+          .setEncoding("utf8")
+          .on("data", (chunk: string) => out.push(chunk) && all.push(chunk));
+        proc.stderr
+          .setEncoding("utf8")
+          .on("data", (chunk: string) => err.push(chunk) && all.push(chunk));
+        proc.on("error", (e) =>
+          settle({ code: -1, stdout: "", stderr: e.message, output: e.message, ok: false }),
+        );
         proc.on("close", (code, killedBy) => {
           const c = code ?? -1;
-          const stderr = Buffer.concat(err).toString();
+          const withKill = (text: string) =>
+            killedBy
+              ? `${text}${text.endsWith("\n") || !text ? "" : "\n"}killed by ${killedBy}\n`
+              : text;
           settle({
             code: c,
-            stdout: Buffer.concat(out).toString(),
-            stderr: killedBy
-              ? `${stderr}${stderr.endsWith("\n") || !stderr ? "" : "\n"}killed by ${killedBy}\n`
-              : stderr,
+            stdout: out.join(""),
+            stderr: withKill(err.join("")),
+            output: withKill(all.join("")),
             ok: c === 0,
           });
         });

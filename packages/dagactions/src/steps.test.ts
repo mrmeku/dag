@@ -18,15 +18,17 @@ import {
 
 const CAS = "/cas";
 
+const ERR = Array.from({ length: 30 }, (_, i) => `err ${i + 1}`).join("\n") + "\n";
 /** A shell whose only commands are `ok` (exit 0) and `bad` (exit 1 with a long stderr). */
 const fakeSh: Sh = {
   run: async (cmd) =>
     cmd[0] === "ok"
-      ? { code: 0, stdout: "hello\n", stderr: "", ok: true }
+      ? { code: 0, stdout: "hello\n", stderr: "", output: "hello\n", ok: true }
       : {
           code: 1,
           stdout: "",
-          stderr: Array.from({ length: 30 }, (_, i) => `err ${i + 1}`).join("\n") + "\n",
+          stderr: ERR,
+          output: ERR,
           ok: false,
         },
 };
@@ -49,7 +51,7 @@ describe("runAll + gate", () => {
       {
         good: goodResult.status === "done" && {
           outputs: goodResult.outputs,
-          stdout: await p.fs.readText(`${CAS}/${goodKey}/out/stdout.log`),
+          log: await p.fs.readText(`${CAS}/${goodKey}/out/output.log`),
           result: JSON.parse(await p.fs.readText(`${CAS}/${goodKey}/out/result.json`)),
         },
         bad: badResult.status === "fail" && badResult.error.message,
@@ -58,7 +60,7 @@ describe("runAll + gate", () => {
       {
         good: {
           outputs: { result: `${CAS}/${goodKey}/out/result.json` },
-          stdout: "hello\n",
+          log: "hello\n",
           result: { cmd: ["ok"], cwd: "", code: 0 },
         },
         bad: "bad --flag exited 1",
@@ -103,7 +105,7 @@ describe("restoreCache + saveCache", () => {
       return r.status === "done" ? JSON.parse(await fs.readText(r.outputs as string)) : r.status;
     };
     const log = async (name: string) =>
-      fs.readText(`${CAS}/${byName.get(name)!.actionKey}/out/stdout.log`);
+      fs.readText(`${CAS}/${byName.get(name)!.actionKey}/out/output.log`);
 
     assert.deepEqual(
       {
@@ -169,8 +171,8 @@ describe("uploadArtifact", () => {
           if (cmd[0] === "pack") await fs.writeText(`${out}/pkg.tgz`, "bytes");
           if (cmd[0] === "bundle") await fs.writeText(`${out}/main.js`, "js");
           return cmd[0] === "bad"
-            ? { code: 1, stdout: "", stderr: "", ok: false }
-            : { code: 0, stdout: "", stderr: "", ok: true };
+            ? { code: 1, stdout: "", stderr: "", output: "", ok: false }
+            : { code: 0, stdout: "", stderr: "", output: "", ok: true };
         },
       },
     });
@@ -254,7 +256,7 @@ describe("uploadArtifact", () => {
     assert.deepEqual(
       {
         outputs: Object.fromEntries(await Promise.all(names.map(async (n) => [n, await json(n)]))),
-        log: await fs.readText(`${out("upload:tarball")}/stdout.log`),
+        log: await fs.readText(`${out("upload:tarball")}/output.log`),
         warnings: rec.annotations,
         uploads: [...service.uploads],
         config: JSON.parse(graph.describe().find((n) => n.name === "upload:tarball")!.config),
@@ -312,7 +314,7 @@ describe("declared outputs", () => {
           seen.push({ cmd, env: opts?.env });
           if (cmd[0] === "pack")
             await fs.writeText(`${opts!.env!["DAGACTIONS_OUT"]}/pkg.tgz`, "bytes");
-          return { code: 0, stdout: "", stderr: "", ok: true };
+          return { code: 0, stdout: "", stderr: "", output: "", ok: true };
         },
       },
     });
@@ -364,9 +366,10 @@ describe("post", () => {
       run: async (cmd, opts) => {
         calls.push(cmd);
         if (cmd[1] === "stop") testsResult = opts?.env?.TESTS;
-        if (cmd[0] === "bad") return { code: 1, stdout: "", stderr: "no\n", ok: false };
+        if (cmd[0] === "bad")
+          return { code: 1, stdout: "", stderr: "no\n", output: "no\n", ok: false };
         if (cmd[1] === "start") await fs.writeText(`${opts!.env!.DAGACTIONS_OUT}/pid`, "42");
-        return { code: 0, stdout: "", stderr: "", ok: true };
+        return { code: 0, stdout: "", stderr: "", output: "", ok: true };
       },
     };
     p.sh = sh;

@@ -15,12 +15,15 @@ import type { CiContext, Ports } from "./ports.ts";
 import { createReporter } from "./reporter.ts";
 import { selectNodes } from "./select.ts";
 import { postNodes } from "./steps.ts";
+import type { SummaryRenderer } from "./summary.ts";
 
 /** A workflow adds nodes to the graph. The ref/event come in through `ctx` for conditionals. */
 export type Workflow<R = unknown> = (graph: Graph, ports: Ports, ctx: CiContext) => Promise<R>;
 
 export interface RunOptions {
   workflow: Workflow;
+  /** The workflow file as given: named in the summary's heading and in the log's reproduce line. */
+  workflowFile?: string;
   ports: Ports;
   casBaseDir: string;
   /** Where the run writes its journal; `runPost` reads it. */
@@ -28,6 +31,8 @@ export interface RunOptions {
   force?: boolean;
   only?: string[];
   limits?: ThrottledSchedulerOptions;
+  /** The step summary's renderers, top to bottom; the post pass draws its owed steps with the same. */
+  summary?: readonly SummaryRenderer[];
   /** Cancels the run: waiting nodes settle as cancelled, running commands are interrupted. */
   signal?: AbortSignal;
 }
@@ -39,25 +44,38 @@ export interface RunOutcome {
   cancelled: boolean;
 }
 
+const titleOf = (workflowFile: string | undefined) =>
+  workflowFile ? `dagactions · ${workflowFile}` : "dagactions";
+
 async function buildGraph(opts: { workflow: Workflow; ports: Ports; only?: string[] }) {
   const ctx = await opts.ports.ci.context();
   const full = new Graph();
   await opts.workflow(full, opts.ports, ctx);
   const graph = opts.only?.length ? selectNodes(full, opts.only) : full;
   const posts = postNodes(full).filter((n) => graph.getNodes().has(n));
-  return { ctx, graph, posts };
+  return { ctx, graph, posts, total: full.getNodes().size };
 }
 
 export async function runWorkflow(opts: RunOptions): Promise<RunOutcome> {
   const { ports } = opts;
-  const { ctx, graph } = await buildGraph(opts);
+  const { ctx, graph, total } = await buildGraph(opts);
   const names = [...graph.getNodes().keys()];
+  const count = `${total} node${total === 1 ? "" : "s"}`;
+  const scope = opts.only?.length
+    ? `${names.length} of ${count} (--only ${opts.only.join(",")})`
+    : count;
   ports.ci.group(
-    `dagactions · ${ctx.provider} · ref=${ctx.ref} · ${names.length} nodes${opts.force ? " · force" : ""}`,
+    `dagactions · ${ctx.provider} · ref=${ctx.ref} · ${scope}${opts.force ? " · force" : ""}`,
     names,
   );
   await ports.fs.ensureDir(opts.casBaseDir);
-  const reporter = createReporter(ports, { casBaseDir: opts.casBaseDir, nodes: graph.describe() });
+  const reporter = createReporter(ports, {
+    casBaseDir: opts.casBaseDir,
+    nodes: graph.describe(),
+    title: titleOf(opts.workflowFile),
+    ...(opts.workflowFile && { rerun: `npx dagactions run ${opts.workflowFile}` }),
+    ...(opts.summary && { summary: opts.summary }),
+  });
   const journal = createJournal(ports.fs, opts.journalPath ?? DEFAULT_JOURNAL_PATH);
   await journal.begin();
   const results = await execute(
@@ -115,7 +133,8 @@ export async function runPost(opts: Omit<RunOptions, "force" | "signal">): Promi
       .describe()
       .filter((n) => owed.has(n.name))
       .map((n) => ({ ...n, deps: n.deps.filter((d) => owed.has(d)) })),
-    title: "dagactions · post",
+    title: `${titleOf(opts.workflowFile)} · post`,
+    ...(opts.summary && { summary: opts.summary }),
   });
   const journal = createJournal(ports.fs, journalPath, before);
   const ctx = {

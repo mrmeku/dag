@@ -11,7 +11,7 @@ const CAS = "/cas";
 const JOURNAL = "/state/journal.json";
 
 describe("cancel, then post", () => {
-  test("a cancelled run journals what settled; the post pass saves the cache and stops the service from the journal; a second pass finds nothing", async () => {
+  test("a cancelled run journals what settled; the post pass saves the cache and stops the service from the journal, under the workflow's summary; a second pass finds nothing", async () => {
     const controller = new AbortController();
     const calls: string[][] = [];
     const service = createMemoryActionsCache(["bun-old"]);
@@ -22,16 +22,23 @@ describe("cancel, then post", () => {
         calls.push(cmd);
         if (cmd[0] === "db" && cmd[1] === "start")
           await fs.writeText(`${opts!.env!.DAGACTIONS_OUT}/pid`, "7");
-        if (cmd[0] !== "slow") return { code: 0, stdout: "", stderr: "", ok: true };
+        if (cmd[0] !== "slow") return { code: 0, stdout: "", stderr: "", output: "", ok: true };
         return new Promise((resolve) =>
           opts!.signal!.addEventListener("abort", () =>
-            resolve({ code: -1, stdout: "", stderr: "killed by SIGINT\n", ok: false }),
+            resolve({
+              code: -1,
+              stdout: "",
+              stderr: "killed by SIGINT\n",
+              output: "killed by SIGINT\n",
+              ok: false,
+            }),
           ),
         );
       },
     };
     ports.sh = sh;
     const workflow = defineWorkflow({
+      summary: [(r) => r.nodes.map((n) => `${n.name} ${n.status}`)],
       build: (w) => {
         const bun = w.restoreCache({
           name: "restore:bun",
@@ -61,12 +68,18 @@ describe("cancel, then post", () => {
         });
       },
     });
-    const common = { workflow: workflow.workflow, ports, casBaseDir: CAS, journalPath: JOURNAL };
+    const common = {
+      workflow: workflow.workflow,
+      ...(workflow.summary && { summary: workflow.summary }),
+      ports,
+      casBaseDir: CAS,
+      journalPath: JOURNAL,
+    };
     const fastSettled = new Promise<void>((resolve) => {
       const group = ports.ci.group;
       ports.ci.group = (title, lines) => {
         group(title, lines);
-        if (title.startsWith("✓ fast")) resolve();
+        if (title.startsWith("✔\uFE0E fast")) resolve();
       };
     });
     const running = runWorkflow({ ...common, signal: controller.signal });
@@ -88,10 +101,10 @@ describe("cancel, then post", () => {
         calls: calls.map((c) => c.slice(0, 2)),
         stoppedPid: await fs.readText(stop[2]!),
         saved: [...service.entries.keys()],
-        headersAndStarts: rec.log
+        headersStartsAndRecaps: rec.log
           .map((e) => (typeof e === "string" ? e : e.title))
           .filter((t) => t.startsWith("dagactions") || t.startsWith("▷")),
-        summaryTitles: rec.summaries.map((s) => s.split("\n")[0]),
+        summaries: rec.summaries,
       },
       {
         run: {
@@ -121,18 +134,35 @@ describe("cancel, then post", () => {
         calls: [["db", "start"], ["fast"], ["slow"], ["db", "stop"]],
         stoppedPid: "7",
         saved: ["bun-old", "bun-new"],
-        headersAndStarts: [
+        headersStartsAndRecaps: [
           "dagactions · recording · ref= · 7 nodes",
           "▷ restore:bun",
           "▷ up:db",
           "▷ fast",
           "▷ slow",
+          "dagactions · ✖\uFE0E slow failed · built 3 · cached 0 · failed 1 · skipped 0 · cancelled 3 · wall 7.0s",
           "dagactions · post · 2 of 2 post steps owed",
           "▷ down:db",
           "▷ save:bun",
+          "dagactions · post · ✔\uFE0E all 2 nodes succeeded · built 2 · cached 0 · failed 0 · skipped 0 · wall 3.0s",
           "dagactions · post · 0 of 2 post steps owed",
         ],
-        summaryTitles: ["## dagactions", "## dagactions · post"],
+        // The workflow's own section, in both passes; the post pass draws its owed steps alone.
+        summaries: [
+          [
+            "## dagactions",
+            "",
+            "restore:bun done",
+            "up:db done",
+            "fast done",
+            "slow fail",
+            "after cancelled",
+            "save:bun cancelled",
+            "down:db cancelled",
+            "",
+          ].join("\n"),
+          ["## dagactions · post", "", "save:bun done", "down:db done", ""].join("\n"),
+        ],
       },
     );
   });
@@ -145,13 +175,13 @@ describe("progress", () => {
       const group = ports.ci.group;
       ports.ci.group = (title, lines) => {
         group(title, lines);
-        if (title.startsWith("✓ fast")) resolve();
+        if (title.startsWith("✔\uFE0E fast")) resolve();
       };
     });
     ports.sh = {
       run: async (cmd) => {
         if (cmd[0] === "slow") await fastSettled;
-        return { code: 0, stdout: "", stderr: "", ok: true };
+        return { code: 0, stdout: "", stderr: "", output: "", ok: true };
       },
     };
     const workflow = defineWorkflow({
@@ -172,8 +202,10 @@ describe("progress", () => {
         "dagactions · recording · ref= · 2 nodes",
         "▷ slow",
         "▷ fast",
-        "✓ fast (1.0s)",
-        "✓ slow (3.0s)",
+        "✔\uFE0E fast (1.0s)",
+        "✔\uFE0E slow (3.0s)",
+        "",
+        "dagactions · ✔\uFE0E all 2 nodes succeeded · built 2 · cached 0 · failed 0 · skipped 0 · wall 3.0s",
       ],
     );
   });

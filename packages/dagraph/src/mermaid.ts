@@ -11,6 +11,15 @@ export interface MermaidOptions {
   classOf?: (node: Node) => string | undefined;
 }
 
+/**
+ * A mermaid label as a quoted string. The characters mermaid would read as an entity, an HTML tag
+ * or a markdown string (# " < > `) become numeric entity codes, and an empty label, which mermaid
+ * refuses to parse, becomes a space.
+ */
+export function mermaidQuote(text: string): string {
+  return `"${text.replace(/[#"<>`]/g, (c) => `#${c.charCodeAt(0)};`) || " "}"`;
+}
+
 export function scopeOf(name: string): string {
   const i = name.lastIndexOf(":");
   return i === -1 ? "" : name.slice(0, i);
@@ -36,7 +45,6 @@ export function mermaidBody(
   };
   const subgraphOf = opts.subgraphOf ?? ((n) => scopeOf(n.name));
   const label = opts.label ?? ((n, scope) => (scope ? n.name.slice(scope.length + 1) : n.name));
-  const quote = (s: string) => `"${s.replace(/"/g, "#quot;")}"`;
   const lines: string[] = [];
   const subgraphs: string[] = [];
   for (const [scope, members] of Map.groupBy(nodes, subgraphOf)) {
@@ -44,11 +52,11 @@ export function mermaidBody(
       const sid = `s${subgraphs.length}`;
       subgraphs.push(sid);
       lines.push(
-        `  subgraph ${sid} [${quote(opts.subgraphLabel?.(scope, subgraphs.length - 1) ?? scope)}]`,
+        `  subgraph ${sid} [${mermaidQuote(opts.subgraphLabel?.(scope, subgraphs.length - 1) ?? scope)}]`,
       );
     }
     for (const n of members) {
-      lines.push(`  ${scope ? "  " : ""}${id(n.name)}[${quote(label(n, scope))}]`);
+      lines.push(`  ${scope ? "  " : ""}${id(n.name)}[${mermaidQuote(label(n, scope))}]`);
     }
     if (scope) lines.push("  end");
   }

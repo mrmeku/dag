@@ -38,7 +38,7 @@ export {
   type RecordedCi,
 } from "./ports/memory.ts";
 export { abortOnSignals, createSh, systemClock } from "./ports/real.ts";
-export { createReporter, formatDuration } from "./reporter.ts";
+export { createReporter } from "./reporter.ts";
 export { runPost, runWorkflow, type RunOptions, type RunOutcome, type Workflow } from "./runner.ts";
 export { selectNodes } from "./select.ts";
 export {
@@ -54,6 +54,19 @@ export {
   type RunSpec,
   type UploadArtifactSpec,
 } from "./steps.ts";
+export {
+  DEFAULT_SUMMARY_RENDERERS,
+  formatDuration,
+  renderCriticalPath,
+  renderDag,
+  renderFailures,
+  renderStatus,
+  renderTable,
+  renderTimeline,
+  type NodeReport,
+  type RunReport,
+  type SummaryRenderer,
+} from "./summary.ts";
 export {
   createSteps,
   defineWorkflow,

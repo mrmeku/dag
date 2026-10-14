@@ -49,7 +49,9 @@ export function steppingClock(start = 0, step = 1000): Clock {
 }
 
 /** A shell where every command succeeds silently. */
-export const okSh: Sh = { run: async () => ({ code: 0, stdout: "", stderr: "", ok: true }) };
+export const okSh: Sh = {
+  run: async () => ({ code: 0, stdout: "", stderr: "", output: "", ok: true }),
+};
 
 /** Ports built from doubles: the one fixture every dagactions test starts from. */
 export function createTestPorts(

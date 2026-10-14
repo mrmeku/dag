@@ -42,6 +42,7 @@ export async function actionOptions(bundleUrl: string): Promise<RunOptions> {
   const only = core.getInput("only").split(",").filter(Boolean);
   return {
     workflow: def.workflow,
+    workflowFile: file,
     ports: {
       sh: createSh(),
       fs: createNodeDagFs(),
@@ -57,5 +58,6 @@ export async function actionOptions(bundleUrl: string): Promise<RunOptions> {
     force: core.getBooleanInput("force"),
     ...(only.length && { only }),
     ...(def.limits && { limits: def.limits }),
+    ...(def.summary && { summary: def.summary }),
   };
 }

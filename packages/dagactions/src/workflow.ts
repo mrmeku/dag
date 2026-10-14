@@ -24,6 +24,7 @@ import {
   type RunSpec,
   type UploadArtifactSpec,
 } from "./steps.ts";
+import type { SummaryRenderer } from "./summary.ts";
 
 /** The concurrency groups a limits object declares, or `never` when it declares none. */
 export type GroupsOf<L> = L extends { concurrencyLimits: infer C }
@@ -87,20 +88,24 @@ export function createSteps<G extends string>(
 export interface WorkflowDef<R = unknown> {
   workflow: Workflow<R>;
   limits?: ThrottledSchedulerOptions;
+  summary?: readonly SummaryRenderer[];
 }
 
 /**
- * Declare a workflow: its scheduler limits and a body that builds the graph through a bound
- * `Steps` facade. The limits' group names flow into the facade's types, so `group: "tset"`
- * does not compile. The body's return value is the workflow's: a release workflow calls
+ * Declare a workflow: its scheduler limits, its step summary's renderers (default
+ * DEFAULT_SUMMARY_RENDERERS), and a body that builds the graph through a bound `Steps` facade.
+ * The limits' group names flow into the facade's types, so `group: "tset"` does not compile.
+ * The body's return value is the workflow's: a release workflow calls
  * `ci.workflow(w.graph, w.ports, w.ctx)` and depends on the gate it gets back.
  */
 export function defineWorkflow<L extends ThrottledSchedulerOptions, R = void>(def: {
   limits?: L;
+  summary?: readonly SummaryRenderer[];
   build: (w: Steps<GroupsOf<L>>) => R | Promise<R>;
 }): WorkflowDef<R> {
   return {
     ...(def.limits && { limits: def.limits }),
+    ...(def.summary && { summary: def.summary }),
     workflow: async (graph, ports, ctx) => def.build(createSteps<GroupsOf<L>>(graph, ports, ctx)),
   };
 }

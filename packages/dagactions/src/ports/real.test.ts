@@ -34,11 +34,36 @@ describe("createSh with a signal", () => {
         {
           polite: [false, -1, "killed by SIGINT\n"],
           stubborn: [false, -1, "killed by SIGTERM\n"],
-          late: { code: -1, stdout: "", stderr: "cancelled before start", ok: false },
+          late: {
+            code: -1,
+            stdout: "",
+            stderr: "cancelled before start",
+            output: "cancelled before start",
+            ok: false,
+          },
         },
       );
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
+  });
+});
+
+describe("createSh output", () => {
+  test("stdout and stderr keep each stream apart and the order they arrived in", async () => {
+    // The pauses let each write reach the parent before the next, as a real tool's lines do.
+    const r = await createSh().run([
+      "sh",
+      "-c",
+      "echo compiling; sleep 0.2; echo 'warning: unused' >&2; sleep 0.2; echo wrote dist",
+    ]);
+    assert.deepEqual(
+      { stdout: r.stdout, stderr: r.stderr, output: r.output },
+      {
+        stdout: "compiling\nwrote dist\n",
+        stderr: "warning: unused\n",
+        output: "compiling\nwarning: unused\nwrote dist\n",
+      },
+    );
   });
 });

@@ -7,6 +7,8 @@ export interface ShResult {
   code: number;
   stdout: string;
   stderr: string;
+  /** Both streams as the command wrote them, in arrival order. */
+  output: string;
   ok: boolean;
 }
 

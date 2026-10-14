@@ -27,6 +27,9 @@ before `npm install` has run. Locally, `npx dagactions run scripts/ci.ts` runs t
 | `force`    | `false`                    | Ignore the cache for this run.                                                              |
 | `only`     |                            | Comma-separated nodes to run, with their dependencies.                                      |
 
+What the step summary shows, and in which order, is set in the workflow file with `summary`; see
+[Choosing what the summary shows](https://github.com/mrmeku/dag/tree/main/packages/dagactions#choosing-what-the-summary-shows).
+
 The action's `post` runs at the end of the job whatever became of the main step: after a cancel,
 it runs the post steps (cache saves, service shutdowns) the run did not reach.
 

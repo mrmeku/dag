@@ -78,6 +78,7 @@ async function options(file: string, opts: CommonOptions): Promise<RunOptions> {
   const only = opts.only?.split(",").filter(Boolean);
   return {
     workflow: def.workflow,
+    workflowFile: file,
     ports: {
       sh,
       fs,
@@ -90,6 +91,7 @@ async function options(file: string, opts: CommonOptions): Promise<RunOptions> {
     journalPath: opts.journal,
     ...(only && { only }),
     ...(def.limits && { limits: def.limits }),
+    ...(def.summary && { summary: def.summary }),
   };
 }
 
