@@ -21,7 +21,7 @@ const NODES = [
 ];
 
 describe("reporter", () => {
-  test("live checks, groups with CAS logs, annotations, and the full summary; a tool's debug commands are not part of the log", async () => {
+  test("start lines, live checks, groups with CAS logs, annotations, and the full summary; a cached node never starts, last-run.json is read only once a node settles, and a tool's debug commands are not part of the log", async () => {
     const { ports, fs, rec } = createTestPorts({
       files: {
         "/cas/k1/out/stdout.log": "ok line 1\nok line 2\n",
@@ -29,7 +29,7 @@ describe("reporter", () => {
         "/cas/k2/out/stdout.log": "from an earlier run\n",
         "/cas/k3/out/stdout.log": "::debug::walking\n",
         "/cas/k3/out/stderr.log": "boom\n",
-        "/cas/last-run.json": JSON.stringify({ durations: { a: 500, b: 2000 } }),
+        "/cas/last-run.json": JSON.stringify({ durations: { a: 500, b: 2000, c: 3000 } }),
       },
       clock: steppingClock(1_000_000, 1000),
     });
@@ -69,16 +69,18 @@ describe("reporter", () => {
 
     assert.deepEqual(
       {
-        groups: rec.groups,
+        log: rec.log,
         annotations: rec.annotations,
         checks: rec.checks,
         failed,
         lastRun: JSON.parse(await fs.readText("/cas/last-run.json")),
       },
       {
-        groups: [
+        log: [
+          "▷ a",
           { title: "✓ a (1.0s)", lines: ["ok line 1", "ok line 2", "── stderr ──", "warned"] },
           { title: "⚡ b (cached)", lines: ["from an earlier run"] },
+          "▷ c (last run 3.0s)",
           {
             title: "✗ c (1.0s)",
             lines: ["── stderr ──", "boom", "── error ──", "exit 1", "last line"],
@@ -88,6 +90,7 @@ describe("reporter", () => {
         annotations: [{ level: "error", title: "c", message: "exit 1\nlast line" }],
         checks: [
           { name: "a", status: "in_progress", startedAt: "1970-01-01T00:16:40.000Z" },
+          { name: "c", status: "in_progress", startedAt: "1970-01-01T00:16:44.000Z" },
           {
             name: "a",
             status: "completed",
@@ -97,7 +100,6 @@ describe("reporter", () => {
             summary: "done in 1.0s",
             details: "```text\nok line 1\nok line 2\n── stderr ──\nwarned\n```",
           },
-          { name: "b", status: "in_progress", startedAt: "1970-01-01T00:16:42.000Z" },
           {
             name: "b",
             status: "completed",
@@ -107,7 +109,6 @@ describe("reporter", () => {
             summary: "cached",
             details: "```text\nfrom an earlier run\n```",
           },
-          { name: "c", status: "in_progress", startedAt: "1970-01-01T00:16:44.000Z" },
           {
             name: "c",
             status: "completed",

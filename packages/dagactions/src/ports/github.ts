@@ -93,6 +93,7 @@ export function createGithubCi(
       for (const line of flattenGroups(lines)) core.info(line);
       core.endGroup();
     },
+    info: (line) => core.info(line),
     annotate: (level, title, message) => core[level](message, { title }),
     summary: async (markdown) => {
       if (!process.env["GITHUB_STEP_SUMMARY"]) {

@@ -135,4 +135,4 @@ GitHub cancels a job with SIGINT to the step, SIGTERM 7500 ms later and a tree k
 
 ## How it reports
 
-The reporter turns the engine's event stream into GHA output: one collapsible group per node, emitted when the node settles so concurrent output never interleaves; an annotation per failure; a step summary with the DAG colored by status, durations and cache savings; and one check run per node in the PR Checks tab, live. Check runs need `checks: write` and `GITHUB_TOKEN` in the step env, and are silently off without them.
+The reporter turns the engine's event stream into GHA output: a line when a node's action starts, with its duration in the last run, and none for a cached node; one collapsible group per node, emitted when the node settles so concurrent output never interleaves; an annotation per failure; a step summary with the DAG colored by status, durations and cache savings; and one check run per node in the PR Checks tab, live. Check runs need `checks: write` and `GITHUB_TOKEN` in the step env, and are silently off without them.

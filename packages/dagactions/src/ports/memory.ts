@@ -5,7 +5,8 @@ import { createMemoryActionsCache, type MemoryActionsCache } from "./actions-cac
 
 export interface RecordedCi {
   ci: Ci;
-  groups: Array<{ title: string; lines: string[] }>;
+  /** The job log in order: a group as its title and lines, a plain line as itself. */
+  log: Array<string | { title: string; lines: string[] }>;
   annotations: Array<{ level: AnnotationLevel; title: string; message: string }>;
   summaries: string[];
   checks: CheckUpdate[];
@@ -14,7 +15,7 @@ export interface RecordedCi {
 /** A Ci that records every call, so tests can assert the exact reporter output. */
 export function createRecordingCi(context: Partial<CiContext> = {}): RecordedCi {
   const rec: RecordedCi = {
-    groups: [],
+    log: [],
     annotations: [],
     summaries: [],
     checks: [],
@@ -31,7 +32,8 @@ export function createRecordingCi(context: Partial<CiContext> = {}): RecordedCi 
         serverUrl: "",
         ...context,
       }),
-      group: (title, lines) => void rec.groups.push({ title, lines }),
+      group: (title, lines) => void rec.log.push({ title, lines }),
+      info: (line) => void rec.log.push(line),
       annotate: (level, title, message) => void rec.annotations.push({ level, title, message }),
       summary: async (markdown) => void rec.summaries.push(markdown),
       check: async (update) => void rec.checks.push(update),

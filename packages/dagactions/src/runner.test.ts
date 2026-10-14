@@ -88,7 +88,9 @@ describe("cancel, then post", () => {
         calls: calls.map((c) => c.slice(0, 2)),
         stoppedPid: await fs.readText(stop[2]!),
         saved: [...service.entries.keys()],
-        groups: rec.groups.map((g) => g.title).filter((t) => t.startsWith("dagactions")),
+        headersAndStarts: rec.log
+          .map((e) => (typeof e === "string" ? e : e.title))
+          .filter((t) => t.startsWith("dagactions") || t.startsWith("▷")),
         summaryTitles: rec.summaries.map((s) => s.split("\n")[0]),
       },
       {
@@ -119,13 +121,60 @@ describe("cancel, then post", () => {
         calls: [["db", "start"], ["fast"], ["slow"], ["db", "stop"]],
         stoppedPid: "7",
         saved: ["bun-old", "bun-new"],
-        groups: [
+        headersAndStarts: [
           "dagactions · recording · ref= · 7 nodes",
+          "▷ restore:bun",
+          "▷ up:db",
+          "▷ fast",
+          "▷ slow",
           "dagactions · post · 2 of 2 post steps owed",
+          "▷ down:db",
+          "▷ save:bun",
           "dagactions · post · 0 of 2 post steps owed",
         ],
         summaryTitles: ["## dagactions", "## dagactions · post"],
       },
+    );
+  });
+});
+
+describe("progress", () => {
+  test("a node's start line is in the log while it runs: slow cannot finish until fast, which started with it, has settled", async () => {
+    const { ports, rec } = createTestPorts();
+    const fastSettled = new Promise<void>((resolve) => {
+      const group = ports.ci.group;
+      ports.ci.group = (title, lines) => {
+        group(title, lines);
+        if (title.startsWith("✓ fast")) resolve();
+      };
+    });
+    ports.sh = {
+      run: async (cmd) => {
+        if (cmd[0] === "slow") await fastSettled;
+        return { code: 0, stdout: "", stderr: "", ok: true };
+      },
+    };
+    const workflow = defineWorkflow({
+      build: (w) => {
+        w.run({ name: "slow", cmd: ["slow"], cacheable: false });
+        w.run({ name: "fast", cmd: ["fast"], cacheable: false });
+      },
+    });
+    await runWorkflow({
+      workflow: workflow.workflow,
+      ports,
+      casBaseDir: CAS,
+      journalPath: JOURNAL,
+    });
+    assert.deepEqual(
+      rec.log.map((e) => (typeof e === "string" ? e : e.title)),
+      [
+        "dagactions · recording · ref= · 2 nodes",
+        "▷ slow",
+        "▷ fast",
+        "✓ fast (1.0s)",
+        "✓ slow (3.0s)",
+      ],
     );
   });
 });

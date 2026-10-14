@@ -9,11 +9,13 @@ import type { Node, Outputs } from "./graph/index.ts";
 /**
  * Callback that executes a single node given its dep hashes and outputs. The orchestrator calls
  * this for each ready node — the implementation decides *how* to run it (local, remote, etc.).
+ * It calls `started` when the node's action begins, which emits `start`.
  */
 export type RunNode = (
   node: Node,
   depContentHashes: Map<string, string>,
   depOutputs: Record<string, Outputs>,
+  started: () => void,
 ) => Promise<ProcessNodeResult>;
 
 /**
@@ -95,7 +97,7 @@ export async function orchestrate(
           .map((d) => [d, state.getContentHash(d)!]),
       );
       const depOutputs = state.inputsFor(node);
-      return run(node, depContentHashes, depOutputs)
+      return run(node, depContentHashes, depOutputs, () => emit({ type: "start", node }))
         .catch(
           (e): ProcessNodeResult => ({
             name: node.name,

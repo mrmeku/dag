@@ -58,12 +58,13 @@ export async function execute(
   validateNoCycles(nodes);
   const scheduler = opts?.scheduler ?? unboundedScheduler();
   const execCtx = { ...ctx, inputHashes: ctx.inputHashes ?? new Map() };
-  const run: RunNode = (desc, depContentHashes, depOutputs) => {
+  const run: RunNode = (desc, depContentHashes, depOutputs, started) => {
     const node = nodes.get(desc.name)!;
     return processNode(node, depContentHashes, depOutputs, execCtx, {
       force: selects(opts?.force, node),
       cacheOnly: selects(opts?.cacheOnly, node),
       ...(opts?.signal && { signal: opts.signal }),
+      onStart: started,
     });
   };
   return orchestrate(nodes.values(), run, scheduler, opts?.onEvent, opts?.signal);

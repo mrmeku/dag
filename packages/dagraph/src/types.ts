@@ -43,7 +43,7 @@ export type ProcessNodeResult = ProcessNodeResultBase &
 export type ExecEvent =
   /** The scheduler handed the node to a runner. Fires before the cache is consulted. */
   | { type: "dispatch"; node: Node }
-  /** The node's action actually ran (emitted with its result; cached nodes never start). */
+  /** The node's action is about to run: a cache miss. Cached nodes never start. */
   | { type: "start"; node: Node }
   | { type: "settled"; node: Node }
   | { type: "cached"; node: Node; actionKey: string; outputs: Outputs; contentHash: string }

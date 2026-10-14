@@ -13,7 +13,7 @@ import {
   MAX_GRAPH_NODES,
   SUMMARY_BUDGET_BYTES,
 } from "./config.ts";
-import type { CheckConclusion, Ports } from "./ports.ts";
+import type { CheckConclusion, CheckUpdate, Ports } from "./ports.ts";
 
 type Settled = Extract<
   ExecEvent,
@@ -158,9 +158,10 @@ export function criticalPath(
 }
 
 /**
- * Turns dagraph's event stream into CI output: a live check per node (in_progress at dispatch,
- * completed at settle), one collapsible group per node emitted when it settles so concurrent
- * nodes never interleave, an annotation per failure, and a markdown summary: status line with
+ * Turns dagraph's event stream into CI output: a line when a node's action starts, with its
+ * duration in the last run; a live check per node (in_progress when its action starts, completed
+ * at settle); one collapsible group per node emitted when it settles so concurrent nodes never
+ * interleave; an annotation per failure; and a markdown summary: status line with
  * wall time, parallelism and cache savings; the DAG colored by status; failures with their log
  * tails; a node table with durations and the change against the previous run; the critical
  * path; and a gantt of what ran. Logs are read back from the CAS, which is why cached and failed
@@ -173,9 +174,14 @@ export function createReporter(
   const started = new Map<string, number>();
   const timing = new Map<string, Timing>();
   const durations: Record<string, number> = {};
-  let chain = Promise.resolve();
-  const queue = (work: () => Promise<void>) => {
-    chain = chain.then(work);
+  // The log keeps event order. Check runs wait on the API, so they queue apart and never hold it up.
+  let logs = Promise.resolve();
+  let checks = Promise.resolve();
+  const queueLog = (work: () => Promise<void>) => {
+    logs = logs.then(work);
+  };
+  const queueCheck = (update: CheckUpdate) => {
+    checks = checks.then(() => ports.ci.check(update));
   };
 
   const logLines = async (actionKey: string): Promise<string[]> => {
@@ -240,7 +246,7 @@ export function createReporter(
     // The node's log becomes the check's own page on GitHub.
     const details =
       body.length > 0 ? ["```text", ...body.slice(-CHECK_TEXT_LINES), "```"].join("\n") : undefined;
-    await ports.ci.check({
+    queueCheck({
       name,
       status: "completed",
       conclusion: CONCLUSION[ev.type],
@@ -252,16 +258,26 @@ export function createReporter(
   };
 
   const onEvent = (ev: ExecEvent) => {
-    if (ev.type === "start" || ev.type === "settled") return;
-    const now = ports.clock.now();
-    if (ev.type === "dispatch") {
-      started.set(ev.node.name, now);
-      queue(() =>
-        ports.ci.check({ name: ev.node.name, status: "in_progress", startedAt: iso(now) }),
-      );
-      return;
+    const name = ev.node.name;
+    switch (ev.type) {
+      case "settled":
+        return;
+      case "dispatch":
+        started.set(name, ports.clock.now());
+        return;
+      case "start":
+        queueLog(async () => {
+          // A node restores the CAS that holds last-run.json, so a start never reads it first.
+          const before = previous && (await previous)?.durations[name];
+          ports.ci.info(`▷ ${name}${before ? ` (last run ${formatDuration(before)})` : ""}`);
+        });
+        queueCheck({ name, status: "in_progress", startedAt: iso(started.get(name)!) });
+        return;
+      default: {
+        const now = ports.clock.now();
+        queueLog(() => settle(ev, now));
+      }
     }
-    queue(() => settle(ev, now));
   };
 
   const readLastRun = async (): Promise<LastRun | null> => {
@@ -287,7 +303,8 @@ export function createReporter(
   };
 
   const finish = async (results: ExecResult[]): Promise<{ failed: number; markdown: string }> => {
-    await chain;
+    await logs;
+    await checks;
     const sorted = [...results].sort((a, b) => a.name.localeCompare(b.name));
     const statusOf = (name: string) => results.find((r) => r.name === name)?.status;
     const durationOf = (name: string) => {

@@ -72,14 +72,15 @@ export interface CheckUpdate {
 }
 
 /**
- * The CI-provider surface. On GitHub this emits workflow commands (collapsible log groups,
- * annotations), writes the step summary, and drives check runs; locally it prints to the
+ * The CI-provider surface. On GitHub this emits workflow commands (collapsible log groups, plain
+ * lines, annotations), writes the step summary, and drives check runs; locally it prints to the
  * terminal, writes the summary to a file, and treats checks as a no-op. Everything
  * provider-specific goes through here, so a workflow runs unchanged in both places.
  */
 export interface Ci {
   context: () => Promise<CiContext>;
   group: (title: string, lines: string[]) => void;
+  info: (line: string) => void;
   annotate: (level: AnnotationLevel, title: string, message: string) => void;
   summary: (markdown: string) => Promise<void>;
   check: (update: CheckUpdate) => Promise<void>;

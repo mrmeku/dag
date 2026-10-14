@@ -126,9 +126,9 @@ export async function runPost(opts: Omit<RunOptions, "force" | "signal">): Promi
   };
   const all = await orchestrate(
     nodes.values(),
-    (node, depHashes, depOutputs) =>
+    (node, depHashes, depOutputs, started) =>
       owed.has(node.name)
-        ? processNode(nodes.get(node.name)!, depHashes, depOutputs, ctx)
+        ? processNode(nodes.get(node.name)!, depHashes, depOutputs, ctx, { onStart: started })
         : Promise.resolve(replay(node.name, before[node.name])),
     throttledScheduler(opts.limits),
     (ev) => {

@@ -753,6 +753,63 @@ describe("Graph", () => {
   });
 
   describe("progress events", () => {
+    test("each event marks its moment in a node's life: start after a cache miss and before the action, the result after it; start is live while other nodes run, and a cached or held node never starts", async () => {
+      const fs = createMemoryDagFs();
+      const cache = new MemCache();
+      const lives: Record<string, string[]> = {};
+      const mark = (name: string, moment: string) => (lives[name] ??= []).push(moment);
+      let releaseSlow = () => {};
+      const fastSettled = new Promise<void>((r) => (releaseSlow = r));
+      let slowWhenFastSettled: string[] = [];
+      const add = (g: Graph, name: string, run: () => Promise<unknown>, cacheable = true) =>
+        g.add({
+          name,
+          kind: name,
+          deps: [],
+          config: "1",
+          params: p(name),
+          ...(!cacheable && { cacheable: false }),
+          action: async () => {
+            mark(name, "action begins");
+            await run();
+            mark(name, "action ends");
+            return write(fs, `${name}.txt`, name);
+          },
+        });
+
+      const first = new Graph();
+      add(first, "warm", async () => {});
+      await execute(first, ctx(cache, fs));
+      delete lives["warm"];
+
+      const g = new Graph();
+      add(g, "warm", async () => {});
+      add(g, "held", async () => {});
+      add(g, "slow", () => fastSettled, false);
+      add(g, "fast", async () => {}, false);
+      await execute(g, ctx(cache, fs), {
+        cacheOnly: (n) => n.name === "held",
+        onEvent: (ev) => {
+          mark(ev.node.name, ev.type);
+          if (ev.type === "settled" && ev.node.name === "fast") {
+            slowWhenFastSettled = [...lives["slow"]!];
+            releaseSlow();
+          }
+        },
+      });
+
+      const ran = ["dispatch", "start", "action begins", "action ends", "done", "settled"];
+      expect({ lives, slowWhenFastSettled }).toEqual({
+        lives: {
+          warm: ["dispatch", "cached", "settled"],
+          held: ["dispatch", "fail", "settled"],
+          slow: ran,
+          fast: ran,
+        },
+        slowWhenFastSettled: ["dispatch", "start", "action begins"],
+      });
+    });
+
     test("emits start+success for dirty nodes", async () => {
       const fs = createMemoryDagFs();
       const cache = new MemCache();

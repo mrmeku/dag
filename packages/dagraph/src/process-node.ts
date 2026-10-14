@@ -30,6 +30,8 @@ export interface ProcessNodeOptions {
   cacheOnly?: boolean;
   /** Handed to the action, which may stop early when it fires. */
   signal?: AbortSignal;
+  /** Called on a cache miss, just before the action runs. */
+  onStart?: () => void;
 }
 
 /** Error of a node that `cacheOnly` kept from running. */
@@ -103,6 +105,7 @@ export async function processNode(
   }
 
   await ctx.fs.ensureDir(casDir);
+  opts?.onStart?.();
   const startTime = Date.now();
   try {
     const outputs = await node.action(

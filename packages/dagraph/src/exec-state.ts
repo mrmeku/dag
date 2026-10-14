@@ -178,8 +178,8 @@ export class ExecState {
   }
 
   /**
-   * Convert a ProcessNodeResult into the ExecEvent sequence that should be dispatched. A "done"
-   * result emits start + done; "cached" emits just cached; failures emit start + fail or dep-failed.
+   * Convert a ProcessNodeResult into the ExecEvent sequence that should be dispatched. `start` is
+   * not among them: the runner emits it when the action begins, before the result exists.
    */
   static resultToEvents(node: Node, result: ProcessNodeResult): ExecEvent[] {
     switch (result.status) {
@@ -195,7 +195,6 @@ export class ExecState {
         ];
       case "done":
         return [
-          { type: "start", node },
           {
             type: "done",
             node,
@@ -207,7 +206,6 @@ export class ExecState {
         ];
       case "fail":
         return [
-          { type: "start", node },
           {
             type: "fail",
             node,

@@ -31,6 +31,7 @@ export function createLocalCi(opts: {
       write(`▶ ${title}`);
       for (const line of lines) write(`    ${line}`);
     },
+    info: (line) => write(line),
     annotate: (level, title, message) => {
       write(`[${level}] ${title}: ${message}`);
     },
@@ -66,6 +67,7 @@ export function nullCi(): Ci {
       serverUrl: "",
     }),
     group: () => {},
+    info: () => {},
     annotate: () => {},
     summary: async () => {},
     check: async () => {},
