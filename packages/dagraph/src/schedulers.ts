@@ -11,13 +11,21 @@ function schedulingLoop(hooks?: {
   onEnd?: (node: Node) => void;
 }): Scheduler {
   return async (ctx: SchedulerContext) => {
-    while (ctx.hasWork()) {
+    // A settled node resumes the loop before its onEnd runs, so the loop may see a stale filter.
+    // onEnd dispatches too: whichever of the two runs last sees both updates.
+    const dispatch = () => {
       let node: Node | null;
       while ((node = ctx.take(hooks?.filter))) {
         const captured = node;
         hooks?.onStart?.(captured);
-        ctx.run(captured).then(() => hooks?.onEnd?.(captured));
+        ctx.run(captured).then(() => {
+          hooks?.onEnd?.(captured);
+          dispatch();
+        });
       }
+    };
+    while (ctx.hasWork()) {
+      dispatch();
       await ctx.workAvailable();
     }
   };
