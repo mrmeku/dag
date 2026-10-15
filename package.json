@@ -17,7 +17,7 @@
     "@mrmeku/dagactions": "workspace:*",
     "@mrmeku/dagraph": "workspace:*",
     "@types/bun": "latest",
-    "@types/node": "^22.18.0",
+    "@types/node": "^24.19.2",
     "@typescript/native-preview": "^7.0.0-dev.20260131.1",
     "eslint": "^10.0.1",
     "prettier": "^3.8.1",

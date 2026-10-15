@@ -21,7 +21,7 @@ Issues are welcome.
 
 ## Developing
 
-Bun 1.4 and Node 22.18 or later.
+Bun 1.4 and Node 24.2 or later.
 
 ```
 bun install

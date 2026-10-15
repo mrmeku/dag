@@ -10,7 +10,7 @@
   "module": "src/index.ts",
   "type": "module",
   "engines": {
-    "node": ">=22.18"
+    "node": ">=24.2"
   },
   "exports": {
     ".": "./src/index.ts"

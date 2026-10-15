@@ -122,6 +122,7 @@ withCommonOptions(
   process.exitCode = failed > 0 ? 1 : 0;
 });
 
-// An older Node has no import.meta.main and would exit 0 here having run nothing.
-if (import.meta.main === undefined) throw new Error("dagactions needs Node 22.18 or later");
+// Node 24.0 and 24.1 have no import.meta.main and would exit 0 here having run nothing.
+if (import.meta.main === undefined || Number(process.versions.node.split(".")[0]) < 24)
+  throw new Error("dagactions needs Node 24.2 or later");
 if (import.meta.main) await program.parseAsync();
