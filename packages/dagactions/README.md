@@ -55,7 +55,7 @@ A step's outputs are the files its command writes under `$DAGACTIONS_OUT` and de
 On GitHub:
 
 ```yaml
-- uses: mrmeku/dagactions@v1
+- uses: mrmeku/dagactions@v0
   with:
     workflow: scripts/ci.ts
   env:

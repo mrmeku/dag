@@ -10,7 +10,7 @@ Two packages for running work as a directed acyclic graph, with content-addresse
 The GitHub action is published to [`mrmeku/dagactions`](https://github.com/mrmeku/dagactions):
 
 ```yaml
-- uses: mrmeku/dagactions@v1
+- uses: mrmeku/dagactions@v0
   with:
     workflow: scripts/ci.ts
 ```

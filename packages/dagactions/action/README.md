@@ -8,7 +8,7 @@ laptop from the same file.
 - uses: actions/setup-node@v4
   with:
     node-version: 24
-- uses: mrmeku/dagactions@v1
+- uses: mrmeku/dagactions@v0
   with:
     workflow: scripts/ci.ts
   env:
