@@ -1,12 +1,13 @@
 import { Graph } from "@mrmeku/dagraph";
 import assert from "node:assert/strict";
+import { EventEmitter } from "node:events";
 import { describe, test } from "node:test";
 import { STATUS_ICON } from "./config.ts";
 import { readJournal } from "./journal.ts";
 import type { Sh } from "./ports.ts";
 import { createMemoryActionsCache } from "./ports/actions-cache.ts";
 import { createTestPorts, okSh, type RecordedCi } from "./ports/memory.ts";
-import { runPost, runWorkflow } from "./runner.ts";
+import { runJob, runPost, runWorkflow } from "./runner.ts";
 import { createSteps, defineWorkflow } from "./workflow.ts";
 
 const CAS = "/cas";
@@ -109,7 +110,7 @@ describe("cancel, then post", () => {
         saved: [...service.entries.keys()],
         headersStartsAndRecaps: rec.log
           .map((e) => (typeof e === "string" ? e : e.title))
-          .filter((t) => t.startsWith("dagactions") || t.startsWith("▷")),
+          .filter((t) => /^(\d+ nodes|post · |▷ )/.test(t) || t.includes(" · built ")),
         summaries: rec.summaries,
         slowLog: groupLines(rec.log, `${STATUS_ICON.cancelled} slow`),
       },
@@ -142,22 +143,21 @@ describe("cancel, then post", () => {
         stoppedPid: "7",
         saved: ["bun-old", "bun-new"],
         headersStartsAndRecaps: [
-          "dagactions · recording · ref= · 7 nodes",
+          "7 nodes",
           "▷ restore:bun",
           "▷ up:db",
           "▷ fast",
           "▷ slow",
-          "dagactions · ◼\uFE0E cancelled, 4 nodes not run · built 3 · cached 0 · failed 0 · skipped 0 · cancelled 4 · wall 7.0s",
-          "dagactions · post · 2 of 2 post steps owed",
+          "◼\uFE0E cancelled, 4 nodes not run · run · built 3 · cached 0 · failed 0 · skipped 0 · cancelled 4 · wall 11.0s",
+          "post · 2 of 2 post steps owed",
           "▷ down:db",
           "▷ save:bun",
-          "dagactions · post · ✔\uFE0E all 2 nodes succeeded · built 2 · cached 0 · failed 0 · skipped 0 · wall 3.0s",
-          "dagactions · post · 0 of 2 post steps owed",
+          "✔\uFE0E all 2 nodes succeeded · run · post · built 2 · cached 0 · failed 0 · skipped 0 · wall 5.0s",
         ],
         // The workflow's own section, in both passes; the post pass draws its owed steps alone.
         summaries: [
           [
-            "## dagactions",
+            "## run",
             "",
             "restore:bun done",
             "up:db done",
@@ -168,9 +168,86 @@ describe("cancel, then post", () => {
             "down:db cancelled",
             "",
           ].join("\n"),
-          ["## dagactions · post", "", "save:bun done", "down:db done", ""].join("\n"),
+          ["## run · post", "", "save:bun done", "down:db done", ""].join("\n"),
         ],
         slowLog: ["killed by SIGINT"],
+      },
+    );
+  });
+});
+
+describe("runJob", () => {
+  test("after a cancel, the same process runs the post steps owed in the run's selection, under its title and summary, and exits 130", async () => {
+    const controller = new AbortController();
+    const { ports, rec } = createTestPorts();
+    const fastSettled = new Promise<void>((resolve) => {
+      const group = ports.ci.group;
+      ports.ci.group = (title, lines) => {
+        group(title, lines);
+        if (title.startsWith("✔\uFE0E fast")) resolve();
+      };
+    });
+    ports.sh = {
+      run: async (cmd, opts) => {
+        if (cmd[0] !== "slow") return { code: 0, stdout: "", stderr: "", output: "", ok: true };
+        return new Promise((resolve) =>
+          opts!.signal!.addEventListener("abort", () =>
+            resolve({ code: -1, stdout: "", stderr: "", output: "", ok: false }),
+          ),
+        );
+      },
+    };
+    const workflow = defineWorkflow({
+      summary: [(r) => r.nodes.map((n) => `${n.name} ${n.status}`)],
+      build: (w) => {
+        const fast = w.run({ name: "fast", cmd: ["fast"], cacheable: false });
+        const slow = w.run({ name: "slow", cmd: ["slow"], cacheable: false });
+        w.post({ name: "save", main: fast, cmd: ["save"], deps: { slow: w.optional(slow) } });
+        w.post({ name: "notify", main: fast, cmd: ["notify"], deps: {} });
+      },
+    });
+    const job = runJob(
+      {
+        workflow: workflow.workflow,
+        workflowFile: "ci.ts",
+        summary: workflow.summary!,
+        ports,
+        casBaseDir: CAS,
+        journalPath: JOURNAL,
+        only: ["save"],
+        signal: controller.signal,
+      },
+      new EventEmitter(),
+    );
+    await fastSettled;
+    controller.abort();
+    assert.deepEqual(
+      { code: await job, log: rec.log, summaries: rec.summaries },
+      {
+        code: 130,
+        log: [
+          {
+            title: "ci.ts · 3 of 4 nodes (--only save)",
+            lines: ["fast", "slow", "save"],
+          },
+          "▷ fast",
+          "▷ slow",
+          { title: "✔\uFE0E fast (4.0s)", lines: [] },
+          { title: "◼\uFE0E slow (cancelled)", lines: [] },
+          "◼\uFE0E save: cancelled",
+          "",
+          "◼\uFE0E cancelled, 2 nodes not run · ci.ts · built 1 · cached 0 · failed 0 · skipped 0 · cancelled 2 · wall 5.0s",
+          "cancelled: slow, save",
+          { title: "post · 1 of 1 post steps owed", lines: ["save"] },
+          "▷ save",
+          { title: "✔\uFE0E save (2.0s)", lines: [] },
+          "",
+          "✔\uFE0E 1 node succeeded · ci.ts · post · built 1 · cached 0 · failed 0 · skipped 0 · wall 2.0s",
+        ],
+        summaries: [
+          ["## ci.ts", "", "fast done", "slow cancelled", "save cancelled", ""].join("\n"),
+          ["## ci.ts · post", "", "save done", ""].join("\n"),
+        ],
       },
     );
   });
@@ -207,13 +284,13 @@ describe("progress", () => {
     assert.deepEqual(
       rec.log.map((e) => (typeof e === "string" ? e : e.title)),
       [
-        "dagactions · recording · ref= · 2 nodes",
+        "2 nodes",
         "▷ slow",
         "▷ fast",
-        "✔\uFE0E fast (1.0s)",
-        "✔\uFE0E slow (3.0s)",
+        "✔\uFE0E fast (3.0s)",
+        "✔\uFE0E slow (5.0s)",
         "",
-        "dagactions · ✔\uFE0E all 2 nodes succeeded · built 2 · cached 0 · failed 0 · skipped 0 · wall 3.0s",
+        "✔\uFE0E all 2 nodes succeeded · run · built 2 · cached 0 · failed 0 · skipped 0 · wall 5.0s",
       ],
     );
   });

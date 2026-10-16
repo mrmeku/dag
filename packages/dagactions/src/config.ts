@@ -18,6 +18,59 @@ export const CHILD_SIGTERM_GRACE_MS = 1000;
 export const STREAM_DRAIN_GRACE_MS = 1000;
 /** Where the local adapter writes the markdown summary GitHub would render on the run page. */
 export const DEFAULT_SUMMARY_PATH = ".dagactions/summary.md";
+/** Each node's output as it arrives, in `<dir>/<node>.log`. */
+export const DEFAULT_LOG_DIR = ".dagactions/logs";
+/** The last local run's failures, for a person or an agent to fix from. */
+export const DEFAULT_FAILURES_REPORT_PATH = ".dagactions/failures.md";
+/** What reruns a workflow file, followed by the file: every rerun and reproduce line starts so. */
+export const RERUN_COMMAND = "npx dagactions run";
+/**
+ * The local terminal's output: `live` keeps a footer of running nodes under the scrollback,
+ * `failures` prints only failures and the recap (an agent's), and `grouped` every node's log as
+ * GitHub groups it (pipes and CI).
+ */
+export const OUTPUT_STYLES = ["live", "failures", "grouped"] as const;
+export type OutputStyle = (typeof OUTPUT_STYLES)[number];
+/** Overrides the style the CLI picks; `--output-style` overrides this. */
+export const OUTPUT_STYLE_ENV = "DAGACTIONS_OUTPUT_STYLE";
+/** A failure's log in the terminal: whole up to FAILURE_FULL_LINES lines, else its last FAILURE_TAIL_LINES. */
+export const FAILURE_FULL_LINES = 40;
+export const FAILURE_TAIL_LINES = 20;
+/**
+ * The `failures` style keeps its whole output within what an agent's tool shows of a command
+ * (~10,000 characters): the first AGENT_FAILURE_BLOCKS failures as blocks whose tails share
+ * AGENT_TAIL_BUDGET_CHARS, later ones a line each, and lines past AGENT_OUTPUT_BUDGET_CHARS
+ * counted, not printed. The recap always prints.
+ */
+export const AGENT_FAILURE_BLOCKS = 3;
+export const AGENT_TAIL_BUDGET_CHARS = 4000;
+export const AGENT_OUTPUT_BUDGET_CHARS = 7000;
+/** The recap names this many of the nodes a failure brought down, then counts the rest. */
+export const RECAP_NAMES_SHOWN = 5;
+/** A longer line of a command's output is cut in the terminal; the log file keeps it whole. */
+export const SCROLLBACK_LINE_MAX_CHARS = 500;
+/** Names pad to the longest in the run, up to this many columns; only the footer cuts one. */
+export const NAME_MAX_COLUMNS = 24;
+/** Where a labelled value starts: a failure block's `├ log    …`, the recap's `logs     …`. */
+export const LABEL_COLUMNS = 9;
+/** The footer redraws this often once the run is LIVE_FIRST_DRAW_MS old: a cached run shows none. */
+export const LIVE_FRAME_MS = 100;
+export const LIVE_FIRST_DRAW_MS = 500;
+/** The footer's largest size (and at most half the rows), so a narrower window rarely reflows it. */
+export const LIVE_MAX_ROWS = 8;
+export const LIVE_MAX_COLUMNS = 72;
+export const LIVE_MIN_COLUMNS = 10;
+/** The terminal's size when stdout does not say it, as when `live` is asked for in a pipe. */
+export const LIVE_FALLBACK_SIZE = { columns: 80, rows: 24 };
+/** A command's latest line is cut to this many characters before anything measures its width. */
+export const LIVE_LATEST_LINE_MAX_CHARS = 2 * LIVE_MAX_COLUMNS;
+/** A row's latest line follows its clock after this many spaces, given LIVE_LATEST_LINE_MIN_COLUMNS columns. */
+export const LIVE_LATEST_LINE_GAP = 2;
+export const LIVE_LATEST_LINE_MIN_COLUMNS = 4;
+/** The waiting nodes the footer lists, with the deps they wait on, LIVE_WAITS_ON_SHOWN named. */
+export const LIVE_WAITING_ROWS = 2;
+export const LIVE_WAITS_ON_SHOWN = 2;
+export const SPINNER_FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 /** Directory names pruned from source hashing. Must include the CAS itself. */
 export const DEFAULT_EXCLUDES = [
   "node_modules",
@@ -36,7 +89,7 @@ export const CHECK_TEXT_MAX_CHARS = 65_000;
 /** Above this many nodes the summary draws one node per kind instead (GitHub refuses huge diagrams). */
 export const MAX_GRAPH_NODES = 60;
 /** Trailing log lines shown inside a failed node's collapsible block in the summary. */
-export const FAILURE_LOG_LINES = 60;
+export const FAILURES_REPORT_LOG_LINES = 60;
 /** GitHub caps a step summary at 1 MiB; the summary stays within this many UTF-8 bytes, leaving room for the rest of the step. */
 export const SUMMARY_BUDGET_BYTES = 900_000;
 /** A node shorter than this is left out of the critical path; none as long hides the line. */

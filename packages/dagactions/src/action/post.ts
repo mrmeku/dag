@@ -9,8 +9,7 @@ import { actionOptions } from "./env.ts";
 export * from "../index.ts";
 
 export async function main(): Promise<void> {
-  const { failed } = await runPost(await actionOptions(import.meta.url));
-  process.exitCode = failed > 0 ? 1 : 0;
+  process.exitCode = (await runPost(await actionOptions(import.meta.url))).exitCode;
 }
 
 main().catch((e: unknown) => {

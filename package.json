@@ -11,7 +11,8 @@
     "build:action": "cd packages/dagactions && bun run build:action",
     "typecheck": "tsgo --noEmit",
     "lint": "bun --bun eslint .",
-    "format": "prettier --write ."
+    "format": "prettier --write .",
+    "docs": "node scripts/reference-doc.ts"
   },
   "devDependencies": {
     "@mrmeku/dagactions": "workspace:*",
@@ -19,9 +20,11 @@
     "@types/bun": "latest",
     "@types/node": "^24.19.2",
     "@typescript/native-preview": "^7.0.0-dev.20260131.1",
+    "commander": "^14.0.3",
     "eslint": "^10.0.1",
     "prettier": "^3.8.1",
     "prettier-plugin-organize-imports": "^4.3.0",
-    "typescript-eslint": "^8.54.0"
+    "typescript-eslint": "^8.54.0",
+    "yaml": "^2.9.1"
   }
 }

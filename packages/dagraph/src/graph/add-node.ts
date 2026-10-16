@@ -50,11 +50,14 @@ export function addNode<P extends BaseParams, R extends Outputs>({
   normalize?: Normalizers<P>;
 }): NodeRef<R> {
   const refs = Object.values(params.deps ?? {}).filter((r) => r != null);
-  const optionalDeps = refs.filter((r) => r.optional).map((r) => r.name);
+  // Two roles may name one node: it is one dep, and required if either role requires it.
+  const deps = [...new Set(refs.map((r) => r.name))];
+  const requiredDepNames = new Set(refs.filter((r) => !r.optional).map((r) => r.name));
+  const optionalDeps = deps.filter((dep) => !requiredDepNames.has(dep));
   const registeredName = graph.add({
     name,
     kind: params.kind,
-    deps: refs.map((r) => r.name),
+    deps,
     ...(optionalDeps.length > 0 && { optionalDeps }),
     config,
     ...(concurrencyGroup && { concurrencyGroup }),

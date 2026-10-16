@@ -1,223 +1,189 @@
+<div align="center">
+
 # dagactions
 
-Define GitHub Actions jobs as a DAG in TypeScript. Run them locally too.
+**Run a GitHub Actions job as a graph of cached steps, on GitHub and on your laptop.**
 
-A GitHub Actions (GHA) job is a list of steps that run one after another. dagactions makes it a graph: each step says what it depends on and which files it reads, so independent steps run concurrently, within the limits you set. The engine writes each step's outputs to a content-addressed store (CAS). Carry that store between runs, with `actions/cache`, a persistent runner or any other store, and a step whose inputs have not changed is a cache hit: an edit re-runs only the steps that read it.
+[![npm](https://img.shields.io/npm/v/@mrmeku/dagactions.svg)](https://www.npmjs.com/package/@mrmeku/dagactions)
+[![CI](https://github.com/mrmeku/dag/actions/workflows/ci.yml/badge.svg)](https://github.com/mrmeku/dag/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/npm/l/@mrmeku/dagactions.svg)](https://github.com/mrmeku/dag/blob/main/LICENSE)
 
-dagactions is [`@mrmeku/dagraph`](https://github.com/mrmeku/dag/tree/main/packages/dagraph) pointed at GHA. The engine schedules and caches file-producing jobs; dagactions supplies the steps a GHA job is made of: run a command, restore and save an `actions/cache` entry, run a post step.
+<img src="https://raw.githubusercontent.com/mrmeku/dag/main/packages/dagactions/docs/media/demo.gif" width="720" alt="Two runs of npx dagactions run scripts/ci.ts. In the first run, six steps run and lint fails. In the second run, five steps come from the cache and only lint runs again.">
 
-## How a workflow is written
+</div>
 
-A workflow file default-exports `defineWorkflow`. Each step returns a ref; passing a ref in another step's `deps` is the edge.
+## Why dagactions
+
+dagactions makes a CI job faster, and it makes a failure easier to fix. A GitHub Actions job runs its steps in sequence, and it runs all of them on each push. dagactions changes this in three ways:
+
+- **Steps run in parallel.** Each step declares the steps that it needs. dagactions starts all other steps immediately, within the limits that you set.
+- **Unchanged steps do not run.** Each step declares the files that it reads. If these files and the step's dependencies did not change, dagactions uses the result from the cache.
+- **The same file runs on your laptop.** `npx dagactions run` shows the job live in your terminal. For each failure, it shows the log, the command, and the command that runs the step again.
+
+## Contents
+
+- [Quick start](#quick-start)
+- [Features](#features)
+- [How it works](#how-it-works)
+- [Output](#output)
+- [Compared to other tools](#compared-to-other-tools)
+- [Documentation](#documentation)
+
+## Quick start
+
+1. Install the package. You must have Node 24.2 or later.
+
+   ```sh
+   npm install --save-dev @mrmeku/dagactions
+   ```
+
+2. Write the workflow in `scripts/ci.ts`:
+
+   ```typescript
+   import { defineWorkflow } from "@mrmeku/dagactions";
+
+   export default defineWorkflow({
+     build: async (w) => {
+       const src = await w.glob("src/**", "package.json", "tsconfig.json");
+       w.runAll({
+         typecheck: { cmd: ["npx", "tsc", "--noEmit"], inputs: src },
+         lint: { cmd: ["npx", "eslint", "src"], inputs: src },
+         test: { cmd: ["npm", "test"], inputs: src },
+       });
+     },
+   });
+   ```
+
+   Each key of `runAll` is a step. These steps have no dependencies, so they start at the same time. `inputs` lists the files that a step reads.
+
+3. Run the workflow locally:
+
+   ```sh
+   npx dagactions run scripts/ci.ts
+   ```
+
+4. Run the workflow again. All three steps come from the cache. Then edit `README.md` and run it again. No step runs, because no step reads `README.md`.
+
+5. Add the workflow to `.github/workflows/ci.yml`:
+
+   ```yaml
+   jobs:
+     ci:
+       runs-on: ubuntu-latest
+       permissions:
+         contents: read
+         checks: write
+       steps:
+         - uses: actions/checkout@v4
+         - uses: actions/setup-node@v4
+           with:
+             node-version: 24
+         - run: npm ci
+         - uses: mrmeku/dagactions@v0
+           with:
+             workflow: scripts/ci.ts
+           env:
+             GITHUB_TOKEN: ${{ github.token }}
+   ```
+
+   `checks: write` and `GITHUB_TOKEN` are optional. With them, each step shows as a check run on the pull request.
+
+### Keep the cache between GitHub runs
+
+Each GitHub runner starts with an empty cache. To use the results of the last run, restore the cache before the checks and save it after them. Both operations are steps in the graph:
 
 ```typescript
-import { defineWorkflow } from "@mrmeku/dagactions";
-
 export default defineWorkflow({
-  limits: { maxParallelism: 4, concurrencyLimits: { test: 2 } },
   build: async (w) => {
-    // actions/cache/restore: the lockfile's exact key first, then the newest older entry.
-    const pnpm = w.restoreCache({
-      name: "restore:pnpm",
-      path: ["~/.local/share/pnpm/store"],
-      key: `pnpm-${process.platform}-${await w.hash("pnpm-lock.yaml")}`,
-      restoreKeys: [`pnpm-${process.platform}-`],
+    const cas = w.restoreCache({
+      name: "restore:cas",
+      path: [".dagactions/cas"],
+      key: `dagactions-${w.ctx.sha}`,
+      restoreKeys: ["dagactions-"],
     });
-    // Runs every time: a cached result would skip a real install on a fresh runner.
-    const install = w.run({
-      name: "install",
-      cmd: ["pnpm", "install"],
-      deps: { pnpm },
-      cacheable: false,
-    });
-    // Declare what each command reads. A README edit then re-runs nothing.
+    const afterRestore = { deps: { cas }, normalize: { cas: () => "" } };
     const src = await w.glob("src/**", "package.json", "tsconfig.json");
-    // A record, not a sequence: nothing here depends on anything else, so all of it starts
-    // at once. Ordering is declared only through `deps`. `group` must name a declared limit.
     const checks = w.runAll({
-      typecheck: { cmd: ["pnpm", "typecheck"], inputs: src, deps: { install } },
-      lint: { cmd: ["pnpm", "lint"], inputs: src, deps: { install } },
-      test: { cmd: ["pnpm", "test"], inputs: src, deps: { install }, group: "test" },
+      typecheck: { cmd: ["npx", "tsc", "--noEmit"], inputs: src, ...afterRestore },
+      lint: { cmd: ["npx", "eslint", "src"], inputs: src, ...afterRestore },
+      test: { cmd: ["npm", "test"], inputs: src, ...afterRestore },
     });
-    w.gate({ deps: checks });
-    // actions/cache/save, right after install, with an optional dep so it saves even when install failed.
-    w.saveCache({ name: "save:pnpm", cache: pnpm, deps: { install: w.optional(install) } });
+    const gate = w.gate({ deps: checks });
+    w.saveCache({ name: "save:cas", cache: cas, deps: { gate: w.optional(gate) } });
   },
 });
 ```
 
-`limits` are the engine's concurrency knobs: how many nodes run at once, and a cap per named group. A step's `group` must be one the limits declare, or it does not compile.
+- `deps: { cas }` starts each check after the restore.
+- `normalize: { cas: () => "" }` keeps the restored key out of the cache key of each check.
+- `w.optional(gate)` saves the cache also when a check fails.
 
-A step's outputs are the files its command writes under `$DAGACTIONS_OUT` and declares by name: `outputs: { tarball: "pkg.tgz" }`. A later step names one where it takes it, in a command argument or an `env` value, as `pack.outputs.tarball`, the `steps.pack.outputs.tarball` of a workflow file; `pack` must be in its `deps`, or the step does not build. The reference resolves to the file's path in the CAS when the command runs, and to the empty string when the output belongs to an optional dep that failed, as on GitHub.
+## Features
 
-## How it runs
+- **A graph of steps.** Steps declare their dependencies. Independent steps run in parallel, with a limit for the run and for each group. [Workflows](https://github.com/mrmeku/dag/blob/main/packages/dagactions/docs/workflows.md)
+- **A content-addressed cache.** A step runs again only when its command, its input files, or the outputs of its dependencies change. [The cache key](https://github.com/mrmeku/dag/blob/main/packages/dagactions/docs/workflows.md#the-cache-key)
+- **Files between steps.** A step writes output files, and other steps read them by reference. [Outputs](https://github.com/mrmeku/dag/blob/main/packages/dagactions/docs/workflows.md#outputs)
+- **GitHub's cache and artifacts as steps.** `w.restoreCache`, `w.saveCache` and `w.uploadArtifact` are `actions/cache` and `actions/upload-artifact`. [Cache and artifacts](https://github.com/mrmeku/dag/blob/main/packages/dagactions/docs/cache-and-artifacts.md)
+- **GitHub's job lifecycle.** Post steps, timeouts and cancellation behave as they do on GitHub. [Lifecycle](https://github.com/mrmeku/dag/blob/main/packages/dagactions/docs/lifecycle.md)
+- **Output for each reader.** A live view in a terminal, a short report for an AI agent, and log groups, check runs and a step summary on GitHub. [Output](https://github.com/mrmeku/dag/blob/main/packages/dagactions/docs/output.md)
+- **Secrets stay out of the cache.** Commands see secrets only through the environment, and dagactions masks them as GitHub does. [Secrets](https://github.com/mrmeku/dag/blob/main/packages/dagactions/docs/secrets.md)
+- **Built on the actions toolkit.** `w.glob` and `w.hash` match what `hashFiles()` matches, byte for byte.
 
-On GitHub:
+## How it works
 
-```yaml
-- uses: mrmeku/dagactions@v0
-  with:
-    workflow: scripts/ci.ts
-  env:
-    GITHUB_TOKEN: ${{ github.token }} # optional: one check run per node
-```
+dagactions runs a graph of steps, and it caches the result of each step by the content of what the step reads. The graph engine is [`@mrmeku/dagraph`](https://github.com/mrmeku/dag/tree/main/packages/dagraph). dagactions adds the steps that a GitHub Actions job uses.
 
-Locally:
+| Term       | Meaning                                                                                                                |
+| ---------- | ---------------------------------------------------------------------------------------------------------------------- |
+| Step       | One command, or one GitHub operation such as a cache restore. The output calls a step a _node_.                        |
+| Dependency | A step that must finish before another step starts. Declare it in `deps`.                                              |
+| Input      | A file outside the graph that a step reads. Declare it in `inputs`.                                                    |
+| Output     | A file that a step writes to `$DAGACTIONS_OUT`. Other steps read it.                                                   |
+| CAS        | The content-addressed store in `.dagactions/cas`. It holds the outputs of each step, by cache key.                     |
+| Cache key  | A hash of the step's name, command and `env`, the content of its inputs, and the content of its dependencies' outputs. |
 
-```
-npx dagactions run scripts/ci.ts [--force] [--only a,b] [--cas .dagactions/cas]
-```
+Before a step runs, dagactions calculates its cache key. If the CAS has an entry for the key, the step does not run. dagactions uses the stored outputs.
 
-`--only` runs the named nodes and their transitive dependencies, nothing else. `--force` ignores the CAS.
+If a step runs again but writes the same outputs, its dependents do not run again. Thus a change that does not change a step's outputs stops at that step.
 
-## The toolkit underneath
+## Output
 
-dagactions is the [actions toolkit](https://github.com/actions/toolkit) arranged as a graph, not a re-implementation of it. On GitHub, `@actions/core` writes the log groups, annotations and step summary, `@actions/github` supplies the context and the check runs, `@actions/cache` and `@actions/artifact` are the cache and artifact services, and `w.glob` and `w.hash` are `@actions/glob`: a pattern matches what the `path:` of `actions/cache` or `actions/upload-artifact` and the `hashFiles()` expression would match, hidden files included, and `w.hash` is `hashFiles()` byte for byte. The directories in `DEFAULT_EXCLUDES` (`config.ts`) are negated on every call. A negation filters but does not prune, so root a pattern below `node_modules`: `src/**` walks `src`, while `**` walks the whole tree, thirty seconds with a `node_modules` present. Each port is a `Pick` of the toolkit's own interface and each node's JSON output is what the toolkit returned.
+dagactions shows each run in the format that its reader needs. It selects the format from where it runs:
 
-## actions/cache as DAG nodes
+| Where it runs  | What it shows                                                                                                  |
+| -------------- | -------------------------------------------------------------------------------------------------------------- |
+| A terminal     | One line for each step that finishes, a block for each failure, and a live footer with the steps that run now. |
+| An AI agent    | Only the failures and a recap, in plain text, in approximately 10,000 characters.                              |
+| A pipe or CI   | The full log of each step, in groups, as GitHub shows it.                                                      |
+| GitHub Actions | A log group, an annotation and a check run for each step, and a step summary with a timeline and the graph.    |
 
-`w.restoreCache` is `actions/cache/restore` and `w.saveCache` is `actions/cache/save`, with the actions' inputs (`path`, `key`, `restoreKeys`). Each node's output file holds what `@actions/cache` returned, as JSON: `cache.json` the key restored or null, `save.json` the entry's id, -1 when nothing was saved, or null when no save was attempted. Match order, immutability, branch scope and quotas are GitHub's; see the [dependency caching reference](https://docs.github.com/en/actions/reference/workflows-and-actions/dependency-caching). Both nodes run every time. The save is a post step with the usual `if: cache-hit != 'true'` built in, and a save the service refuses is a warning, not a failure. Without a cache service, locally or in a `run:` step, every restore misses and every save is a no-op.
+Each local run also writes the log of each step to `.dagactions/logs/` and a report of the failures to `.dagactions/failures.md`. Give this report to a person or an agent that must fix the failures.
 
-## actions/upload-artifact as a DAG node
-
-`w.uploadArtifact` is `actions/upload-artifact`, with the action's inputs (`artifact` for its `name`, `path`, `ifNoFilesFound`, `overwrite`) and `@actions/artifact`'s own `UploadArtifactOptions` as `options`. `artifact.json` holds the client's `UploadArtifactResponse` as returned: `id`, `size` and `digest`, or `{}` when nothing went up. `path` takes globs over the working tree and the outputs of deps, so a build product goes up straight from the CAS:
-
-```typescript
-const pack = w.run({
-  name: "pack",
-  cmd: ["npm", "pack", "--pack-destination", "$DAGACTIONS_OUT"],
-  outputs: { tarball: "pkg-1.0.0.tgz" },
-  deps: { install },
-});
-w.uploadArtifact({
-  name: "upload:tarball",
-  artifact: "tarball",
-  path: [pack.outputs.tarball],
-  deps: { pack },
-});
-w.uploadArtifact({
-  name: "upload:junit",
-  artifact: "junit",
-  path: ["reports/**/*.xml"],
-  deps: { tests: w.optional(tests) },
-  ifNoFilesFound: "ignore",
-});
-```
-
-An artifact belongs to the run, so the node runs every time and is never cached; its `deps` say when, and `w.optional` is the `if: always()` of a test report. The archive is rooted at the deepest directory holding every file, as the action roots it: one node's outputs sit at the top, outputs of several nodes keep their CAS paths. An upload the service refuses fails the node, as the action fails its step; a name the run already holds is refused unless `overwrite` is set, which matters when a failed job is re-run. Without a service, locally or in a `run:` step, nothing is uploaded and the log says so. Artifacts need no permission beyond the runner's own token. Retention, size and storage quotas are GitHub's; see [storing and sharing data from a workflow](https://docs.github.com/en/actions/writing-workflows/choosing-what-your-workflow-does/storing-and-sharing-data-from-a-workflow).
-
-## How post cleanup steps work
-
-A GitHub action has a `main` and a `post`, which runs at the end of the job whatever happened in between. `w.post` is that, for any node:
-
-```typescript
-const db = w.run({
-  name: "up:db",
-  cmd: ["sh", "-c", "docker run -d postgres:16 > $DAGACTIONS_OUT/id"],
-  outputs: { id: "id" },
-  cacheable: false,
-});
-const tests = w.run({ name: "test", cmd: ["pnpm", "test"], deps: { db, install } });
-w.post({
-  name: "down:db",
-  main: db,
-  env: { DB_ID: db.outputs.id },
-  cmd: ["sh", "-c", "docker rm -f $(cat $DB_ID)"],
-  deps: { tests: w.optional(tests) },
-});
-```
-
-A post step runs every time and is never cached. A graph has no end of job, so `deps` says what the post waits for: `w.optional(tests)` is `if: always()`, and `deps: {}` is right after `main`. A failed `main` has no post. A post step the cancel lands on runs again in the post pass, so make its command safe to repeat, as `docker rm -f` is.
-
-## How cancellation works
-
-GitHub cancels a job with SIGINT to the step, SIGTERM 7500 ms later and a tree kill 2500 ms after that, then runs every action's `post` in its own process; see [workflow cancellation](https://docs.github.com/en/actions/reference/workflows-and-actions/workflow-cancellation). dagactions does the same, on GitHub and under Ctrl-C. Nodes still waiting settle as `cancelled`, running commands get SIGINT, SIGTERM and SIGKILL in turn and settle as `cancelled` whatever they exit with (grace periods in `config.ts`, sized to fit inside GitHub's window), and the process exits with 130 once they have stopped. The run journals every node as it settles, so the action's `post` entry can then run the post steps the run did not finish: those it never reached and those the cancel landed on. Locally, `dagactions run` does that itself after Ctrl-C.
-
-## How timeouts work
-
-`timeoutMinutes` is a step's `timeout-minutes`, on `w.run`, `w.runAll` and `w.post`:
-
-```typescript
-w.run({ name: "test", cmd: ["pnpm", "test"], inputs: src, timeoutMinutes: 15 });
-```
-
-When it elapses, the command is interrupted as a cancel interrupts it, and the step fails with the runner's own message, "The action 'test' has timed out after 15 minutes.", whatever the command exits with. Its check run concludes `timed_out`. As on GitHub, a timeout is a failure, not a cancel: the run goes on, required dependents are skipped and `w.optional` ones run. A timed-out step is never cached, and the timeout is not in the cache key, so changing it re-runs nothing. A post step's clock is its own. The whole run's limit stays the job's `timeout-minutes` in the YAML, which reaches dagactions as a cancel. A process a command leaves behind holding its output, such as a server started with `&`, holds the step up for at most `STREAM_DRAIN_GRACE_MS` after the command exits.
-
-## How secrets work
-
-A command inherits the action step's environment, as a `run:` step inherits the job's, less what a `run:` step never sees: the action's inputs (`INPUT_*`), `GITHUB_TOKEN`, the runner's `ACTIONS_RUNTIME_TOKEN`, `ACTIONS_RUNTIME_URL`, `ACTIONS_CACHE_URL` and `ACTIONS_RESULTS_URL`. Put a secret in the action step's `env:` and let the command read it from there, never from `cmd` or `env`, which are in the cache key.
-
-The runner masks every secret of the job, `GITHUB_TOKEN` and its own tokens before any step runs, in the log and the step summary, and a command masks a value it makes by printing `::add-mask::<value>`, as on GitHub; a workflow body calls `core.setSecret(value)`. dagactions writes command output nowhere else: a node's log sits beside the CAS (`.dagactions/cas.logs`), never in it, so a `w.saveCache` of the CAS cannot upload it to a cache any pull request can restore, forks included; cache `.dagactions/cas`, not all of `.dagactions`. A check run links to the run's log instead of carrying it.
-
-Masking hides an accidental print; it is not a boundary against a command that means to leak. A declared output, a file under `$DAGACTIONS_OUT`, is never rewritten, as GitHub never masks artifacts or caches. If a secret ever reached a saved CAS, rotate it and delete the cache entries (`gh cache delete`): a new key does not stop a pull request from restoring an old one.
-
-## How it reports
-
-The reporter turns the engine's event stream into GHA output: a line when a node's action starts, with its duration in the last run, and none for a cached node; one collapsible group per node that ran, emitted when the node settles so concurrent output never interleaves, with the command's stdout and stderr in the order it wrote them; one plain line per node that was skipped or cancelled; an annotation per failure; a step summary, headed `## dagactions · <workflow file>`; and one check run per node in the PR Checks tab, live, linking to the run's log. Check runs need `checks: write` and `GITHUB_TOKEN` in the step env, and are silently off without them.
-
-A node's log is replayed, and the runner reads the workflow commands in it as it reads a `run:` step's. Logs never go into the cache, so on a fresh runner a cached node shows none. A `::stop-commands::` a command leaves open is resumed at the end of its group, as GitHub ends one with its step. A node the cancel interrupted shows the log it wrote before it stopped.
-
-The log ends with a recap outside any group, so it is what a failed step shows last:
+Each run ends with a recap. The recap names the step that caused the failure, and the command that runs that step again:
 
 ```
-dagactions · scripts/ci.ts · ✖ test:unit failed · built 1 · cached 4 · failed 2 · skipped 1 · wall 9.8s
+✖ test:unit failed · scripts/ci.ts · built 1 · cached 4 · failed 2 · skipped 1 · wall 9.8s
 failed: test:unit, gate
 skipped, dependency failed: deploy
 reproduce: npx dagactions run scripts/ci.ts --only test:unit
 ```
 
-A failure's cause is a failed node with no failed dependency: `gate` above failed because `test:unit` did, so the headline and the reproduce line name `test:unit` alone.
+## Compared to other tools
 
-### Choosing what the summary shows
+- **[act](https://github.com/nektos/act)** runs your YAML workflows locally, in Docker. dagactions replaces the steps of one job with a TypeScript graph and caches them. It does not use Docker.
+- **[Turborepo](https://turborepo.com), [Nx](https://nx.dev) and [wireit](https://github.com/google/wireit)** run the scripts of a repository as a cached graph. dagactions does this for the steps of a CI job. GitHub's cache, artifacts, post steps and check runs are steps in its graph.
+- **Several GitHub Actions jobs** also run in parallel. But each job needs a new runner, a checkout and an install. dagactions runs the steps in parallel on one runner.
 
-The step summary is drawn by a list of renderers, top to bottom, under a `## dagactions` heading. A renderer is a function: the reporter calls it with the run's data, a `RunReport`, and it returns markdown lines; `[]` draws nothing. The report holds every node with its status, timing, previous duration, error and outputs, and `log(name)` reads a node's log back.
+## Documentation
 
-| renderer             | draws                                                                                                         |
-| -------------------- | ------------------------------------------------------------------------------------------------------------- |
-| `renderStatus`       | the outcome as a headline, then counts, wall time, parallelism, cache hits and the time they saved            |
-| `renderTimeline`     | a gantt of the nodes that ran: what happened when, and what overlapped                                        |
-| `renderCriticalPath` | the longest chain by duration, of nodes that took `CRITICAL_PATH_FLOOR_MS` (1s) or more; hidden when none did |
-| `renderDag`          | the DAG colored by status                                                                                     |
-| `renderFailures`     | each failed node's log tail, and a line per skipped or cancelled node, causes first                           |
-| `renderTable`        | node, status, duration and the change against the previous run                                                |
+- [Workflows](https://github.com/mrmeku/dag/blob/main/packages/dagactions/docs/workflows.md): steps, dependencies, inputs, outputs and limits.
+- [Cache and artifacts](https://github.com/mrmeku/dag/blob/main/packages/dagactions/docs/cache-and-artifacts.md): `actions/cache` and `actions/upload-artifact` as steps.
+- [Lifecycle](https://github.com/mrmeku/dag/blob/main/packages/dagactions/docs/lifecycle.md): post steps, timeouts and cancellation.
+- [Output](https://github.com/mrmeku/dag/blob/main/packages/dagactions/docs/output.md): the terminal, the log files, the GitHub log, check runs and the step summary.
+- [Secrets](https://github.com/mrmeku/dag/blob/main/packages/dagactions/docs/secrets.md): how commands get secrets, and how dagactions masks them.
+- [Reference](https://github.com/mrmeku/dag/blob/main/packages/dagactions/docs/reference.md): CLI options, action inputs, exit codes and files.
+- [Run store API](https://github.com/mrmeku/dag/blob/main/packages/dagactions/docs/api.md): draw a run with your own listeners.
 
-`DEFAULT_SUMMARY_RENDERERS` is all of them but the table. A workflow sets its own list with `summary`, mixing these with renderers of its own; one of yours can call a built-in, on a filtered report if it likes.
+## License
 
-```typescript
-import {
-  defineWorkflow,
-  formatDuration,
-  renderDag,
-  renderFailures,
-  renderTimeline,
-  type RunReport,
-} from "@mrmeku/dagactions";
-
-// What the table showed that nothing else does: the nodes slower than last run.
-const renderSlower = (r: RunReport) => {
-  const rows = r.nodes.flatMap((n) =>
-    n.status === "done" && n.duration !== undefined && n.previous && n.duration > n.previous * 1.2
-      ? `- ${n.name}: ${formatDuration(n.previous)} → ${formatDuration(n.duration)}`
-      : [],
-  );
-  return rows.length > 0 ? ["### slower than last run", "", ...rows] : [];
-};
-
-// A built-in, wrapped: the DAG without the cache plumbing, folded.
-const renderFoldedDag = (r: RunReport) => [
-  "<details><summary>DAG</summary>",
-  "",
-  ...renderDag({ ...r, nodes: r.nodes.filter((n) => !/^(restore|save):/.test(n.name)) }),
-  "",
-  "</details>",
-];
-
-export default defineWorkflow({
-  summary: [renderTimeline, renderFoldedDag, renderSlower, renderFailures],
-  build: async (w) => {
-    // ...
-  },
-});
-```
-
-`[...DEFAULT_SUMMARY_RENDERERS, renderTable]` is the default with the table back at the bottom, and `summary: []` leaves the summary empty. A renderer that throws leaves a note in its place and a warning annotation, and never changes the run's outcome. The post pass draws the post steps it ran with the same list. Past `SUMMARY_BUDGET_BYTES` (900,000 UTF-8 bytes, under GitHub's 1 MiB cap), the log blocks (` ```text ` fences) are dropped first, then each block that no longer fits, so the renderers listed first keep their room.
+[MIT](https://github.com/mrmeku/dag/blob/main/LICENSE)

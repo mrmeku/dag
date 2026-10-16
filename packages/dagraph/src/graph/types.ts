@@ -27,10 +27,12 @@ export type InputsFor<P> = P extends { deps: infer D }
  * What the executor tells a running action. The signal fires when the execution is cancelled
  * (with the execution signal's reason) or when the node's `timeoutMs` elapses (with a
  * "TimeoutError" DOMException, as `AbortSignal.timeout` aborts). Once it fires the node cannot
- * succeed, whatever the action returns.
+ * succeed, whatever the action returns. `output` takes what the action prints as it prints it;
+ * the executor hands each chunk to `ExecuteOptions.onOutput` with the node.
  */
 export interface ActionContext {
   signal?: AbortSignal;
+  output?: (chunk: string) => void;
 }
 
 /**

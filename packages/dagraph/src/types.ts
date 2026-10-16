@@ -38,7 +38,8 @@ export type ProcessNodeResult = ProcessNodeResultBase &
   (
     | { status: "done"; outputs: Outputs; contentHash: string; elapsed: number }
     | { status: "cached"; outputs: Outputs; contentHash: string }
-    | { status: "fail"; error: string; elapsed: number; timedOut?: true }
+    /** `cause` is the thrown error's, as is; a RunNode that carries results across processes serializes it or drops it. */
+    | { status: "fail"; error: string; elapsed: number; timedOut?: true; cause?: unknown }
     | { status: "dep-failed"; error: string }
     /** `actionKey` is "" when the action never started. */
     | { status: "cancelled" }

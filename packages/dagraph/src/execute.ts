@@ -32,6 +32,8 @@ export interface ExecuteOptions {
    */
   cacheOnly?: NodeSwitch;
   onEvent?: (event: ExecEvent) => void;
+  /** What each node's action prints, as it prints it (its `ctx.output`). */
+  onOutput?: (node: Node, chunk: string) => void;
   scheduler?: Scheduler;
   /**
    * Cancels the execution: nodes still waiting settle as `cancelled` and nothing new starts.
@@ -66,6 +68,7 @@ export async function execute(
       cacheOnly: selects(opts?.cacheOnly, node),
       ...(opts?.signal && { signal: opts.signal }),
       onStart: started,
+      ...(opts?.onOutput && { onOutput: (chunk: string) => opts.onOutput!(desc, chunk) }),
     });
   };
   return orchestrate(nodes.values(), run, scheduler, opts?.onEvent, opts?.signal);

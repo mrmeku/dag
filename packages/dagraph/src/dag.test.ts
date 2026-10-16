@@ -924,6 +924,39 @@ describe("Graph", () => {
       }
     });
 
+    test("what an action prints reaches onOutput with its node as it prints it, and a failure keeps its error's cause, a timeout's too", async () => {
+      const g = new Graph();
+      for (const [name, timeoutMs] of [["bad"], ["slow", 5]] as const)
+        g.add({
+          name,
+          kind: "task",
+          deps: [],
+          config: "1",
+          ...(timeoutMs && { timeoutMs }),
+          params: p("task"),
+          action: async (_inputs, _out, { output, signal } = {}) => {
+            output?.(`${name} ran\n`);
+            if (timeoutMs) await new Promise((r) => signal!.addEventListener("abort", r));
+            throw new Error(`${name} exited 1`, { cause: { argv: [name], code: 1 } });
+          },
+        });
+      const seen: unknown[] = [];
+      await execute(g, ctx(new MemCache(), createMemoryDagFs()), {
+        scheduler: throttledScheduler({ maxParallelism: 1 }),
+        onOutput: (node, chunk) => seen.push([node.name, chunk]),
+        onEvent: (e) => {
+          if (e.type === "fail")
+            seen.push([e.node.name, (e.error as Error).name, (e.error as Error).cause]);
+        },
+      });
+      expect(seen).toEqual([
+        ["bad", "bad ran\n"],
+        ["bad", "Error", { argv: ["bad"], code: 1 }],
+        ["slow", "slow ran\n"],
+        ["slow", "TimeoutError", { argv: ["slow"], code: 1 }],
+      ]);
+    });
+
     test("emits dep-failure for dependency-failure skips", async () => {
       const fs = createMemoryDagFs();
       const cache = new MemCache();
@@ -1412,6 +1445,45 @@ describe("Graph", () => {
     expect(await run()).toEqual({ captions: "done", entry: "done" });
     expect(await run()).toEqual({ captions: "cached", entry: "cached" });
     expect(received).toEqual([undefined, "captions.srt"]);
+  });
+
+  test("a node two roles name is one dep: the dependent runs once with it in both roles, and stays required when one role is optional", async () => {
+    const fs = createMemoryDagFs();
+    let broken = false;
+    const runs: unknown[] = [];
+    const src = defineAction<null, { kind: "src" }, string>({
+      config: "1",
+      action: () => async () => {
+        if (broken) throw new Error("src broke");
+        return write(fs, "src.txt", "src");
+      },
+    });
+    const both = defineAction<
+      null,
+      { kind: "both"; deps: { main: NodeRef<string>; after: OptionalRef<string> } },
+      string
+    >({
+      config: "1",
+      action: () => async (_p, inputs) => {
+        runs.push(inputs);
+        return write(fs, "both.txt", "both");
+      },
+    });
+    const run = async () => {
+      const g = new Graph();
+      const ref = src.addNode(g, null, { kind: "src" });
+      both.addNode(g, null, { kind: "both", deps: { main: ref, after: optional(ref) } });
+      const results = await execute(g, ctx(new MemCache(), fs));
+      return Object.fromEntries(results.map((r) => [r.name, r.status]));
+    };
+
+    const ok = await run();
+    broken = true;
+    expect({ ok, srcBroken: await run(), runs }).toEqual({
+      ok: { src: "done", both: "done" },
+      srcBroken: { src: "fail", both: "dep-failed" },
+      runs: [{ main: "src.txt", after: "src.txt" }],
+    });
   });
 
   test("cancel: waiting nodes settle as cancelled; a running one is cancelled whatever its action returns, never cached; dependents never start", async () => {

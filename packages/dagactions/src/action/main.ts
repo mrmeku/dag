@@ -7,16 +7,17 @@
  */
 import { abortOnSignals } from "../ports/real.ts";
 import { runWorkflow } from "../runner.ts";
-import { actionOptions } from "./env.ts";
+import { actionOptions, noticeUnavailableServices } from "./env.ts";
 
 export * from "../index.ts";
 
 export async function main(): Promise<void> {
-  const { failed, cancelled } = await runWorkflow({
+  noticeUnavailableServices();
+  const outcome = await runWorkflow({
     ...(await actionOptions(import.meta.url)),
     signal: abortOnSignals(),
   });
-  process.exitCode = cancelled ? 130 : failed > 0 ? 1 : 0;
+  process.exitCode = outcome.exitCode;
 }
 
 // Not awaited: the workflow file imports this very module through the hook, and an import of

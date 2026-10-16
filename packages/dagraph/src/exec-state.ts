@@ -204,18 +204,13 @@ export class ExecState {
             elapsed: result.elapsed,
           },
         ];
-      case "fail":
+      case "fail": {
+        const error = new Error(result.error, "cause" in result ? { cause: result.cause } : {});
+        if (result.timedOut) error.name = "TimeoutError";
         return [
-          {
-            type: "fail",
-            node,
-            actionKey: result.actionKey,
-            error: result.timedOut
-              ? Object.assign(new Error(result.error), { name: "TimeoutError" })
-              : new Error(result.error),
-            elapsed: result.elapsed,
-          },
+          { type: "fail", node, actionKey: result.actionKey, error, elapsed: result.elapsed },
         ];
+      }
       case "dep-failed":
         return [{ type: "dep-failed", node, error: new Error(result.error) }];
       case "cancelled":

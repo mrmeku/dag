@@ -1,5 +1,15 @@
 import { createMemoryDagFs, type MemoryDagFs } from "@mrmeku/dagraph";
-import type { AnnotationLevel, CheckUpdate, Ci, CiContext, Clock, Ports, Sh } from "../ports.ts";
+import { dirname } from "node:path";
+import type {
+  AnnotationLevel,
+  CheckUpdate,
+  Ci,
+  CiContext,
+  Clock,
+  Ports,
+  Sh,
+  SyncFs,
+} from "../ports.ts";
 import { createMemoryActionsArtifact, type MemoryActionsArtifact } from "./actions-artifact.ts";
 import { createMemoryActionsCache, type MemoryActionsCache } from "./actions-cache.ts";
 
@@ -89,5 +99,37 @@ export function createTestPorts(
     rec,
     actionsCache,
     actionsArtifact,
+  };
+}
+
+/**
+ * Synchronous writes in memory: `files` holds each file's text by path. As with node:fs, a file's
+ * directory must be made before the file is written.
+ */
+export function createMemorySyncFs(): SyncFs & { files: Map<string, string> } {
+  const files = new Map<string, string>();
+  const directories = new Set([".", "/"]);
+  const writablePath = (path: unknown) => {
+    const file = String(path);
+    if (!directories.has(dirname(file)))
+      throw new Error(`ENOENT: no such file or directory, '${file}'`);
+    return file;
+  };
+  return {
+    files,
+    mkdirSync: (path: unknown) => {
+      for (
+        let directory = String(path);
+        !directories.has(directory);
+        directory = dirname(directory)
+      )
+        directories.add(directory);
+      return undefined;
+    },
+    writeFileSync: (path, data) => void files.set(writablePath(path), String(data)),
+    appendFileSync: (path, data) => {
+      const file = writablePath(path);
+      files.set(file, (files.get(file) ?? "") + String(data));
+    },
   };
 }

@@ -4,21 +4,13 @@ import { ACTION_INPUT_ENV, RUNNER_ENDPOINTS, RUNNER_TOKENS } from "./config.ts";
 import { defineStep } from "./define-step.ts";
 import type { Ports } from "./ports.ts";
 import { glob } from "./ports/glob.ts";
+import { logPath, type CommandCause } from "./step-records.ts";
 
 export { glob, hashFiles } from "./ports/glob.ts";
+export { logPath, type CommandCause } from "./step-records.ts";
 
 type Deps = Record<string, NodeRef | OptionalRef | undefined>;
 type Inputs = Record<string, Outputs | undefined>;
-
-/* ------------------------------------------------------------------ logs */
-
-/**
- * Where a step stores its log, stdout and stderr as they arrived, for the reporter: beside the
- * CAS, never in it, since the CAS goes into a cache any pull request can restore and nothing
- * masks what a command printed. `/cas/<key>/out` keeps it in `/cas.logs/<key>.log`.
- */
-export const logPath = (outputDir: string): string =>
-  outputDir.replace(/\/([^/]+)\/out$/, ".logs/$1.log");
 
 /* ------------------------------------------------------------------ run */
 
@@ -181,18 +173,24 @@ export function run<O extends string = never>(
         ...(opts.cwd && { cwd: opts.cwd }),
         env: { ...Object.fromEntries([...withheld, ...env]), DAGACTIONS_OUT: outputDir },
         ...(ctx?.signal && { signal: ctx.signal }),
+        ...(ctx?.output && { onOutput: ctx.output }),
       });
       await p.fs.writeText(logPath(outputDir), r.output);
       const result = `${outputDir}/result.json`;
+      // An output whose bytes key its dependents, so it keeps the cwd as configured.
       await p.fs.writeText(
         result,
         JSON.stringify({ cmd: opts.cmd, cwd: opts.cwd ?? "", code: r.code }, null, 2),
       );
-      if (!r.ok) throw new Error(`${argv.join(" ")} exited ${r.code}`);
+      const cause: CommandCause = { argv, cwd: opts.cwd ?? ".", code: r.code };
+      if (!r.ok) throw new Error(`${argv.join(" ")} exited ${r.code}`, { cause });
+      // One that traps its timeout's signal and exits 0 timed out all the same, as its cause says.
+      if (ctx?.signal?.aborted) throw new Error(`${argv.join(" ")} was stopped`, { cause });
       const outputs = { result } as RunOutputs<O>;
       for (const [role, file] of Object.entries(declared) as [O, string][]) {
         const path = `${outputDir}/${file}`;
-        if (!(await p.fs.exists(path))) throw new Error(`declared output ${role} missing: ${file}`);
+        if (!(await p.fs.exists(path)))
+          throw new Error(`declared output ${role} missing: ${file}`, { cause });
         outputs[role] = path;
       }
       return outputs;

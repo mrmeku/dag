@@ -17,22 +17,34 @@ const until = async (ready: () => boolean) => {
 };
 
 describe("createSh with a signal", () => {
-  test("a cancelled command is interrupted, escalated when it ignores SIGINT, and refused once the signal has fired", async () => {
+  test("a cancelled command is interrupted, escalated when it ignores SIGINT, and refused once the signal has fired, each saying so as it streams", async () => {
     const dir = mkdtempSync(join(tmpdir(), "dagactions-sh-"));
     const readyFile = join(dir, "ready");
     try {
       const sh = createSh({ sigintGraceMs: 300, sigtermGraceMs: 300 });
       const controller = new AbortController();
-      const polite = sh.run(["sleep", "30"], { signal: controller.signal });
+      const streamed: string[] = [];
+      const polite = sh.run(["sleep", "30"], {
+        signal: controller.signal,
+        onOutput: (chunk) => streamed.push(chunk),
+      });
       const stubborn = sh.run([...IGNORES_SIGINT, readyFile], { signal: controller.signal });
       await until(() => existsSync(readyFile));
       controller.abort();
       const [a, b] = await Promise.all([polite, stubborn]);
-      const late = await sh.run(["sleep", "30"], { signal: controller.signal });
+      const lateStreamed: string[] = [];
+      const late = await sh.run(["sleep", "30"], {
+        signal: controller.signal,
+        onOutput: (chunk) => lateStreamed.push(chunk),
+      });
       assert.deepEqual(
-        { polite: [a.ok, a.code, a.stderr], stubborn: [b.ok, b.code, b.stderr], late },
         {
-          polite: [false, -1, "killed by SIGINT\n"],
+          polite: [a.ok, a.code, a.stderr, streamed],
+          stubborn: [b.ok, b.code, b.stderr],
+          late: { ...late, streamed: lateStreamed },
+        },
+        {
+          polite: [false, -1, "killed by SIGINT\n", ["killed by SIGINT\n"]],
           stubborn: [false, -1, "killed by SIGTERM\n"],
           late: {
             code: -1,
@@ -40,6 +52,7 @@ describe("createSh with a signal", () => {
             stderr: "cancelled before start",
             output: "cancelled before start",
             ok: false,
+            streamed: ["cancelled before start"],
           },
         },
       );
@@ -50,19 +63,24 @@ describe("createSh with a signal", () => {
 });
 
 describe("createSh output", () => {
-  test("stdout and stderr keep each stream apart and the order they arrived in", async () => {
+  test("stdout and stderr keep each stream apart and the order they arrived in, and stream as they arrive", async () => {
     // The pauses let each write reach the parent before the next, as a real tool's lines do.
-    const r = await createSh().run([
-      "sh",
-      "-c",
-      "echo compiling; sleep 0.2; echo 'warning: unused' >&2; sleep 0.2; echo wrote dist",
-    ]);
+    const streamed: string[] = [];
+    const r = await createSh().run(
+      [
+        "sh",
+        "-c",
+        "echo compiling; sleep 0.2; echo 'warning: unused' >&2; sleep 0.2; echo wrote dist",
+      ],
+      { onOutput: (chunk) => streamed.push(chunk) },
+    );
     assert.deepEqual(
-      { stdout: r.stdout, stderr: r.stderr, output: r.output },
+      { stdout: r.stdout, stderr: r.stderr, output: r.output, streamed },
       {
         stdout: "compiling\nwrote dist\n",
         stderr: "warning: unused\n",
         output: "compiling\nwarning: unused\nwrote dist\n",
+        streamed: ["compiling\n", "warning: unused\n", "wrote dist\n"],
       },
     );
   });

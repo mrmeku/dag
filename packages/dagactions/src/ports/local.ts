@@ -1,4 +1,6 @@
 import type { DagFs } from "@mrmeku/dagraph";
+import { dirname } from "node:path";
+import { stripVTControlCharacters } from "node:util";
 import type { Ci, Sh } from "../ports.ts";
 
 /**
@@ -37,14 +39,14 @@ export function createLocalCi(opts: {
     },
     // Appends within a process, as $GITHUB_STEP_SUMMARY does, so a post pass's summary follows the run's.
     summary: async (markdown) => {
-      const dir = opts.summaryPath.slice(0, opts.summaryPath.lastIndexOf("/"));
-      if (dir) await opts.fs.ensureDir(dir);
+      await opts.fs.ensureDir(dirname(opts.summaryPath));
       const before =
         written && (await opts.fs.exists(opts.summaryPath))
           ? await opts.fs.readText(opts.summaryPath)
           : "";
       written = true;
-      await opts.fs.writeText(opts.summaryPath, before + markdown);
+      // A command's log can carry escape codes, which markdown would show raw.
+      await opts.fs.writeText(opts.summaryPath, before + stripVTControlCharacters(markdown));
       write(`summary: ${opts.summaryPath}`);
     },
     // Check runs are a GitHub concept; the terminal groups already show live status.

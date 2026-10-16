@@ -9,13 +9,19 @@ import type { NodeRef, Outputs } from "@mrmeku/dagraph";
 
 const TOOLCHAIN = ["package.json", "bun.lock", "tsconfig.json"];
 const ENGINE = "packages/dagraph/src/**";
+// What scripts/reference-doc.test.ts compares, beside the sources it reads.
+const REFERENCE_SOURCES = [
+  "packages/dagactions/docs/reference.md",
+  "packages/dagactions/action/action.yml",
+  ".prettierrc",
+];
 
 export async function addChecks(w: Steps<"test">, after: NodeRef): Promise<NodeRef<string>> {
   const afterRestore = { deps: { after }, normalize: { after: (_: Outputs) => "" } };
   const [all, engine, runner] = await Promise.all([
     w.glob("packages/*/src/**", "scripts/**", "eslint.config.ts", ...TOOLCHAIN),
     w.glob(ENGINE, ...TOOLCHAIN),
-    w.glob(ENGINE, "packages/dagactions/src/**", "scripts/**", ...TOOLCHAIN),
+    w.glob(ENGINE, "packages/dagactions/src/**", "scripts/**", ...REFERENCE_SOURCES, ...TOOLCHAIN),
   ]);
   const checks = w.runAll({
     typecheck: { cmd: ["bun", "run", "typecheck"], inputs: all, ...afterRestore },

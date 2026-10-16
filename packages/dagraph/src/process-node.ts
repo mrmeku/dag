@@ -35,6 +35,8 @@ export interface ProcessNodeOptions {
   signal?: AbortSignal;
   /** Called on a cache miss, just before the action runs. */
   onStart?: () => void;
+  /** The action's `ctx.output`. */
+  onOutput?: (chunk: string) => void;
 }
 
 /** Error of a node that `cacheOnly` kept from running. */
@@ -114,17 +116,24 @@ export async function processNode(
   opts?.onStart?.();
   const startTime = Date.now();
   const elapsed = () => Date.now() - startTime;
-  const fail = (e: unknown): Extract<ProcessNodeResult, { status: "fail" }> => ({
+  const fail = (
+    e: unknown,
+    message = e instanceof Error ? e.message : String(e),
+  ): Extract<ProcessNodeResult, { status: "fail" }> => ({
     name: node.name,
     actionKey,
     status: "fail",
-    error: e instanceof Error ? e.message : String(e),
+    error: message,
+    ...(e instanceof Error && e.cause !== undefined && { cause: e.cause }),
     elapsed: elapsed(),
   });
   const { signal, dispose } = actionSignal(node.timeoutMs, cancel);
   let settled: { outputs: Outputs } | { error: unknown };
   try {
-    settled = { outputs: await node.action(depOutputs, casDir, { signal }) };
+    const output = opts?.onOutput;
+    settled = {
+      outputs: await node.action(depOutputs, casDir, { signal, ...(output && { output }) }),
+    };
   } catch (error) {
     settled = { error };
   } finally {
@@ -133,7 +142,10 @@ export async function processNode(
   // As GitHub's runner does: once the signal fired, the exit status no longer decides. A cancel
   // wins over the node's own timeout; neither result is ever cached.
   if (cancel?.aborted) return { name: node.name, actionKey, status: "cancelled" };
-  if (signal.aborted) return { ...fail(`timed out after ${node.timeoutMs} ms`), timedOut: true };
+  // A timeout keeps what the action threw as it stopped: its cause says what it was running.
+  const thrownError = "error" in settled ? settled.error : undefined;
+  if (signal.aborted)
+    return { ...fail(thrownError, `timed out after ${node.timeoutMs} ms`), timedOut: true };
   if ("error" in settled) return fail(settled.error);
   try {
     const { outputs } = settled;

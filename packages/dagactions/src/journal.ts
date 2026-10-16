@@ -1,4 +1,5 @@
 import type { DagFs, ExecEvent, Outputs } from "@mrmeku/dagraph";
+import { dirname } from "node:path";
 
 /** One settled node: what a later process needs to feed its dependents. */
 export type JournalEntry =
@@ -18,8 +19,7 @@ export function createJournal(fs: DagFs, path: string, initial: Journal = {}) {
   let chain = Promise.resolve();
   const write = () => {
     chain = chain.then(async () => {
-      const dir = path.slice(0, path.lastIndexOf("/"));
-      if (dir) await fs.ensureDir(dir);
+      await fs.ensureDir(dirname(path));
       await fs.writeText(path, JSON.stringify(entries, null, 2));
     });
     return chain;

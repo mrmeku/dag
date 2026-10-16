@@ -1,24 +1,9 @@
-- IMPORTANT: Skip sycophantic flattery; avoid hollow praise and empty validation. Probe my assumptions, surface bias, present counter-evidence, challenge emotional framing, and disagree openly when warranted; agreement must be earned through reason
-- IMPORTANT: When I suggest non-idiomatic naming, patterns, or approaches, proactively point out the idiomatic alternative and explain why it's preferred. Teach me the idioms of the language/framework we're working in
-
-General programming principles:
-
-1. put all configuration in global variables that I can edit, or in a single config file.
-2. use functions instead of objects wherever possible
-3. prioritize low amounts of comments and whitespace. Only include comments if they are necessary to understand the code because it is really complicated
-4. prefer simple, straightline code to complex abstractions
-5. use libraries instead of reimplementing things from scratch
-6. look up documentation for APIs on the web instead of trying to remember things from scratch
-7. write the program, reflect on its quality, simplicity, correctness, and ease of modification, and then go back and write a second version
-8. prefer idiomatic solutions — use the conventions, naming patterns, and standard approaches of the language/framework rather than inventing custom ones
-9. when wrapping a library, use its types: a port is a `Pick` of the library's own interface, and a JSON file that carries a library's result holds the library's return value verbatim. Never define a parallel type for data a library already types; add fields only where the library gives none
-
 ## Project
 
 A Bun workspace of two packages. This directory is exported as is to the public repository `mrmeku/dag`; nothing application-specific belongs in it.
 
 - **`packages/dagraph`**: the generic DAG engine. Its index must reach no I/O modules (`node:*`, `bun`): consumers bundle it into sandboxes. Runtime adapters live under subpath exports (`@mrmeku/dagraph/fs`, `/fs/node`); `sandbox-safe.test.ts` enforces it. Tests run under `bun test`.
-- **`packages/dagactions`**: a CI runner on the engine, on Node (`node --test`). `defineStep` binds `defineAction` to its `Ports`; `defineWorkflow` exposes the step vocabulary as `w`. Every GitHub Actions idiom (workflow commands, the context, cache, artifacts, globbing, inputs) comes from the actions toolkit, `@actions/*`, never from a re-implementation; only `createSh` and the journal are ours, because the toolkit has no cancellation sequence and no local post pass. The action under `action/` is a JavaScript action whose bundle `bun run build:action` builds; it is never committed.
+- **`packages/dagactions`**: a CI runner on the engine, on Node (`node --test`). `defineStep` binds `defineAction` to its `Ports`; `defineWorkflow` exposes the step vocabulary as `w`. Every GitHub Actions idiom (workflow commands, the context, cache, artifacts, globbing, inputs) comes from the actions toolkit, `@actions/*`, never from a re-implementation; only `createSh`, the journal and the CLI's local output are ours, because the toolkit has no cancellation sequence, no local post pass and no terminal. Every output reads one run store, `src/kernel/` (its conventions in `src/kernel/CLAUDE.md`; its IO is the CAS's logs and last-run.json; what a step leaves it, the log's place and a failed command's `CommandCause`, comes from the leaf `src/step-records.ts`), as a `RunListener`: the GitHub renderer in `src/github/`, and the CLI's terminal renderers in `src/local/terminal/` and its log and report recorders in `src/local/recorders/`, which the action never reaches (`bundle-safe.test.ts`). A node's output comes from the engine (`ctx.output`, `onOutput`), and a failed command's exit status with its error's `cause`. The action under `action/` is a JavaScript action whose bundle `bun run build:action` builds; it is never committed.
 - **`scripts/ci.ts`** is this repository's CI as a dagactions workflow, run by `bun run ci` locally and by `.github/workflows/ci.yml` through the action. `scripts/release.ts` is the release: packs, npm publishes with trusted publishing, and the action's build output pushed to `mrmeku/dagactions` by `scripts/release-action.ts`. `bun run release` dry-runs it. Findings: `plans/release-exercise.md`.
 
 ### Cache constraints
@@ -27,4 +12,15 @@ Action key = hash(nodeName + config + sorted dep content hashes + sorted input f
 
 ### Testing
 
-Tests exercise real logic: data transformations, parsing, merge semantics, cache invalidation, integration flows. Never write tests that only verify a mock was called, that only cover null or empty inputs, that repeat assertions another test makes, or that assert fields one at a time instead of one `deepEqual` on the full expected shape. Test doubles for dagactions are in `packages/dagactions/src/ports/memory.ts`.
+Tests exercise real logic: data transformations, parsing, merge semantics, cache invalidation, integration flows. Never write tests that only verify a mock was called, that only cover null or empty inputs, that repeat assertions another test makes, or that assert fields one at a time instead of one `deepEqual` on the full expected shape. Test doubles for dagactions are in `packages/dagactions/src/ports/memory.ts`; like `node:fs`, its `SyncFs` refuses a file whose directory was never made. The CLI's `run` picks GitHub or a local session and hands its options to `runJob` (`src/runner.ts`), which the session and runner tests drive on memory ports, with an `EventEmitter` for the process. The CLI's picks of style and of GitHub, its flags and exit codes, and its Ctrl-C handling are tested by running it (`src/cli.test.ts`); a test that waits on a run takes a `timeout`, so a regression fails it instead of hanging the suite.
+
+### Writing
+
+READMEs, docs, commit messages and PR bodies use the Minto pyramid for structure and ASD-STE100 (Simplified Technical English) for sentences:
+
+- **Answer first.** Each document, section and PR opens with its main point, then the grouped points that support it, then the detail.
+- **Short, plain sentences.** At most 20 words in a procedure and 25 in a description. Active voice; numbered steps, one action each; one term for one concept in a whole document.
+- **Tables for reference, callouts for warnings.** Options, fields and comparisons go in tables; warnings go in `> [!IMPORTANT]` blocks.
+- **READMEs pitch, `docs/` explains.** Each package README links its docs with absolute GitHub URLs, because npm ships only the README. dagraph's README keeps a light mob-boss voice, with no crime themes in examples; every `docs/` page is plain.
+- **Generate what code already says.** `docs/reference.md` tables come from the source through `scripts/reference-doc.ts` (`bun run docs`), and a test fails while they are stale.
+- **Verify every claim** against the code, and run each example before you write it down.

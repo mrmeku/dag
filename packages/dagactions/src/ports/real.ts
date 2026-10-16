@@ -1,6 +1,7 @@
 import { spawn } from "node:child_process";
+import * as fs from "node:fs";
 import { CHILD_SIGINT_GRACE_MS, CHILD_SIGTERM_GRACE_MS, STREAM_DRAIN_GRACE_MS } from "../config.ts";
-import type { Clock, Sh, ShResult } from "../ports.ts";
+import type { Clock, Sh, ShResult, SyncFs } from "../ports.ts";
 
 /**
  * The real shell. A cancelled command is interrupted the way GitHub's runner interrupts a step:
@@ -20,8 +21,10 @@ export function createSh(
     run: (cmd, runOpts) =>
       new Promise<ShResult>((resolve) => {
         const signal = runOpts?.signal;
+        const onOutput = runOpts?.onOutput ?? (() => {});
         if (signal?.aborted) {
           const message = "cancelled before start";
+          onOutput(message);
           resolve({ code: -1, stdout: "", stderr: message, output: message, ok: false });
           return;
         }
@@ -46,15 +49,17 @@ export function createSh(
           signal?.removeEventListener("abort", onAbort);
           resolve(result);
         };
-        proc.stdout
-          .setEncoding("utf8")
-          .on("data", (chunk: string) => out.push(chunk) && all.push(chunk));
-        proc.stderr
-          .setEncoding("utf8")
-          .on("data", (chunk: string) => err.push(chunk) && all.push(chunk));
-        proc.on("error", (e) =>
-          settle({ code: -1, stdout: "", stderr: e.message, output: e.message, ok: false }),
-        );
+        const recordChunk = (chunks: string[]) => (chunk: string) => {
+          chunks.push(chunk);
+          all.push(chunk);
+          onOutput(chunk);
+        };
+        proc.stdout.setEncoding("utf8").on("data", recordChunk(out));
+        proc.stderr.setEncoding("utf8").on("data", recordChunk(err));
+        proc.on("error", (e) => {
+          onOutput(e.message);
+          settle({ code: -1, stdout: "", stderr: e.message, output: e.message, ok: false });
+        });
         proc.on("exit", () => {
           timers.push(
             setTimeout(() => {
@@ -69,17 +74,22 @@ export function createSh(
             killedBy
               ? `${text}${text.endsWith("\n") || !text ? "" : "\n"}killed by ${killedBy}\n`
               : text;
+          const outputSoFar = all.join("");
+          const output = withKill(outputSoFar);
+          if (output !== outputSoFar) onOutput(output.slice(outputSoFar.length));
           settle({
             code: c,
             stdout: out.join(""),
             stderr: withKill(err.join("")),
-            output: withKill(all.join("")),
+            output,
             ok: c === 0,
           });
         });
       }),
   };
 }
+
+export const syncFs: SyncFs = fs;
 
 export function systemClock(): Clock {
   return { now: () => Date.now() };

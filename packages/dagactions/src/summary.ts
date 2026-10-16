@@ -1,33 +1,15 @@
-import {
-  mermaidBody,
-  mermaidQuote,
-  type ExecResult,
-  type Node,
-  type Outputs,
-} from "@mrmeku/dagraph";
+import { mermaidBody, mermaidQuote, type ExecResult, type Node } from "@mrmeku/dagraph";
 import {
   CRITICAL_PATH_FLOOR_MS,
-  FAILURE_LOG_LINES,
+  FAILURES_REPORT_LOG_LINES,
   MAX_GRAPH_NODES,
   STATUS_ICON,
   SUMMARY_BUDGET_BYTES,
 } from "./config.ts";
+import { countsLine, errorMessage, formatDuration, reportHeadline } from "./kernel/format.ts";
+import { namesOf, wallTimeOf, type NodeReport } from "./kernel/report.ts";
 
 type Status = ExecResult["status"];
-
-/** One node as the run left it: the graph's node, plus how and when it settled. */
-export interface NodeReport extends Node {
-  status: Status;
-  /** Epoch ms at dispatch, and dispatch to settle. Absent for a node never dispatched; a cache hit's is its cache check. */
-  start?: number;
-  duration?: number;
-  /** Its duration the last time it was built or failed, from last-run.json. */
-  previous?: number;
-  /** The message of a fail or dep-failed. */
-  error?: string;
-  /** A done or cached node's outputs: paths into the CAS. */
-  outputs?: Outputs;
-}
 
 /** The run's data, as every renderer gets it. In the post pass it holds the owed post steps alone. */
 export interface RunReport {
@@ -67,10 +49,6 @@ const MERMAID_CLASSDEFS = [
 ];
 const LOG_BLOCK = /```text\n[\s\S]*?```/g;
 
-export function formatDuration(ms: number): string {
-  return ms < 1000 ? `${ms}ms` : `${(ms / 1000).toFixed(1)}s`;
-}
-
 function formatDelta(now: number, before: number): string {
   const pct = Math.round(((now - before) / before) * 100);
   return pct === 0 ? "±0%" : pct > 0 ? `+${pct}%` : `${pct}%`;
@@ -79,65 +57,6 @@ function formatDelta(now: number, before: number): string {
 const byName = (nodes: NodeReport[]) => [...nodes].sort((a, b) => a.name.localeCompare(b.name));
 const ran = (n: NodeReport) => n.status === "done" || n.status === "fail";
 const sum = (ns: number[]) => ns.reduce((s, n) => s + n, 0);
-const namesOf = (nodes: NodeReport[], status: Status) =>
-  nodes.filter((n) => n.status === status).map((n) => n.name);
-const plural = (n: number, word: string) => `${n} ${word}${n === 1 ? "" : "s"}`;
-
-/** The failed nodes no failure upstream explains: what to fix, and what to rerun. */
-function rootFailures(nodes: NodeReport[]): string[] {
-  const failed = new Set(
-    nodes.filter((n) => n.status === "fail" || n.status === "dep-failed").map((n) => n.name),
-  );
-  return nodes
-    .filter((n) => n.status === "fail" && !n.deps.some((d) => failed.has(d)))
-    .map((n) => n.name);
-}
-
-/** What the run came to, in a few words. */
-function outcome(nodes: NodeReport[]): string {
-  const roots = rootFailures(nodes);
-  const skipped = namesOf(nodes, "dep-failed").length;
-  const cancelled = namesOf(nodes, "cancelled").length;
-  if (roots.length > 3)
-    return `${STATUS_ICON.fail} ${roots.slice(0, 3).join(", ")} and ${roots.length - 3} more failed`;
-  if (roots.length > 0) return `${STATUS_ICON.fail} ${roots.join(", ")} failed`;
-  if (skipped > 0)
-    return `${STATUS_ICON["dep-failed"]} ${plural(skipped, "node")} skipped, a dependency failed`;
-  if (cancelled > 0)
-    return `${STATUS_ICON.cancelled} cancelled, ${plural(cancelled, "node")} not run`;
-  return `${STATUS_ICON.done} ${nodes.length === 1 ? "1 node" : `all ${nodes.length} nodes`} succeeded`;
-}
-
-function counts(nodes: NodeReport[], mark: (n: number) => string): string {
-  const count = (s: Status) => namesOf(nodes, s).length;
-  return `built ${mark(count("done"))} · cached ${mark(count("cached"))} · failed ${mark(count("fail"))} · skipped ${mark(count("dep-failed"))}${count("cancelled") > 0 ? ` · cancelled ${mark(count("cancelled"))}` : ""}`;
-}
-
-function wallOf(nodes: NodeReport[]): number {
-  const starts = nodes.flatMap((n) => n.start ?? []);
-  const ends = nodes.flatMap((n) => (n.start === undefined ? [] : n.start + (n.duration ?? 0)));
-  return starts.length > 0 ? Math.max(...ends) - Math.min(...starts) : 0;
-}
-
-/**
- * The run's last lines in the log, outside any group: what it came to, what failed or did not
- * run, and the command that reruns the failures' causes (given `rerun`, the command that ran it).
- */
-export function footer(title: string, nodes: NodeReport[], rerun?: string): string[] {
-  const roots = rootFailures(nodes);
-  const listed = (label: string, status: Status) => {
-    const names = namesOf(nodes, status);
-    return names.length > 0 ? [`${label}: ${names.join(", ")}`] : [];
-  };
-  return [
-    `${title} · ${outcome(nodes)} · ${counts(nodes, String)} · wall ${formatDuration(wallOf(nodes))}`,
-    ...listed("failed", "fail"),
-    ...listed("skipped, dependency failed", "dep-failed"),
-    ...listed("cancelled", "cancelled"),
-    ...(rerun && roots.length > 0 ? [`reproduce: ${rerun} --only ${roots.join(",")}`] : []),
-  ];
-}
-
 /**
  * The DAG as a mermaid flowchart colored by status: the engine's `mermaidBody` with status
  * icons and classes. Deps outside `nodes` are left out, so a filtered set draws. Past
@@ -220,16 +139,16 @@ function longestChain(nodes: NodeReport[]): { names: string[]; total: number } |
  * wall time, parallelism, cache hits and the time they saved.
  */
 export function renderStatus({ nodes }: RunReport): string[] {
-  const wall = wallOf(nodes);
+  const wall = wallTimeOf(nodes);
   const busy = sum(nodes.filter(ran).map((n) => n.duration ?? 0));
   const saved = sum(nodes.filter((n) => n.status === "cached").map((n) => n.previous ?? 0));
   const hits = namesOf(nodes, "cached").length;
   const lookups = hits + namesOf(nodes, "done").length;
   return [
-    `### ${outcome(nodes)}`,
+    `### ${reportHeadline(nodes)}`,
     "",
     [
-      counts(nodes, (n) => `**${n}**`),
+      countsLine(nodes, (n) => `**${n}**`),
       `wall ${formatDuration(wall)}`,
       ...(wall > 0 ? [`parallelism ${(busy / wall).toFixed(1)}×`] : []),
       ...(lookups > 0
@@ -292,7 +211,7 @@ export async function renderFailures({ nodes, log }: RunReport): Promise<string[
       `<details><summary>${STATUS_ICON.fail} ${n.name}${dur}</summary>`,
       "",
       "```text",
-      ...(await log(n.name)).slice(-FAILURE_LOG_LINES),
+      ...(await log(n.name)).slice(-FAILURES_REPORT_LOG_LINES),
       "```",
       "",
       "</details>",
@@ -337,7 +256,7 @@ export async function renderSummary(
       const lines = await render(report);
       if (lines.length > 0) parts.push([name, lines.join("\n")]);
     } catch (e) {
-      const message = `${name} failed: ${e instanceof Error ? e.message : String(e)}`;
+      const message = `${name} failed: ${errorMessage(e)}`;
       warn(message);
       parts.push([name, `_(${message})_`]);
     }

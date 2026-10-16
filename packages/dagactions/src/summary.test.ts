@@ -1,14 +1,14 @@
 import type { ExecResult, Node } from "@mrmeku/dagraph";
 import assert from "node:assert/strict";
 import { describe, test } from "node:test";
+import { recapLines } from "./github/renderer.ts";
+import type { NodeReport } from "./kernel/report.ts";
 import {
   dagMermaid,
-  footer,
   renderCriticalPath,
   renderFailures,
   renderStatus,
   renderSummary,
-  type NodeReport,
   type RunReport,
 } from "./summary.ts";
 
@@ -128,7 +128,7 @@ describe("summary", () => {
       {
         status: renderStatus(report),
         failures: await renderFailures(report),
-        footer: footer("dagactions · ci.ts", nodes, "npx dagactions run ci.ts"),
+        footer: recapLines("ci.ts", nodes, "npx dagactions run ci.ts"),
       },
       {
         status: [
@@ -161,7 +161,7 @@ describe("summary", () => {
           "- ⏭\uFE0E deploy: skipped, dependency failed",
         ],
         footer: [
-          "dagactions · ci.ts · ✖\uFE0E test:unit failed · built 1 · cached 1 · failed 2 · skipped 1 · wall 3.0s",
+          "✖\uFE0E test:unit failed · ci.ts · built 1 · cached 1 · failed 2 · skipped 1 · wall 3.0s",
           "failed: test:unit, gate",
           "skipped, dependency failed: deploy",
           "reproduce: npx dagactions run ci.ts --only test:unit",

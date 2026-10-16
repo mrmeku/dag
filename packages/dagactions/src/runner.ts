@@ -9,10 +9,15 @@ import {
   type ProcessNodeResult,
   type ThrottledSchedulerOptions,
 } from "@mrmeku/dagraph";
-import { DEFAULT_JOURNAL_PATH } from "./config.ts";
+import type { EventEmitter } from "node:events";
+import { DEFAULT_JOURNAL_PATH, RERUN_COMMAND } from "./config.ts";
+import { createGithubStore } from "./github/renderer.ts";
 import { createJournal, readJournal, type Journal } from "./journal.ts";
+import { titleOf } from "./kernel/format.ts";
+import type { Pass } from "./kernel/run-slice.ts";
+import type { RunStore } from "./kernel/store.ts";
 import type { CiContext, Ports } from "./ports.ts";
-import { createReporter } from "./reporter.ts";
+import { finishPass } from "./reporter.ts";
 import { selectNodes } from "./select.ts";
 import { postNodes } from "./steps.ts";
 import type { SummaryRenderer } from "./summary.ts";
@@ -35,6 +40,10 @@ export interface RunOptions {
   summary?: readonly SummaryRenderer[];
   /** Cancels the run: waiting nodes settle as cancelled, running commands are interrupted. */
   signal?: AbortSignal;
+  /** The command that reruns the workflow; RERUN_COMMAND and the file by default. */
+  rerunCommand?: string;
+  /** What the passes report to: the GitHub renderer on `ports.ci` unless given. */
+  store?: RunStore;
 }
 
 export interface RunOutcome {
@@ -42,21 +51,27 @@ export interface RunOutcome {
   failed: number;
   markdown: string;
   cancelled: boolean;
+  /** 130 after a cancel, as for a Ctrl-C; 1 when a node did not succeed. */
+  exitCode: number;
 }
 
-const titleOf = (workflowFile: string | undefined) =>
-  workflowFile ? `dagactions · ${workflowFile}` : "dagactions";
+const runOutcomeOf = (outcome: Omit<RunOutcome, "exitCode">): RunOutcome => ({
+  ...outcome,
+  exitCode: outcome.cancelled ? 130 : outcome.failed > 0 ? 1 : 0,
+});
 
 async function buildGraph(opts: { workflow: Workflow; ports: Ports; only?: string[] }) {
   const ctx = await opts.ports.ci.context();
   const full = new Graph();
   await opts.workflow(full, opts.ports, ctx);
   const graph = opts.only?.length ? selectNodes(full, opts.only) : full;
-  const posts = postNodes(full).filter((n) => graph.getNodes().has(n));
+  const posts = postNodes(full).filter((nodeName) => graph.getNodes().has(nodeName));
   return { ctx, graph, posts, total: full.getNodes().size };
 }
 
 export async function runWorkflow(opts: RunOptions): Promise<RunOutcome> {
+  const store = opts.store ?? createGithubStore(opts.ports, opts.casBaseDir);
+  opts.signal?.addEventListener("abort", store.cancel, { once: true });
   const { ports } = opts;
   const { ctx, graph, total } = await buildGraph(opts);
   const names = [...graph.getNodes().keys()];
@@ -64,18 +79,21 @@ export async function runWorkflow(opts: RunOptions): Promise<RunOutcome> {
   const scope = opts.only?.length
     ? `${names.length} of ${count} (--only ${opts.only.join(",")})`
     : count;
-  ports.ci.group(
-    `dagactions · ${ctx.provider} · ref=${ctx.ref} · ${scope}${opts.force ? " · force" : ""}`,
-    names,
-  );
-  await ports.fs.ensureDir(opts.casBaseDir);
-  const reporter = createReporter(ports, {
-    casBaseDir: opts.casBaseDir,
-    nodes: graph.describe(),
+  const rerunCommand =
+    opts.rerunCommand ?? (opts.workflowFile && `${RERUN_COMMAND} ${opts.workflowFile}`);
+  const pass: Pass = {
+    banner: {
+      title: [opts.workflowFile, ctx.ref && `ref=${ctx.ref}`, scope, opts.force && "force"]
+        .filter(Boolean)
+        .join(" · "),
+      lines: names,
+    },
     title: titleOf(opts.workflowFile),
-    ...(opts.workflowFile && { rerun: `npx dagactions run ${opts.workflowFile}` }),
-    ...(opts.summary && { summary: opts.summary }),
-  });
+    nodes: graph.describe(),
+    ...(rerunCommand && { rerunCommand }),
+  };
+  store.begin(pass);
+  await ports.fs.ensureDir(opts.casBaseDir);
   const journal = createJournal(ports.fs, opts.journalPath ?? DEFAULT_JOURNAL_PATH);
   await journal.begin();
   const results = await execute(
@@ -84,16 +102,17 @@ export async function runWorkflow(opts: RunOptions): Promise<RunOutcome> {
     {
       force: opts.force ?? false,
       scheduler: throttledScheduler(opts.limits),
-      onEvent: (ev) => {
-        reporter.onEvent(ev);
-        journal.onEvent(ev);
+      onOutput: store.onOutput,
+      onEvent: (event) => {
+        store.onEvent(event);
+        journal.onEvent(event);
       },
       ...(opts.signal && { signal: opts.signal }),
     },
   );
   await journal.flush();
-  const { failed, markdown } = await reporter.finish(results);
-  return { results, failed, markdown, cancelled: opts.signal?.aborted ?? false };
+  const { failed, markdown } = await finishPass(ports, store, pass, results, opts.summary);
+  return runOutcomeOf({ results, failed, markdown, cancelled: opts.signal?.aborted ?? false });
 }
 
 /** A journaled node's result, replayed so the engine feeds its outputs to the post steps. */
@@ -119,24 +138,30 @@ function replay(name: string, entry: Journal[string] | undefined): ProcessNodeRe
  * since every post step is journaled.
  */
 export async function runPost(opts: Omit<RunOptions, "force" | "signal">): Promise<RunOutcome> {
+  const store = opts.store ?? createGithubStore(opts.ports, opts.casBaseDir);
   const { ports } = opts;
   const { graph, posts } = await buildGraph(opts);
   const journalPath = opts.journalPath ?? DEFAULT_JOURNAL_PATH;
   const before = await readJournal(ports.fs, journalPath);
-  const owed = new Set(posts.filter((n) => !before[n] || before[n].status === "cancelled"));
-  ports.ci.group(`dagactions · post · ${owed.size} of ${posts.length} post steps owed`, [...owed]);
-  if (owed.size === 0) return { results: [], failed: 0, markdown: "", cancelled: false };
-  const nodes = graph.getNodes();
-  // The summary draws the owed post steps alone, so their edges to the rest of the graph go.
-  const reporter = createReporter(ports, {
-    casBaseDir: opts.casBaseDir,
+  const owed = new Set(
+    posts.filter((nodeName) => !before[nodeName] || before[nodeName].status === "cancelled"),
+  );
+  const pass: Pass = {
+    // Owing nothing, the pass prints nothing: every job has a post step, most owe none.
+    ...(owed.size > 0 && {
+      banner: { title: `post · ${owed.size} of ${posts.length} post steps owed`, lines: [...owed] },
+    }),
+    title: `${titleOf(opts.workflowFile)} · post`,
+    // The summary draws the owed post steps alone, so their edges to the rest of the graph go.
     nodes: graph
       .describe()
-      .filter((n) => owed.has(n.name))
-      .map((n) => ({ ...n, deps: n.deps.filter((d) => owed.has(d)) })),
-    title: `${titleOf(opts.workflowFile)} · post`,
-    ...(opts.summary && { summary: opts.summary }),
-  });
+      .filter((node) => owed.has(node.name))
+      .map((node) => ({ ...node, deps: node.deps.filter((dep) => owed.has(dep)) })),
+  };
+  store.begin(pass);
+  if (owed.size === 0)
+    return runOutcomeOf({ results: [], failed: 0, markdown: "", cancelled: false });
+  const nodes = graph.getNodes();
   const journal = createJournal(ports.fs, journalPath, before);
   const ctx = {
     cache: new FsCache(opts.casBaseDir, ports.fs),
@@ -148,17 +173,49 @@ export async function runPost(opts: Omit<RunOptions, "force" | "signal">): Promi
     nodes.values(),
     (node, depHashes, depOutputs, started) =>
       owed.has(node.name)
-        ? processNode(nodes.get(node.name)!, depHashes, depOutputs, ctx, { onStart: started })
+        ? processNode(nodes.get(node.name)!, depHashes, depOutputs, ctx, {
+            onStart: started,
+            onOutput: (chunk) => store.onOutput(node, chunk),
+          })
         : Promise.resolve(replay(node.name, before[node.name])),
     throttledScheduler(opts.limits),
-    (ev) => {
-      if (!owed.has(ev.node.name)) return;
-      reporter.onEvent(ev);
-      journal.onEvent(ev);
+    (event) => {
+      if (!owed.has(event.node.name)) return;
+      store.onEvent(event);
+      journal.onEvent(event);
     },
   );
   await journal.flush();
-  const results = all.filter((r) => owed.has(r.name));
-  const { failed, markdown } = await reporter.finish(results);
-  return { results, failed, markdown, cancelled: false };
+  const results = all.filter((result) => owed.has(result.name));
+  const { failed, markdown } = await finishPass(ports, store, pass, results, opts.summary);
+  return runOutcomeOf({ results, failed, markdown, cancelled: false });
+}
+
+/**
+ * The job as one process runs it, which the action splits between its `main` and `post`: the
+ * run; after a cancel, the post steps it owes, drawn as the run is; then the store's close, with
+ * what either pass threw. An exit of `processEvents` before the close is done is a forced one (a second
+ * Ctrl-C), and interrupts the store. Resolves to the run's exit code.
+ */
+export async function runJob(
+  opts: RunOptions,
+  processEvents: Pick<EventEmitter, "once" | "off">,
+): Promise<number> {
+  const interrupt = () => opts.store?.interrupt();
+  processEvents.once("exit", interrupt);
+  try {
+    let error: unknown;
+    try {
+      const outcome = await runWorkflow(opts);
+      if (outcome.cancelled) await runPost(opts);
+      return outcome.exitCode;
+    } catch (e) {
+      error = e;
+      throw e;
+    } finally {
+      await opts.store?.close(error);
+    }
+  } finally {
+    processEvents.off("exit", interrupt);
+  }
 }

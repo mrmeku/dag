@@ -16,18 +16,33 @@ export interface ShResult {
  * Runs external commands. Never throws on a non-zero exit; the caller reads `code`. `env` is
  * merged over the inherited environment, and an `undefined` value removes a variable. When
  * `signal` fires the command is interrupted (SIGINT, then SIGTERM, then SIGKILL after the
- * grace periods in config.ts) and resolves with its exit status as usual.
+ * grace periods in config.ts) and resolves with its exit status as usual. `onOutput` receives
+ * `output` as it arrives, chunk by chunk.
  */
 export interface Sh {
   run: (
     cmd: string[],
-    opts?: { cwd?: string; env?: Record<string, string | undefined>; signal?: AbortSignal },
+    opts?: {
+      cwd?: string;
+      env?: Record<string, string | undefined>;
+      signal?: AbortSignal;
+      onOutput?: (chunk: string) => void;
+    },
   ) => Promise<ShResult>;
 }
 
 export interface Clock {
   now: () => number;
 }
+
+/**
+ * Synchronous writes: three functions of `node:fs`, so that module is itself a SyncFs. The local
+ * recorders write with them, so their files are whole when the process is forced out.
+ */
+export type SyncFs = Pick<
+  typeof import("node:fs"),
+  "mkdirSync" | "writeFileSync" | "appendFileSync"
+>;
 
 /**
  * The cache service behind `actions/cache`: the two functions of `@actions/cache`, so that

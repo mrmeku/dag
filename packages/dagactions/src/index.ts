@@ -8,6 +8,25 @@ export {
 } from "./config.ts";
 export { defineStep } from "./define-step.ts";
 export { createJournal, readJournal, type Journal, type JournalEntry } from "./journal.ts";
+export { formatDuration } from "./kernel/format.ts";
+export type { NodeReport } from "./kernel/report.ts";
+export type {
+  CancelledNodeState,
+  FailedNodeState,
+  InFlightNodeState,
+  NodeAction,
+  NodeState,
+  Pass,
+  PendingNodeState,
+  RunAction,
+  RunLifecycle,
+  RunState,
+  SettledNodeState,
+  SkippedNodeState,
+  SucceededNodeState,
+} from "./kernel/run-slice.ts";
+export * as selectors from "./kernel/selectors.ts";
+export { createRunStore, type RunListener, type RunStore } from "./kernel/store.ts";
 export type {
   ActionsArtifact,
   ActionsCache,
@@ -41,13 +60,21 @@ export {
 } from "./ports/memory.ts";
 export { abortOnSignals, createSh, systemClock } from "./ports/real.ts";
 export { createReporter } from "./reporter.ts";
-export { runPost, runWorkflow, type RunOptions, type RunOutcome, type Workflow } from "./runner.ts";
+export {
+  runJob,
+  runPost,
+  runWorkflow,
+  type RunOptions,
+  type RunOutcome,
+  type Workflow,
+} from "./runner.ts";
 export { selectNodes } from "./select.ts";
 export {
   hashFiles,
   logPath,
   markPost,
   postNodes,
+  type CommandCause,
   type OutputRef,
   type PostSpec,
   type RestoreCacheRef,
@@ -59,14 +86,12 @@ export {
 } from "./steps.ts";
 export {
   DEFAULT_SUMMARY_RENDERERS,
-  formatDuration,
   renderCriticalPath,
   renderDag,
   renderFailures,
   renderStatus,
   renderTable,
   renderTimeline,
-  type NodeReport,
   type RunReport,
   type SummaryRenderer,
 } from "./summary.ts";
