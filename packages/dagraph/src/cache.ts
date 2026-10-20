@@ -15,6 +15,12 @@ export interface DagFs {
   writeText(path: string, content: string): Promise<void>;
   hashFile(path: string): Promise<string>;
   ensureDir(path: string): Promise<void>;
+  /** POSIX `rename`: replaces a file at `to` atomically; fails when `to` is a non-empty directory. */
+  rename(from: string, to: string): Promise<void>;
+  /** Removes a file, or a directory and everything in it; nothing when the path does not exist. */
+  remove(path: string): Promise<void>;
+  /** The names of the entries in a directory; none when the directory does not exist. */
+  readdir(dir: string): Promise<string[]>;
 }
 
 /** Content-addressed cache used by the executor to skip unchanged nodes. */
@@ -23,7 +29,10 @@ export interface Cache {
   put(key: string, entry: CacheEntry): Promise<void>;
 }
 
-/** Filesystem-backed cache. Stores manifests as JSON at {baseDir}/{actionKey}/manifest.json. */
+/**
+ * Filesystem-backed cache. Stores manifests as JSON at {baseDir}/{actionKey}/manifest.json, each
+ * written beside it and renamed into place, so a reader never sees half of one.
+ */
 export class FsCache implements Cache {
   private baseDir: string;
   private fs: DagFs;
@@ -40,7 +49,10 @@ export class FsCache implements Cache {
     }
   }
   async put(key: string, entry: CacheEntry): Promise<void> {
-    await this.fs.writeText(`${this.baseDir}/${key}/manifest.json`, JSON.stringify(entry, null, 2));
+    const path = `${this.baseDir}/${key}/manifest.json`;
+    const written = `${path}.${crypto.randomUUID()}`;
+    await this.fs.writeText(written, JSON.stringify(entry, null, 2));
+    await this.fs.rename(written, path);
   }
 }
 

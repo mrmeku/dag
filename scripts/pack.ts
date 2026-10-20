@@ -4,12 +4,38 @@
  * into a staging dir, laid out as `<package>/src/*.js`; the package's staged package.json gets the
  * version stamped, `private` dropped, every `.ts` entry pointed at its `.js`, and workspace deps
  * pinned to the same version; then `npm pack` writes `<name>-<version>.tgz` into the out dir and
- * prints its name. Bare imports of a sibling package stay bare: npm resolves them.
+ * prints its name. Bare imports of a sibling package stay bare: npm resolves them. A package in
+ * INLINE_TYPES ships its declarations bundled, one file per export under `types/`, with those
+ * packages' types inlined, so they never depend on a package the consumer may not have installed.
  */
 import { spawnSync } from "node:child_process";
-import { cpSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import {
+  cpSync,
+  existsSync,
+  mkdtempSync,
+  readFileSync,
+  realpathSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
-import { join, resolve } from "node:path";
+import { dirname, join, resolve } from "node:path";
+import { rollup } from "rollup";
+import { dts } from "rollup-plugin-dts";
+
+/**
+ * Per package, the imports whose types its declarations carry inline, each with the package that
+ * holds them: optional peers and devDependencies, which a consumer's typecheck must not need.
+ */
+const INLINE_TYPES: Record<string, Record<string, string>> = {
+  dagactions: {
+    "@actions/artifact": "@actions/artifact",
+    "@actions/cache": "@actions/cache",
+    "@actions/github": "@actions/github",
+    "proper-lockfile": "@types/proper-lockfile",
+    retry: "@types/retry",
+  },
+};
 
 const [pkg, version, outDir] = process.argv.slice(2);
 if (!pkg || !version || !outDir) throw new Error("usage: pack.ts <package> <version> <out dir>");
@@ -27,6 +53,58 @@ const toJs = (v: unknown): unknown =>
       ? Object.fromEntries(Object.entries(v).map(([k, x]) => [k, toJs(x)]))
       : v;
 
+/** Where `name` is installed, looked up from `from` as Node does. */
+const installed = (name: string, from: string): string | undefined => {
+  const at = join(from, "node_modules", name);
+  if (existsSync(at)) return realpathSync(at);
+  return dirname(from) === from ? undefined : installed(name, dirname(from));
+};
+
+/**
+ * Bundle the declarations of each export of the staged package into `types/<name>.d.ts`, with
+ * `inline`'s types in them, and check that they import nothing but the package's dependencies.
+ */
+async function bundleTypes(
+  staged: string,
+  exports: Record<string, string>,
+  inline: Record<string, string>,
+  dependencies: Record<string, string>,
+) {
+  // A package is looked up from this one, then from those before it, whose own dependency it may be.
+  const found: string[] = [];
+  const paths = Object.fromEntries(
+    Object.entries(inline).map(([name, pkg]) => {
+      const at = [resolve(dir), ...found].map((from) => installed(pkg, from)).find(Boolean);
+      if (!at) throw new Error(`${pkg} is not installed`);
+      found.push(at);
+      return [name, [at]];
+    }),
+  );
+  const bundle = await rollup({
+    input: Object.fromEntries(
+      Object.entries(exports).map(([sub, file]) => [
+        sub === "." ? "index" : sub.slice(2),
+        join(staged, file.replace(/\.ts$/, ".d.ts")),
+      ]),
+    ),
+    plugins: [
+      dts({
+        includeExternal: [...Object.keys(inline), ...Object.values(inline)],
+        compilerOptions: { paths },
+      }),
+    ],
+    onwarn: (warning) => {
+      if (warning.code !== "UNRESOLVED_IMPORT") throw new Error(warning.message);
+    },
+  });
+  const { output } = await bundle.write({ dir: join(staged, "types"), format: "es" });
+  const own = new Set(output.map((o) => o.fileName));
+  const imported = output.flatMap((o) => (o.type === "chunk" ? o.imports : []));
+  const stray = imported.filter((i) => !own.has(i) && !(i in dependencies));
+  if (stray.length)
+    throw new Error(`${pkg}'s declarations import ${[...new Set(stray)].join(", ")}`);
+}
+
 const stage = mkdtempSync(join(tmpdir(), "pack-"));
 try {
   run(["bunx", "tsgo", "-p", "tsconfig.build.json", "--outDir", stage]);
@@ -41,7 +119,29 @@ try {
       range.startsWith("workspace:") ? version : range,
     ]),
   );
-  const staged = { ...(toJs(rest) as object), version, files: ["src", "README.md"], dependencies };
+  const inline = INLINE_TYPES[pkg];
+  const exports = manifest.exports as Record<string, string>;
+  if (inline) await bundleTypes(join(stage, pkg), exports, inline, dependencies);
+  const staged = {
+    ...(toJs(rest) as object),
+    version,
+    dependencies,
+    ...(inline
+      ? {
+          types: "./types/index.d.ts",
+          exports: Object.fromEntries(
+            Object.entries(exports).map(([sub, file]) => [
+              sub,
+              {
+                types: `./types/${sub === "." ? "index" : sub.slice(2)}.d.ts`,
+                default: toJs(file),
+              },
+            ]),
+          ),
+          files: ["src/**/*.js", "types", "README.md"],
+        }
+      : { files: ["src", "README.md"] }),
+  };
   writeFileSync(join(stage, pkg, "package.json"), JSON.stringify(staged, null, 2) + "\n");
   cpSync(join(dir, "README.md"), join(stage, pkg, "README.md"));
   console.log(run(["npm", "pack", "--pack-destination", resolve(outDir)], join(stage, pkg)).trim());

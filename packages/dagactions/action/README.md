@@ -19,13 +19,13 @@ laptop from the same file.
 `@mrmeku/dagactions`; the action serves that package from its own bundle, so the file loads
 before `npm install` has run. Locally, `npx dagactions run scripts/ci.ts` runs the same file.
 
-| input      | default                    | meaning                                                                                     |
-| ---------- | -------------------------- | ------------------------------------------------------------------------------------------- |
-| `workflow` |                            | Path to the workflow file. Required.                                                        |
-| `cas`      | `.dagactions/cas`          | Local content-addressed cache; restore and save it with `actions/cache` nodes in the graph. |
-| `journal`  | `.dagactions/journal.json` | Where the run records what settled, for the post step.                                      |
-| `force`    | `false`                    | Ignore the cache for this run.                                                              |
-| `only`     |                            | Comma-separated nodes to run, with their dependencies.                                      |
+| input         | default               | meaning                                                                                     |
+| ------------- | --------------------- | ------------------------------------------------------------------------------------------- |
+| `workflow`    |                       | Path to the workflow file. Required.                                                        |
+| `cas-dir`     | `.dagactions/cas`     | Local content-addressed cache; restore and save it with `actions/cache` nodes in the graph. |
+| `history-dir` | `.dagactions/history` | Where each run records what settled, in a history of its own, for the post step.            |
+| `force`       | `false`               | Ignore the cache for this run.                                                              |
+| `only`        |                       | Comma-separated nodes to run, with their dependencies and the post steps of what runs.      |
 
 What the step summary shows, and in which order, is set in the workflow file with `summary`; see
 [Choosing what the summary shows](https://github.com/mrmeku/dag/tree/main/packages/dagactions#choosing-what-the-summary-shows).

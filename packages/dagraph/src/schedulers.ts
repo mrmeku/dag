@@ -1,25 +1,25 @@
-import type { Node } from "./graph/index.ts";
-import type { Scheduler, SchedulerContext } from "./orchestrate.ts";
+import type { Ready } from "./exec-state.ts";
+import type { Scheduler } from "./orchestrate.ts";
 
 /**
  * Core scheduling loop: repeatedly take ready nodes, run them, and wait for in-flight work to
- * complete. Hooks allow filtering (for concurrency limits) and bookkeeping (for counters).
+ * complete. Hooks allow filtering (for limits) and bookkeeping (for counters).
  */
 function schedulingLoop(hooks?: {
-  filter?: (node: Node) => boolean;
-  onStart?: (node: Node) => void;
-  onEnd?: (node: Node) => void;
+  admits?: (ready: Ready) => boolean;
+  onRun?: (ready: Ready) => void;
+  onEnd?: (ready: Ready) => void;
 }): Scheduler {
-  return async (ctx: SchedulerContext) => {
+  return async (ctx) => {
     // A settled node resumes the loop before its onEnd runs, so the loop may see a stale filter.
     // onEnd dispatches too: whichever of the two runs last sees both updates.
     const dispatch = () => {
-      let node: Node | null;
-      while ((node = ctx.take(hooks?.filter))) {
-        const captured = node;
-        hooks?.onStart?.(captured);
-        ctx.run(captured).then(() => {
-          hooks?.onEnd?.(captured);
+      let next: Ready | null;
+      while ((next = ctx.take(hooks?.admits))) {
+        const taken = next;
+        hooks?.onRun?.(taken);
+        void ctx.run(taken).then(() => {
+          hooks?.onEnd?.(taken);
           dispatch();
         });
       }
@@ -31,45 +31,43 @@ function schedulingLoop(hooks?: {
   };
 }
 
-/** Scheduler with no parallelism limits — runs all ready nodes immediately. */
+/** Scheduler with no limits: admits every ready node at once. This is the default. */
 export function unboundedScheduler(): Scheduler {
   return schedulingLoop();
 }
 
 export interface ThrottledSchedulerOptions {
+  /** The most nodes processed at once, as Ninja's `-j`. */
   maxParallelism?: number;
+  /** For each concurrency group, the most of its actions that run at once; a hit takes no slot. */
   concurrencyLimits?: Record<string, number>;
 }
 
 /**
- * Scheduler with global and per-group concurrency limits. Nodes with a concurrencyGroup are
- * subject to the corresponding limit (e.g. { whisper: 1 } to serialize CPU-heavy transcription).
+ * Scheduler with a global limit and one per concurrency group, as Ninja's pools. A node holds its
+ * place from being handed to processing until it settles. A miss in a group gives its place back
+ * while it waits for the group's slot, and takes both once both are free.
  */
 export function throttledScheduler(opts?: ThrottledSchedulerOptions): Scheduler {
-  const { maxParallelism, concurrencyLimits } = opts ?? {};
-  if (maxParallelism == null && concurrencyLimits == null) return unboundedScheduler();
+  const { maxParallelism = Infinity, concurrencyLimits = {} } = opts ?? {};
+  if (opts?.maxParallelism == null && opts?.concurrencyLimits == null) return unboundedScheduler();
 
   let inflight = 0;
   const groupInflight = new Map<string, number>();
+  const count = ({ node, acquiring }: Ready, delta: number) => {
+    inflight += delta;
+    const group = node.concurrencyGroup;
+    if (acquiring && group) groupInflight.set(group, (groupInflight.get(group) ?? 0) + delta);
+  };
 
   return schedulingLoop({
-    filter(node) {
-      if (maxParallelism != null && inflight >= maxParallelism) return false;
-      if (!concurrencyLimits) return true;
+    admits({ node, acquiring }) {
+      if (inflight >= maxParallelism) return false;
       const group = node.concurrencyGroup;
-      if (!group) return true;
-      const limit = concurrencyLimits[group];
-      return limit == null || (groupInflight.get(group) ?? 0) < limit;
+      if (!acquiring || !group) return true;
+      return (groupInflight.get(group) ?? 0) < (concurrencyLimits[group] ?? Infinity);
     },
-    onStart(node) {
-      inflight++;
-      const group = node.concurrencyGroup;
-      if (group) groupInflight.set(group, (groupInflight.get(group) ?? 0) + 1);
-    },
-    onEnd(node) {
-      inflight--;
-      const group = node.concurrencyGroup;
-      if (group) groupInflight.set(group, (groupInflight.get(group) ?? 0) - 1);
-    },
+    onRun: (ready) => count(ready, 1),
+    onEnd: (ready) => count(ready, -1),
   });
 }

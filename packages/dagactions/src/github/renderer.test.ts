@@ -35,7 +35,7 @@ describe("GitHub renderer", () => {
         const slow = w.run({
           name: "slow",
           cmd: ["slow"],
-          deps: { lint: w.optional(lint) },
+          deps: { lint: w.settled(lint) },
           cacheable: false,
         });
         w.run({ name: "after", cmd: ["after"], deps: { slow } });
@@ -47,7 +47,7 @@ describe("GitHub renderer", () => {
       workflowFile: "ci.ts",
       ports,
       casBaseDir: "/cas",
-      journalPath: "/journal.json",
+      historyDir: "/history",
       signal: controller.signal,
     });
     await slowStarted;
@@ -64,12 +64,12 @@ describe("GitHub renderer", () => {
         log: [
           { title: "ci.ts · 3 nodes", lines: ["lint", "slow", "after"] },
           "▷ lint",
-          { title: "✖︎ lint (2.0s)", lines: ["src/a.ts: error", "── error ──", "lint exited 1"] },
+          { title: "✖︎ lint (1.0s)", lines: ["src/a.ts: error", "── error ──", "lint exited 1"] },
           "▷ slow",
           { title: "◼︎ slow (cancelled)", lines: ["compiling"] },
           "◼︎ after: cancelled",
           "",
-          "✖︎ lint failed · ci.ts · built 0 · cached 0 · failed 1 · skipped 0 · cancelled 2 · wall 5.0s",
+          "✖︎ lint failed · ci.ts · built 0 · cached 0 · failed 1 · skipped 0 · cancelled 2 · wall 4.0s",
           "failed: lint",
           "cancelled: slow, after",
           "reproduce: npx dagactions run ci.ts --only lint",

@@ -18,7 +18,7 @@ export default defineWorkflow({
     });
     const gate = await addChecks(w, cas);
     if (w.ctx.ref === "refs/heads/main") {
-      w.saveCache({ name: "save:cas", cache: cas, deps: { gate: w.optional(gate) } });
+      w.saveCache({ name: "save:cas", cache: cas, deps: { gate: w.settled(gate) } });
     }
     return { cas, gate };
   },

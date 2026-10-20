@@ -43,7 +43,7 @@ export default defineWorkflow({
       key: `dagactions-release-${version}-${w.ctx.sha}`,
       restoreKeys: [`dagactions-release-${version}-`, "dagactions-main-"],
     });
-    const afterCas = { deps: { cas }, normalize: { cas: () => "" } };
+    const afterCas = { deps: { cas }, invalidateOn: { cas: () => "" } };
     const gate = await addChecks(w, cas);
 
     const sources = await w.glob(
@@ -126,7 +126,7 @@ export default defineWorkflow({
     });
 
     const release = w.gate({ name: "release", deps: { ...published, action } });
-    w.saveCache({ name: "save:cas", cache: cas, deps: { release: w.optional(release) } });
+    w.saveCache({ name: "save:cas", cache: cas, deps: { release: w.settled(release) } });
     return { version, dryRun, release };
   },
 });

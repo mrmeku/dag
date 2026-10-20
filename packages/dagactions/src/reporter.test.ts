@@ -1,4 +1,4 @@
-import type { ExecEvent, ExecResult, Node } from "@mrmeku/dagraph";
+import type { ExecEvent, Node, Result } from "@mrmeku/dagraph";
 import assert from "node:assert/strict";
 import { describe, test } from "node:test";
 import { STATUS_ICON } from "./config.ts";
@@ -13,12 +13,11 @@ import {
 } from "./summary.ts";
 
 const CAS = "/cas";
-const node = (name: string, kind: string, deps: string[] = [], optionalDeps?: string[]): Node => ({
+const node = (name: string, kind: string, deps: string[] = [], settledDeps?: string[]): Node => ({
   name,
   kind,
   deps,
-  config: "",
-  ...(optionalDeps && { optionalDeps }),
+  ...(settledDeps && { settledDeps }),
 });
 
 const NODES = [
@@ -28,27 +27,30 @@ const NODES = [
   node("d", "gate", ["c"], ["c"]),
 ];
 
-const [A, B, C, D] = NODES as [Node, Node, Node, Node];
-const EVENTS: ExecEvent[] = [
-  { type: "dispatch", node: A },
-  { type: "start", node: A },
-  { type: "done", node: A, actionKey: "k1", outputs: "x", contentHash: "h", elapsed: 400 },
-  { type: "settled", node: A },
-  { type: "dispatch", node: B },
-  { type: "cached", node: B, actionKey: "k2", outputs: "y", contentHash: "h" },
-  { type: "settled", node: B },
-  { type: "dispatch", node: C },
-  { type: "start", node: C },
-  { type: "fail", node: C, actionKey: "k3", error: new Error("exit 1\nlast line"), elapsed: 50 },
-  { type: "settled", node: C },
-  { type: "dep-failed", node: D, error: new Error("dependency c failed") },
-  { type: "settled", node: D },
-];
-const RESULTS: ExecResult[] = [
-  { name: "a", actionKey: "k1", status: "done", outputs: "x", contentHash: "h" },
+const RESULTS: Result[] = [
+  { name: "a", actionKey: "k1", status: "done", outputs: "x", contentHash: "h", elapsed: 400 },
   { name: "b", actionKey: "k2", status: "cached", outputs: "y", contentHash: "h" },
-  { name: "c", actionKey: "k3", status: "fail", error: new Error("exit 1\nlast line") },
-  { name: "d", actionKey: "", status: "dep-failed", error: new Error("dependency c failed") },
+  {
+    name: "c",
+    actionKey: "k3",
+    status: "failed",
+    error: { name: "Error", message: "exit 1\nlast line" },
+    elapsed: 50,
+  },
+  { name: "d", actionKey: "", status: "dep-failed", dep: "c" },
+];
+const [A, B, C, D] = RESULTS as [Result, Result, Result, Result];
+const settled = (result: Result): ExecEvent => ({ type: "result", node: result.name, result });
+const EVENTS: ExecEvent[] = [
+  { type: "dispatch", node: "a" },
+  { type: "start", node: "a" },
+  settled(A),
+  { type: "dispatch", node: "b" },
+  settled(B),
+  { type: "dispatch", node: "c" },
+  { type: "start", node: "c" },
+  settled(C),
+  settled(D),
 ];
 
 /** a built, b cached, c failed with logs in the CAS, d skipped; a and b ran before. */
@@ -87,18 +89,17 @@ describe("reporter", () => {
     const slow = { ...node("slow", "test"), timeoutMs: 900_000 };
     const half = { ...node("half", "test"), timeoutMs: 90_000 };
     const reporter = createReporter(ports, { casBaseDir: CAS, nodes: [slow, half] });
-    const timedOut = () => Object.assign(new Error("timed out"), { name: "TimeoutError" });
-    const events: ExecEvent[] = [
-      { type: "dispatch", node: slow },
-      { type: "fail", node: slow, actionKey: "k2", error: timedOut(), elapsed: 1 },
-      { type: "dispatch", node: half },
-      { type: "fail", node: half, actionKey: "", error: timedOut(), elapsed: 1 },
-    ];
-    for (const ev of events) reporter.onEvent(ev);
-    await reporter.finish([
-      { name: "slow", actionKey: "k2", status: "fail", error: timedOut() },
-      { name: "half", actionKey: "", status: "fail", error: timedOut() },
+    const timedOut = (name: string, actionKey: string): Result => {
+      const error = { name: "TimeoutError", message: "timed out" };
+      return { name, actionKey, status: "failed", error, elapsed: 1 };
+    };
+    const results = [timedOut("slow", "k2"), timedOut("half", "")];
+    const events: ExecEvent[] = results.flatMap((result) => [
+      { type: "dispatch", node: result.name },
+      settled(result),
     ]);
+    for (const ev of events) reporter.onEvent(ev);
+    await reporter.finish(results);
     assert.deepEqual(
       {
         groups: rec.log.filter((e) => typeof e !== "string"),
@@ -109,11 +110,11 @@ describe("reporter", () => {
       {
         groups: [
           {
-            title: `${STATUS_ICON.fail} slow (1.0s)`,
+            title: `${STATUS_ICON.failed} slow (1.0s)`,
             lines: ["partial", "── error ──", "The action 'slow' has timed out after 15 minutes."],
           },
           {
-            title: `${STATUS_ICON.fail} half (1.0s)`,
+            title: `${STATUS_ICON.failed} half (1.0s)`,
             lines: ["── error ──", "The action 'half' has timed out after 1.5 minutes."],
           },
         ],
@@ -139,28 +140,28 @@ describe("reporter", () => {
       {
         log: [
           "▷ a",
-          { title: "✔\uFE0E a (2.0s)", lines: ["ok line 1", "warned", "ok line 2"] },
+          { title: "✔\uFE0E a (1.0s)", lines: ["ok line 1", "warned", "ok line 2"] },
           { title: "✔\uFE0E b (cached)", lines: ["from an earlier run"] },
           "▷ c (last run 3.0s)",
-          { title: "✖\uFE0E c (2.0s)", lines: ["boom", "── error ──", "exit 1", "last line"] },
+          { title: "✖\uFE0E c (1.0s)", lines: ["boom", "── error ──", "exit 1", "last line"] },
           "⏭\uFE0E d: skipped, dependency c failed",
           "",
-          "✖\uFE0E c failed · run · built 1 · cached 1 · failed 1 · skipped 1 · wall 7.0s",
+          "✖\uFE0E c failed · run · built 1 · cached 1 · failed 1 · skipped 1 · wall 6.0s",
           "failed: c",
           "skipped, dependency failed: d",
           "reproduce: npx dagactions run ci.ts --only c",
         ],
         annotations: [{ level: "error", title: "c", message: "exit 1\nlast line" }],
         checks: [
-          { name: "a", status: "in_progress", startedAt: "1970-01-01T00:16:40.000Z" },
-          { name: "c", status: "in_progress", startedAt: "1970-01-01T00:16:45.000Z" },
+          { name: "a", status: "in_progress", startedAt: "1970-01-01T00:16:41.000Z" },
+          { name: "c", status: "in_progress", startedAt: "1970-01-01T00:16:46.000Z" },
           {
             name: "a",
             status: "completed",
             conclusion: "success",
-            startedAt: "1970-01-01T00:16:40.000Z",
+            startedAt: "1970-01-01T00:16:41.000Z",
             completedAt: "1970-01-01T00:16:42.000Z",
-            summary: "done in 2.0s",
+            summary: "done in 1.0s",
           },
           {
             name: "b",
@@ -174,7 +175,7 @@ describe("reporter", () => {
             name: "c",
             status: "completed",
             conclusion: "failure",
-            startedAt: "1970-01-01T00:16:45.000Z",
+            startedAt: "1970-01-01T00:16:46.000Z",
             completedAt: "1970-01-01T00:16:47.000Z",
             summary: "exit 1\nlast line",
           },
@@ -187,7 +188,7 @@ describe("reporter", () => {
           },
         ],
         failed: 2,
-        lastRun: { durations: { a: 2000, b: 2000, c: 2000 } },
+        lastRun: { durations: { a: 1000, b: 2000, c: 1000 } },
       },
     );
 
@@ -198,7 +199,7 @@ describe("reporter", () => {
         "",
         "### ✖\uFE0E c failed",
         "",
-        "built **1** · cached **1** · failed **1** · skipped **1** · wall 7.0s · parallelism 0.6× · cache 1/2 hits, 2.0s saved",
+        "built **1** · cached **1** · failed **1** · skipped **1** · wall 6.0s · parallelism 0.3× · cache 1/2 hits, 2.0s saved",
         "",
         "```mermaid",
         "gantt",
@@ -206,11 +207,11 @@ describe("reporter", () => {
         "  dateFormat x",
         "  axisFormat %M:%S",
         "  section nodes",
-        "  a :done, 1000000, 1002000",
-        "  c :crit, 1005000, 1007000",
+        "  a :done, 1001000, 1002000",
+        "  c :crit, 1006000, 1007000",
         "```",
         "",
-        "critical path: a → c (4.0s)",
+        "critical path: a → c (2.0s)",
         "",
         "```mermaid",
         "flowchart LR",
@@ -229,7 +230,7 @@ describe("reporter", () => {
         "",
         "### failures",
         "",
-        "<details><summary>✖\uFE0E c (2.0s)</summary>",
+        "<details><summary>✖\uFE0E c (1.0s)</summary>",
         "",
         "```text",
         "boom",
@@ -274,9 +275,9 @@ describe("reporter", () => {
           "",
           "| node | status | duration | vs last |",
           "| --- | --- | --- | --- |",
-          "| a | done | 2.0s | +300% |",
+          "| a | done | 1.0s | +100% |",
           "| b | cached | 1.0s |  |",
-          "| c | fail | 2.0s |  |",
+          "| c | failed | 1.0s |  |",
           "| d | dep-failed |  |  |",
           "",
           "```text",
@@ -304,7 +305,7 @@ describe("reporter", () => {
           "",
           "### ✖\uFE0E c failed",
           "",
-          "built **1** · cached **1** · failed **1** · skipped **1** · wall 7.0s · parallelism 0.6× · cache 1/2 hits, 2.0s saved",
+          "built **1** · cached **1** · failed **1** · skipped **1** · wall 6.0s · parallelism 0.3× · cache 1/2 hits, 2.0s saved",
           "",
         ].join("\n"),
       },

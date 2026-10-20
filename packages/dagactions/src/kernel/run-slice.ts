@@ -1,13 +1,13 @@
-import type { ExecEvent, Node, Outputs } from "@mrmeku/dagraph";
+import type { ExecEvent, Node, Outputs, Result } from "@mrmeku/dagraph";
 import { commandOf, type CommandCause } from "../step-records.ts";
 import {
-  errorMessage,
+  depFailedMessage,
   formatDuration,
   isDebugCommand,
   plainLine,
   textAfterLastReturn,
 } from "./format.ts";
-import { dispatchedAtOf, isSettled } from "./selectors.ts";
+import { isSettled, startedAtOf } from "./selectors.ts";
 
 /** What every node has: the graph's node and what its command printed. */
 interface NodeLines {
@@ -29,13 +29,13 @@ export type PendingNodeState = NodeLines & { readonly status: "pending" };
 
 export type InFlightNodeState = NodeLines & {
   readonly status: "dispatched" | "running";
-  readonly dispatchedAt: number;
+  readonly startedAt: number;
 };
 
 export type SucceededNodeState = NodeLines &
   LogRead & {
     readonly status: "done" | "cached";
-    readonly dispatchedAt: number;
+    readonly startedAt: number;
     readonly endedAt: number;
     readonly actionKey: string;
     readonly outputs: Outputs;
@@ -43,8 +43,8 @@ export type SucceededNodeState = NodeLines &
 
 export type FailedNodeState = NodeLines &
   LogRead & {
-    readonly status: "fail";
-    readonly dispatchedAt: number;
+    readonly status: "failed";
+    readonly startedAt: number;
     readonly endedAt: number;
     readonly actionKey: string;
     readonly error: string;
@@ -63,7 +63,7 @@ export type SkippedNodeState = NodeLines &
 export type CancelledNodeState = NodeLines &
   LogRead & {
     readonly status: "cancelled";
-    readonly dispatchedAt?: number;
+    readonly startedAt?: number;
     readonly endedAt: number;
     readonly actionKey: string;
   };
@@ -74,7 +74,11 @@ export type SettledNodeState =
   | SkippedNodeState
   | CancelledNodeState;
 
-/** One node as far as the run has got with it. Every duration is `endedAt - dispatchedAt`. */
+/**
+ * One node as far as the run has got with it. Every duration is `endedAt - startedAt`: from when
+ * its action started, or for a node that settled without starting, such as a cache hit, from its
+ * dispatch. A miss waits for its concurrency group's slot between the two, which is not its time.
+ */
 export type NodeState = PendingNodeState | InFlightNodeState | SettledNodeState;
 
 /** How the run stands: running until a cancel or its close, then final. Only an errored run has an error. */
@@ -100,10 +104,13 @@ export interface Pass {
   rerunCommand?: string;
 }
 
-/** An engine event, stamped with when it came, or what the run's own steps add to it. */
+/**
+ * An engine event, stamped with when it came (what a node prints needs no time), or what the
+ * run's own steps add to it.
+ */
 export type NodeAction =
-  | (Exclude<ExecEvent, { type: "settled" }> & { occurredAt: number })
-  | { type: "outputPrinted"; node: Node; chunk: string }
+  | (Exclude<ExecEvent, { type: "output" }> & { occurredAt: number })
+  | Extract<ExecEvent, { type: "output" }>
   | { type: "logRead"; settled: SettledNodeState; log: string[] };
 
 export type RunAction =
@@ -125,12 +132,13 @@ export const initialNodeState = (node: Node): PendingNodeState => ({
   printed: false,
 });
 
-const isTimeout = (error: unknown): boolean =>
-  error instanceof Error && error.name === "TimeoutError";
+type FailedError = Extract<Result, { status: "failed" }>["error"];
+
+const isTimeout = (error: FailedError): boolean => error.name === "TimeoutError";
 
 /** A failure's message; a timeout in the words of GitHub's runner. */
-function failureMessage(node: Node, error: unknown): string {
-  if (!isTimeout(error) || node.timeoutMs === undefined) return errorMessage(error);
+function failureMessage(node: Node, error: FailedError): string {
+  if (!isTimeout(error) || node.timeoutMs === undefined) return error.message;
   const minutes = node.timeoutMs / 60_000;
   const after =
     minutes >= 1
@@ -179,25 +187,23 @@ function linesAfter(state: NodeState, chunk: string) {
 /** A node after `action`. A node that settles without a dispatch is timed from its settle. */
 export function nodeReducer(state: NodeState, action: NodeAction): NodeState {
   switch (action.type) {
-    case "outputPrinted":
+    case "output":
       return { ...state, ...linesAfter(state, action.chunk) };
     case "logRead":
       if (!isSettled(state)) return state;
-      if (state.status === "fail")
+      if (state.status === "failed")
         return { ...state, lineCount: action.log.length, log: action.log };
       return { ...state, lineCount: action.log.length };
   }
   const { occurredAt } = action;
   const lines = {
-    node: action.node,
+    node: state.node,
     unfinishedLine: state.unfinishedLine,
     lastLine: state.lastLine,
     printed: state.printed,
   };
-  if (action.type === "dispatch")
-    return { ...lines, status: "dispatched", dispatchedAt: occurredAt };
-  if (action.type === "start")
-    return { ...lines, status: "running", dispatchedAt: dispatchedAtOf(state) ?? occurredAt };
+  if (action.type === "dispatch") return { ...lines, status: "dispatched", startedAt: occurredAt };
+  if (action.type === "start") return { ...lines, status: "running", startedAt: occurredAt };
   // The command has exited, ending its unfinished line if it left one.
   const ended = {
     ...lines,
@@ -205,37 +211,38 @@ export function nodeReducer(state: NodeState, action: NodeAction): NodeState {
     unfinishedLine: "",
     endedAt: occurredAt,
   };
-  switch (action.type) {
+  const { result } = action;
+  switch (result.status) {
     case "done":
     case "cached":
       return {
         ...ended,
-        status: action.type,
-        dispatchedAt: dispatchedAtOf(state) ?? occurredAt,
-        actionKey: action.actionKey,
-        outputs: action.outputs,
+        status: result.status,
+        startedAt: startedAtOf(state) ?? occurredAt,
+        actionKey: result.actionKey,
+        outputs: result.outputs,
       };
-    case "fail": {
-      const command = commandOf(action.error);
+    case "failed": {
+      const command = commandOf(result.error);
       return {
         ...ended,
-        status: "fail",
-        dispatchedAt: dispatchedAtOf(state) ?? occurredAt,
-        actionKey: action.actionKey,
-        error: failureMessage(action.node, action.error),
-        timedOut: isTimeout(action.error),
+        status: "failed",
+        startedAt: startedAtOf(state) ?? occurredAt,
+        actionKey: result.actionKey,
+        error: failureMessage(state.node, result.error),
+        timedOut: isTimeout(result.error),
         ...(command && { command }),
       };
     }
     case "dep-failed":
-      return { ...ended, status: "dep-failed", error: errorMessage(action.error) };
+      return { ...ended, status: "dep-failed", error: depFailedMessage(result.dep) };
     case "cancelled": {
-      const dispatchedAt = dispatchedAtOf(state);
+      const startedAt = startedAtOf(state);
       return {
         ...ended,
         status: "cancelled",
-        actionKey: action.actionKey,
-        ...(dispatchedAt !== undefined && { dispatchedAt }),
+        actionKey: result.actionKey,
+        ...(startedAt !== undefined && { startedAt }),
       };
     }
   }
@@ -280,8 +287,9 @@ export function runReducer(state: RunState, action: RunAction): RunState {
       return current === action.settled ? withNode(state, nodeReducer(current, action)) : state;
     }
     default: {
-      const current = state.nodes.get(action.node.name) ?? initialNodeState(action.node);
-      return withNode(state, nodeReducer(current, action));
+      // An event names its node; a node no pass began is not the run's.
+      const current = state.nodes.get(action.node);
+      return current ? withNode(state, nodeReducer(current, action)) : state;
     }
   }
 }

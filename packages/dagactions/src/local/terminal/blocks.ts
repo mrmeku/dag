@@ -74,7 +74,7 @@ export function failureBlockLines(
   labelledRows.push(["rerun", rerunLine(localContext.rerunCommand, [name])]);
   const earlierLineCount = (nodeState.log?.length ?? 0) - tail.length;
   return [
-    `${paint("red", STATUS_ICON.fail)} ${paint("bold", name)}  ${paint("dim", detailOf(nodeState))}`,
+    `${paint("red", STATUS_ICON.failed)} ${paint("bold", name)}  ${paint("dim", detailOf(nodeState))}`,
     ...[
       ...(earlierLineCount > 0
         ? [paint("dim", `… ${plural(earlierLineCount, "earlier line")}`)]
@@ -96,7 +96,7 @@ export function failureLine(
   localContext: LocalContext,
 ): string {
   const logFile = localContext.logFile(nodeState.node.name);
-  return `${localContext.paint("red", STATUS_ICON.fail)} ${padName(nodeState.node.name, nameColumns)}   ${detailOf(nodeState)}${logFile ? `   ${localContext.link(logFile)}` : ""}`;
+  return `${localContext.paint("red", STATUS_ICON.failed)} ${padName(nodeState.node.name, nameColumns)}   ${detailOf(nodeState)}${logFile ? `   ${localContext.link(logFile)}` : ""}`;
 }
 
 /**
@@ -128,7 +128,7 @@ export function recapLines(
     lines.push(failureLine(failure, nameColumns, localContext));
     if (failed.length > 0)
       lines.push(
-        `  ${paint("red", STATUS_ICON.fail)} ${abbreviatedNames(failed)} failed because of it`,
+        `  ${paint("red", STATUS_ICON.failed)} ${abbreviatedNames(failed)} failed because of it`,
       );
     if (skipped.length > 0)
       lines.push(
@@ -137,7 +137,7 @@ export function recapLines(
   }
   if (ownFailureNames.length > failuresShown)
     lines.push(
-      `${paint("red", STATUS_ICON.fail)} ${ownFailureNames.length - failuresShown} more, in the report`,
+      `${paint("red", STATUS_ICON.failed)} ${ownFailureNames.length - failuresShown} more, in the report`,
     );
   lines.push("");
   if (ownFailureNames.length > 0)

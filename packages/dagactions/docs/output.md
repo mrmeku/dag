@@ -66,7 +66,7 @@ The footer has these limits:
 
 ### Which failure is the cause
 
-A step's failure is its own when the step ran its command. This is true also after an optional dependency failed. A step that failed only because a dependency failed, for example a gate, shows under the failure that caused it. The skipped steps also show there.
+A step's failure is its own when the step ran its command. This is true also after a dependency that it takes with `w.settled` failed. A step that failed only because a dependency failed, for example a gate, shows under the failure that caused it. The skipped steps also show there.
 
 ## Log files and the failures report
 
@@ -88,7 +88,7 @@ Each local run writes two types of files, in all styles.
 
 dagactions writes the report when each pass starts, when a step fails, and when the run ends. It also writes it when the run has an error, or when a second Ctrl-C stops the run.
 
-Use `--log-dir` and `--failures-report` to change these paths. `dagactions post` writes neither file.
+Use `--log-dir` and `--failures-report-file` to change these paths. `dagactions post` writes neither file.
 
 ## The GitHub log
 

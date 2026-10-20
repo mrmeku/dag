@@ -1,7 +1,12 @@
-import { requiredDeps, type Node, type Outputs } from "./graph/index.ts";
-import type { ExecEvent, ExecResult, ProcessNodeResult } from "./types.ts";
+import type { CacheEntry } from "./cache.ts";
+import { requiredDeps, type Node } from "./graph/index.ts";
+import type { Result } from "./types.ts";
 
-export type { ExecEvent, ExecResult, ProcessNodeResult } from "./types.ts";
+/** A node the scheduler may take: ready to be processed, or a miss waiting for its group's slot. */
+export interface Ready {
+  node: Node;
+  acquiring: boolean;
+}
 
 /** Build the reverse adjacency list: for each node, which nodes depend on it. */
 function buildDependents(nodes: Iterable<Node>): Map<string, Node[]> {
@@ -36,185 +41,69 @@ function rootPriorities(nodes: Node[]): Map<string, number> {
 }
 
 /**
- * State machine that tracks which nodes are ready, in-flight, completed, or failed. Manages the
- * ready queue and dependency fan-out: when a node completes, its dependents become ready if all
- * their other deps are also done. Ready nodes are ordered by root priority, with newly-ready
- * nodes first among equals (depth-first). Used internally by orchestrate().
+ * Which nodes are ready, which settled and how. A node is ready once every dep has settled.
+ * Ready nodes are ordered by root priority, the most recently ready first among equals, so one
+ * branch finishes before the next starts. A miss waiting for its group's slot is ready again, in
+ * the same order.
  */
 export class ExecState {
   private dependents: Map<string, Node[]>;
   private priority: Map<string, number>;
-  private outputs = new Map<string, Outputs>();
-  private contentHashes = new Map<string, string>();
-  private execResults = new Map<string, ExecResult>();
-  private failed = new Set<string>();
-  private ready: Node[];
-  private enqueued: Set<string>;
-  inflight = 0;
+  private entries = new Map<string, CacheEntry>();
+  readonly results = new Map<string, Result>();
+  private ready: Ready[];
 
   constructor(nodes: Iterable<Node>) {
     const allNodes = Array.from(nodes);
-    const leaves = allNodes.filter((n) => n.deps.length === 0);
     this.dependents = buildDependents(allNodes);
     this.priority = rootPriorities(allNodes);
-    this.ready = leaves;
-    this.enqueued = new Set(leaves.map((n) => n.name));
+    this.ready = allNodes
+      .filter((n) => n.deps.length === 0)
+      .map((node) => ({ node, acquiring: false }));
   }
 
-  /**
-   * Pop the next ready node (optionally matching a filter). Returns null if no node is available.
-   * The scheduler calls this in a loop to pull work.
-   */
-  tryTakeNext(filter?: (node: Node) => boolean): Node | null {
-    if (this.ready.length === 0) return null;
+  private enqueue(items: Ready[]): void {
+    this.ready.unshift(...items);
+    this.ready.sort((a, b) => this.priority.get(a.node.name)! - this.priority.get(b.node.name)!);
+  }
+
+  /** Remove and return the first ready node `filter` admits, or null. */
+  take(filter?: (ready: Ready) => boolean): Ready | null {
     const idx = filter ? this.ready.findIndex(filter) : 0;
-    if (idx === -1) return null;
-    const node = this.ready.splice(idx, 1)[0]!;
-    this.inflight++;
-    return node;
+    if (idx === -1 || idx >= this.ready.length) return null;
+    return this.ready.splice(idx, 1)[0]!;
   }
 
-  /**
-   * Apply a state transition. Updates internal tracking (outputs, hashes, results, failed set)
-   * and on "settled" promotes newly-ready dependents to the ready queue.
-   */
-  send(event: ExecEvent): void {
-    switch (event.type) {
-      case "dispatch":
-      case "start":
-        return;
-      case "settled": {
-        this.inflight--;
-        const children = (this.dependents.get(event.node.name) ?? []).filter(
-          (child) =>
-            !this.enqueued.has(child.name) && child.deps.every((d) => this.execResults.has(d)),
-        );
-        this.ready.unshift(...children);
-        this.ready.sort((a, b) => this.priority.get(a.name)! - this.priority.get(b.name)!);
-        for (const c of children) this.enqueued.add(c.name);
-        return;
-      }
-      case "cached": {
-        const { node, actionKey, outputs, contentHash } = event;
-        this.outputs.set(node.name, outputs);
-        this.contentHashes.set(node.name, contentHash);
-        this.execResults.set(node.name, {
-          name: node.name,
-          actionKey,
-          status: "cached",
-          outputs,
-          contentHash,
-        });
-        return;
-      }
-      case "done": {
-        const { node, actionKey, outputs, contentHash } = event;
-        this.outputs.set(node.name, outputs);
-        this.contentHashes.set(node.name, contentHash);
-        this.execResults.set(node.name, {
-          name: node.name,
-          actionKey,
-          status: "done",
-          outputs,
-          contentHash,
-        });
-        return;
-      }
-      case "fail": {
-        const { node } = event;
-        const error = event.error instanceof Error ? event.error : new Error(String(event.error));
-        this.failed.add(node.name);
-        this.execResults.set(node.name, {
-          name: node.name,
-          actionKey: event.actionKey,
-          status: "fail",
-          error,
-        });
-        return;
-      }
-      case "dep-failed": {
-        const { node } = event;
-        const error = event.error instanceof Error ? event.error : new Error(String(event.error));
-        this.failed.add(node.name);
-        this.execResults.set(node.name, {
-          name: node.name,
-          actionKey: "",
-          status: "dep-failed",
-          error,
-        });
-        return;
-      }
-      case "cancelled":
-        this.failed.add(event.node.name);
-        this.execResults.set(event.node.name, {
-          name: event.node.name,
-          actionKey: event.actionKey,
-          status: "cancelled",
-        });
-        return;
-    }
+  /** A miss waits for its group's slot: it is ready again, acquiring. */
+  waitForSlot(node: Node): void {
+    this.enqueue([{ node, acquiring: true }]);
   }
 
-  get hasWork(): boolean {
-    return this.ready.length > 0 || this.inflight > 0;
+  /** Record a node's result, and make ready each dependent whose deps have all settled. */
+  settle(node: Node, result: Result): void {
+    this.results.set(node.name, result);
+    this.ready = this.ready.filter((r) => r.node.name !== node.name);
+    if (result.status === "done" || result.status === "cached")
+      this.entries.set(node.name, { outputs: result.outputs, contentHash: result.contentHash });
+    const children = (this.dependents.get(node.name) ?? []).filter(
+      (child) => !this.results.has(child.name) && child.deps.every((d) => this.results.has(d)),
+    );
+    this.enqueue(children.map((child) => ({ node: child, acquiring: false })));
   }
 
-  inputsFor(node: Node): Record<string, Outputs> {
+  get hasReady(): boolean {
+    return this.ready.length > 0;
+  }
+
+  /** The entry of each dep that succeeded, by dep name. */
+  depEntries(node: Node): Record<string, CacheEntry> {
     return Object.fromEntries(
-      node.deps.filter((d) => this.outputs.has(d)).map((d) => [d, this.outputs.get(d)!]),
+      node.deps.filter((d) => this.entries.has(d)).map((d) => [d, this.entries.get(d)!]),
     );
   }
 
+  /** The first required dep that did not succeed. */
   failedDep(node: Node): string | undefined {
-    return requiredDeps(node).find((d) => this.failed.has(d));
-  }
-
-  getContentHash(name: string): string | undefined {
-    return this.contentHashes.get(name);
-  }
-
-  get results(): ReadonlyMap<string, ExecResult> {
-    return this.execResults;
-  }
-
-  /**
-   * Convert a ProcessNodeResult into the ExecEvent sequence that should be dispatched. `start` is
-   * not among them: the runner emits it when the action begins, before the result exists.
-   */
-  static resultToEvents(node: Node, result: ProcessNodeResult): ExecEvent[] {
-    switch (result.status) {
-      case "cached":
-        return [
-          {
-            type: "cached",
-            node,
-            actionKey: result.actionKey,
-            outputs: result.outputs,
-            contentHash: result.contentHash,
-          },
-        ];
-      case "done":
-        return [
-          {
-            type: "done",
-            node,
-            actionKey: result.actionKey,
-            outputs: result.outputs,
-            contentHash: result.contentHash,
-            elapsed: result.elapsed,
-          },
-        ];
-      case "fail": {
-        const error = new Error(result.error, "cause" in result ? { cause: result.cause } : {});
-        if (result.timedOut) error.name = "TimeoutError";
-        return [
-          { type: "fail", node, actionKey: result.actionKey, error, elapsed: result.elapsed },
-        ];
-      }
-      case "dep-failed":
-        return [{ type: "dep-failed", node, error: new Error(result.error) }];
-      case "cancelled":
-        return [{ type: "cancelled", node, actionKey: result.actionKey }];
-    }
+    return requiredDeps(node).find((d) => !this.entries.has(d));
   }
 }

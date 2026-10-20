@@ -6,6 +6,7 @@ import type {
   Ci,
   CiContext,
   Clock,
+  Lockfile,
   Ports,
   Sh,
   SyncFs,
@@ -63,6 +64,26 @@ export const okSh: Sh = {
   run: async () => ({ code: 0, stdout: "", stderr: "", output: "", ok: true }),
 };
 
+export type MemoryLockfile = Lockfile & { held: Set<string> };
+
+/** Locks held in memory, by lock path, as proper-lockfile holds them on disk; a release frees one. */
+export function createMemoryLockfile(): MemoryLockfile {
+  const held = new Set<string>();
+  const at = (file: string, opts?: { lockfilePath?: string | undefined }) =>
+    opts?.lockfilePath ?? `${file}.lock`;
+  return {
+    held,
+    lock: async (file, opts) => {
+      const path = at(file, opts);
+      if (held.has(path))
+        throw Object.assign(new Error("Lock file is already being held"), { code: "ELOCKED" });
+      held.add(path);
+      return async () => void held.delete(path);
+    },
+    check: async (file, opts) => held.has(at(file, opts)),
+  };
+}
+
 /** Ports built from doubles: the one fixture every dagactions test starts from. */
 export function createTestPorts(
   opts: {
@@ -93,6 +114,7 @@ export function createTestPorts(
       ci: rec.ci,
       actionsCache,
       actionsArtifact,
+      lockfile: createMemoryLockfile(),
       env: opts.env ?? {},
     },
     fs,

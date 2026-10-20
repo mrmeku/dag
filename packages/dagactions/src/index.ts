@@ -1,13 +1,20 @@
+// The toolkit's own type for `UploadArtifactSpec.options`, so a published declaration can name it.
+export type { UploadArtifactOptions } from "@actions/artifact";
 export {
   DEFAULT_CAS_DIR,
   DEFAULT_EXCLUDES,
-  DEFAULT_JOURNAL_PATH,
+  DEFAULT_HISTORY_DIR,
   DEFAULT_SUMMARY_PATH,
-  RUNNER_ENDPOINTS,
-  RUNNER_TOKENS,
 } from "./config.ts";
 export { defineStep } from "./define-step.ts";
-export { createJournal, readJournal, type Journal, type JournalEntry } from "./journal.ts";
+export {
+  createRunHistory,
+  readRunHistory,
+  runHistoryLive,
+  type RunHistory,
+  type RunHistoryEntry,
+  type RunHistoryFile,
+} from "./history.ts";
 export { formatDuration } from "./kernel/format.ts";
 export type { NodeReport } from "./kernel/report.ts";
 export type {
@@ -31,9 +38,11 @@ export type {
   ActionsArtifact,
   ActionsCache,
   AnnotationLevel,
+  CheckUpdate,
   Ci,
   CiContext,
   Clock,
+  Lockfile,
   Ports,
   Sh,
   ShResult,
@@ -49,7 +58,6 @@ export {
   nullActionsCache,
   type MemoryActionsCache,
 } from "./ports/actions-cache.ts";
-export { createGithubCi, flattenGroups } from "./ports/github.ts";
 export { createLocalCi, nullCi } from "./ports/local.ts";
 export {
   createRecordingCi,
@@ -72,8 +80,8 @@ export { selectNodes } from "./select.ts";
 export {
   hashFiles,
   logPath,
-  markPost,
   postNodes,
+  refToken,
   type CommandCause,
   type OutputRef,
   type PostSpec,

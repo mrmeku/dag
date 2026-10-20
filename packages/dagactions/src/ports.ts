@@ -2,6 +2,7 @@ import type { ArtifactClient } from "@actions/artifact";
 import type * as cache from "@actions/cache";
 import type { context } from "@actions/github";
 import type { DagFs } from "@mrmeku/dagraph";
+import type * as properLockfile from "proper-lockfile";
 
 export interface ShResult {
   code: number;
@@ -102,6 +103,9 @@ export interface Ci {
   check: (update: CheckUpdate) => Promise<void>;
 }
 
+/** proper-lockfile: a run's lock on its history says the run is still going. */
+export type Lockfile = Pick<typeof properLockfile, "lock" | "check">;
+
 /** The context every step is bound to. */
 export interface Ports {
   sh: Sh;
@@ -110,9 +114,10 @@ export interface Ports {
   ci: Ci;
   actionsCache: ActionsCache;
   actionsArtifact: ActionsArtifact;
+  lockfile: Lockfile;
   /**
-   * The environment `sh` hands its commands, which `w.secrets` reads and the run step withholds
-   * from: `process.env` with createSh.
+   * The environment `sh` hands its commands, which `w.secrets` reads: `process.env` with
+   * createSh.
    */
   env: Readonly<Record<string, string | undefined>>;
 }

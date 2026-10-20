@@ -1,18 +1,26 @@
 import {
+  closure,
   execute,
   FsCache,
   Graph,
   orchestrate,
   processNode,
   throttledScheduler,
-  type ExecResult,
-  type ProcessNodeResult,
+  type Result,
   type ThrottledSchedulerOptions,
 } from "@mrmeku/dagraph";
 import type { EventEmitter } from "node:events";
-import { DEFAULT_JOURNAL_PATH, RERUN_COMMAND } from "./config.ts";
+import { resolve } from "node:path";
+import { DEFAULT_HISTORY_DIR, RERUN_COMMAND } from "./config.ts";
 import { createGithubStore } from "./github/renderer.ts";
-import { createJournal, readJournal, type Journal } from "./journal.ts";
+import {
+  createRunHistory,
+  readRunHistory,
+  runHistoryLive,
+  type RunHistory,
+  type RunHistoryEntry,
+  type RunHistoryFile,
+} from "./history.ts";
 import { titleOf } from "./kernel/format.ts";
 import type { Pass } from "./kernel/run-slice.ts";
 import type { RunStore } from "./kernel/store.ts";
@@ -23,7 +31,11 @@ import { postNodes } from "./steps.ts";
 import type { SummaryRenderer } from "./summary.ts";
 
 /** A workflow adds nodes to the graph. The ref/event come in through `ctx` for conditionals. */
-export type Workflow<R = unknown> = (graph: Graph, ports: Ports, ctx: CiContext) => Promise<R>;
+export type Workflow<R = unknown> = (
+  graph: Graph<Ports>,
+  ports: Ports,
+  ctx: CiContext,
+) => Promise<R>;
 
 export interface RunOptions {
   workflow: Workflow;
@@ -31,8 +43,8 @@ export interface RunOptions {
   workflowFile?: string;
   ports: Ports;
   casBaseDir: string;
-  /** Where the run writes its journal; `runPost` reads it. */
-  journalPath?: string;
+  /** The directory where each run writes its history; the post pass reads them. */
+  historyDir?: string;
   force?: boolean;
   only?: string[];
   limits?: ThrottledSchedulerOptions;
@@ -46,8 +58,10 @@ export interface RunOptions {
   store?: RunStore;
 }
 
+type PostOptions = Omit<RunOptions, "force" | "signal">;
+
 export interface RunOutcome {
-  results: ExecResult[];
+  results: Result[];
   failed: number;
   markdown: string;
   cancelled: boolean;
@@ -60,21 +74,117 @@ const runOutcomeOf = (outcome: Omit<RunOutcome, "exitCode">): RunOutcome => ({
   exitCode: outcome.cancelled ? 130 : outcome.failed > 0 ? 1 : 0,
 });
 
+/** The workflow a run's history belongs to: its file resolved, so `ci.ts` and `./ci.ts` are one. */
+const workflowOf = (opts: { workflowFile?: string }) =>
+  opts.workflowFile ? resolve(opts.workflowFile) : "";
+
 async function buildGraph(opts: { workflow: Workflow; ports: Ports; only?: string[] }) {
   const ctx = await opts.ports.ci.context();
-  const full = new Graph();
+  const full = new Graph<Ports>();
   await opts.workflow(full, opts.ports, ctx);
   const graph = opts.only?.length ? selectNodes(full, opts.only) : full;
-  const posts = postNodes(full).filter((nodeName) => graph.getNodes().has(nodeName));
-  return { ctx, graph, posts, total: full.getNodes().size };
+  return { ctx, full, graph };
+}
+
+/**
+ * The post steps a run's history shows it owes: not finished (never reached, or cancelled while
+ * they ran), with every required dep finished in that run or owed itself. A post whose main
+ * never succeeded is owed nothing.
+ */
+function owedPosts(graph: Graph<Ports>, history: RunHistory): Set<string> {
+  const posts = postNodes(graph);
+  const owed = new Set<string>();
+  const finished = (n: string) => ["done", "cached"].includes(history[n]?.status ?? "");
+  // Nodes come in the order they were added, each after its deps.
+  for (const node of graph.describe()) {
+    const pending = !history[node.name] || history[node.name]!.status === "cancelled";
+    const required = node.deps.filter((d) => !node.settledDeps?.includes(d));
+    if (posts.has(node.name) && pending && required.every((d) => finished(d) || owed.has(d)))
+      owed.add(node.name);
+  }
+  return owed;
+}
+
+/**
+ * Run the post steps that runs of this workflow no longer going owe, each over the graph its
+ * history says it ran (its `--only` of `full`), as passes on `store`, and remove each run's
+ * history once it owes nothing. Another workflow's history is left for that workflow. A history
+ * that cannot be read is dropped with a warning, and a write a killed run left half done is dropped.
+ */
+async function settle(
+  opts: PostOptions,
+  full: Graph<Ports>,
+  store: RunStore,
+): Promise<RunOutcome[]> {
+  const { fs, ci, lockfile } = opts.ports;
+  const dir = opts.historyDir ?? DEFAULT_HISTORY_DIR;
+  const outcomes: RunOutcome[] = [];
+  // A stopped run's history goes with its lock, stale after a kill.
+  const drop = async (path: string) => {
+    await fs.remove(path);
+    await fs.remove(`${path}.lock`);
+  };
+  for (const name of await fs.readdir(dir)) {
+    const end = name.indexOf(".json") + ".json".length;
+    if (end < ".json".length || name.endsWith(".lock")) continue;
+    const path = `${dir}/${name.slice(0, end)}`;
+    if (await runHistoryLive(lockfile, path)) continue;
+    // A write a killed run left half done.
+    if (name.length > end) {
+      await fs.remove(`${dir}/${name}`);
+      continue;
+    }
+    let file: RunHistoryFile;
+    let graph: Graph<Ports>;
+    try {
+      file = await readRunHistory(fs, path);
+      if (file.workflow !== workflowOf(opts)) continue;
+      graph = file.only ? selectNodes(full, file.only) : full;
+    } catch (e) {
+      // Gone: another pass claimed it since the listing.
+      if (!(await fs.exists(path))) continue;
+      ci.annotate(
+        "warning",
+        "dagactions",
+        `ignoring the run's history ${path}: ${(e as Error).message}`,
+      );
+      await drop(path);
+      continue;
+    }
+    const owed = owedPosts(graph, file.nodes);
+    if (owed.size === 0) {
+      await drop(path);
+      continue;
+    }
+    const history = await createRunHistory(fs, lockfile, dir, file);
+    try {
+      // Claimed by renaming it to a history of this pass: a pass that renames it second finds it gone.
+      const claimed = await fs.rename(path, history.path).then(
+        () => true,
+        () => false,
+      );
+      if (!claimed) continue;
+      await fs.remove(`${path}.lock`);
+      outcomes.push(await postPass(opts, graph, owed, history, store));
+      await fs.remove(history.path);
+    } finally {
+      await history.close();
+    }
+  }
+  return outcomes;
 }
 
 export async function runWorkflow(opts: RunOptions): Promise<RunOutcome> {
   const store = opts.store ?? createGithubStore(opts.ports, opts.casBaseDir);
   opts.signal?.addEventListener("abort", store.cancel, { once: true });
   const { ports } = opts;
-  const { ctx, graph, total } = await buildGraph(opts);
-  const names = [...graph.getNodes().keys()];
+  const { ctx, full, graph } = await buildGraph(opts);
+  // Runs that stopped before their post pass owe their posts; this run finishes them first. Their
+  // failures are reported, but the run's outcome is its own nodes'.
+  await settle(opts, full, store);
+  const total = full.describe().length;
+  const nodes = graph.describe();
+  const names = nodes.map((node) => node.name);
   const count = `${total} node${total === 1 ? "" : "s"}`;
   const scope = opts.only?.length
     ? `${names.length} of ${count} (--only ${opts.only.join(",")})`
@@ -89,68 +199,118 @@ export async function runWorkflow(opts: RunOptions): Promise<RunOutcome> {
       lines: names,
     },
     title: titleOf(opts.workflowFile),
-    nodes: graph.describe(),
+    nodes,
     ...(rerunCommand && { rerunCommand }),
   };
   store.begin(pass);
+  const selected = new Set(names);
+  for (const [post, main] of postNodes(full))
+    if (selected.has(main) && !selected.has(post))
+      ports.ci.annotate(
+        "notice",
+        post,
+        "not run: its command refers to an output of a step --only leaves out",
+      );
   await ports.fs.ensureDir(opts.casBaseDir);
-  const journal = createJournal(ports.fs, opts.journalPath ?? DEFAULT_JOURNAL_PATH);
-  await journal.begin();
-  const results = await execute(
-    graph,
-    { cache: new FsCache(opts.casBaseDir, ports.fs), fs: ports.fs, casBaseDir: opts.casBaseDir },
+  const history = await createRunHistory(
+    ports.fs,
+    ports.lockfile,
+    opts.historyDir ?? DEFAULT_HISTORY_DIR,
     {
-      force: opts.force ?? false,
-      scheduler: throttledScheduler(opts.limits),
-      onOutput: store.onOutput,
-      onEvent: (event) => {
-        store.onEvent(event);
-        journal.onEvent(event);
-      },
-      ...(opts.signal && { signal: opts.signal }),
+      workflow: workflowOf(opts),
+      ...(opts.only?.length && { only: opts.only }),
+      nodes: {},
     },
   );
-  await journal.flush();
+  let results: Result[];
+  try {
+    await history.begin();
+    results = await execute(
+      graph,
+      {
+        ports,
+        cache: new FsCache(opts.casBaseDir, ports.fs),
+        fs: ports.fs,
+        casBaseDir: opts.casBaseDir,
+      },
+      {
+        force: opts.force ?? false,
+        scheduler: throttledScheduler(opts.limits),
+        onEvent: (event) => {
+          store.onEvent(event);
+          history.onEvent(event);
+        },
+        ...(opts.signal && { signal: opts.signal }),
+      },
+    );
+    await history.flush();
+    // A run that owes nothing leaves no history behind.
+    if (owedPosts(graph, history.entries).size === 0) await ports.fs.remove(history.path);
+  } finally {
+    await history.close();
+  }
   const { failed, markdown } = await finishPass(ports, store, pass, results, opts.summary);
   return runOutcomeOf({ results, failed, markdown, cancelled: opts.signal?.aborted ?? false });
 }
 
-/** A journaled node's result, replayed so the engine feeds its outputs to the post steps. */
-function replay(name: string, entry: Journal[string] | undefined): ProcessNodeResult {
+/** A node's result as the run's history recorded it, replayed so the engine feeds its outputs to the post steps. */
+function replay(name: string, entry: RunHistoryEntry | undefined): Result {
   switch (entry?.status) {
     case "done":
     case "cached":
       // Replayed as cached: it ran in the main run, and its outputs are what matter here.
       return { name, actionKey: "", ...entry, status: "cached" };
-    case "fail":
-      return { name, actionKey: "", status: "fail", error: "failed in the main run", elapsed: 0 };
+    case "failed": {
+      const error = { name: "Error", message: "failed in the main run" };
+      return { name, actionKey: "", status: "failed", error, elapsed: 0 };
+    }
     case "dep-failed":
-      return { name, actionKey: "", status: "dep-failed", error: "dependency failed" };
+      return { name, actionKey: "", status: "dep-failed", dep: entry.dep };
     default:
       return { name, actionKey: "", status: "cancelled" };
   }
 }
 
 /**
- * The action's `post:`: run the post steps the main run's journal shows as not finished (never
- * reached, or cancelled while they ran), with the rest of the graph replayed from the journal so
- * the engine's dependency rules apply as they would have. Nothing runs after an ordinary run,
- * since every post step is journaled.
+ * The action's `post:`, and `dagactions run`'s after a cancel: run the post steps that runs no
+ * longer going owe, with what they depend on replayed from each run's history so the engine's
+ * dependency rules apply as they would have. Nothing runs after an ordinary run, which owes
+ * nothing and leaves no history.
  */
-export async function runPost(opts: Omit<RunOptions, "force" | "signal">): Promise<RunOutcome> {
+export async function runPost(opts: PostOptions): Promise<RunOutcome> {
   const store = opts.store ?? createGithubStore(opts.ports, opts.casBaseDir);
+  const { full } = await buildGraph(opts);
+  const outcomes = await settle(opts, full, store);
+  // Owing nothing, the pass prints nothing: every job has a post step, most owe none.
+  if (outcomes.length === 0)
+    store.begin({ title: `${titleOf(opts.workflowFile)} · post`, nodes: [] });
+  return runOutcomeOf({
+    results: outcomes.flatMap((o) => o.results),
+    failed: outcomes.reduce((n, o) => n + o.failed, 0),
+    markdown: outcomes.map((o) => o.markdown).join(""),
+    cancelled: false,
+  });
+}
+
+/**
+ * Run the `owed` post steps of the run whose history is `history`, and record them there: an
+ * executor over the closure of the owed posts, whose `RunNode` processes an owed post and replays
+ * every other node as the run's history recorded it.
+ */
+async function postPass(
+  opts: PostOptions,
+  graph: Graph<Ports>,
+  owed: Set<string>,
+  history: Awaited<ReturnType<typeof createRunHistory>>,
+  store: RunStore,
+): Promise<RunOutcome> {
   const { ports } = opts;
-  const { graph, posts } = await buildGraph(opts);
-  const journalPath = opts.journalPath ?? DEFAULT_JOURNAL_PATH;
-  const before = await readJournal(ports.fs, journalPath);
-  const owed = new Set(
-    posts.filter((nodeName) => !before[nodeName] || before[nodeName].status === "cancelled"),
-  );
+  const before = { ...history.entries };
   const pass: Pass = {
-    // Owing nothing, the pass prints nothing: every job has a post step, most owe none.
-    ...(owed.size > 0 && {
-      banner: { title: `post · ${owed.size} of ${posts.length} post steps owed`, lines: [...owed] },
-    }),
+    banner: {
+      title: `post · ${owed.size} of ${postNodes(graph).size} post steps owed`,
+      lines: [...owed],
+    },
     title: `${titleOf(opts.workflowFile)} · post`,
     // The summary draws the owed post steps alone, so their edges to the rest of the graph go.
     nodes: graph
@@ -159,33 +319,30 @@ export async function runPost(opts: Omit<RunOptions, "force" | "signal">): Promi
       .map((node) => ({ ...node, deps: node.deps.filter((dep) => owed.has(dep)) })),
   };
   store.begin(pass);
-  if (owed.size === 0)
-    return runOutcomeOf({ results: [], failed: 0, markdown: "", cancelled: false });
-  const nodes = graph.getNodes();
-  const journal = createJournal(ports.fs, journalPath, before);
-  const ctx = {
+  const replayed = closure(graph, owed);
+  const executionContext = {
+    ports,
     cache: new FsCache(opts.casBaseDir, ports.fs),
     fs: ports.fs,
     casBaseDir: opts.casBaseDir,
-    inputHashes: new Map(),
   };
   const all = await orchestrate(
-    nodes.values(),
-    (node, depHashes, depOutputs, started) =>
+    replayed.describe(),
+    (node, depEntries, acquire) =>
       owed.has(node.name)
-        ? processNode(nodes.get(node.name)!, depHashes, depOutputs, ctx, {
-            onStart: started,
-            onOutput: (chunk) => store.onOutput(node, chunk),
+        ? processNode(replayed, node.name, depEntries, executionContext, {
+            acquire,
+            onEvent: store.onEvent,
           })
         : Promise.resolve(replay(node.name, before[node.name])),
     throttledScheduler(opts.limits),
     (event) => {
-      if (!owed.has(event.node.name)) return;
+      if (!owed.has(event.node)) return;
       store.onEvent(event);
-      journal.onEvent(event);
+      history.onEvent(event);
     },
   );
-  await journal.flush();
+  await history.flush();
   const results = all.filter((result) => owed.has(result.name));
   const { failed, markdown } = await finishPass(ports, store, pass, results, opts.summary);
   return runOutcomeOf({ results, failed, markdown, cancelled: false });

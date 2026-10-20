@@ -1,4 +1,4 @@
-import type { ExecEvent, Node } from "@mrmeku/dagraph";
+import type { BaseParams, ExecEvent, Node, Result } from "@mrmeku/dagraph";
 import xterm from "@xterm/headless";
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
@@ -40,7 +40,7 @@ function localRun(
       workflowFile: "ci.ts",
       ports,
       casBaseDir: "/cas",
-      journalPath: "/journal.json",
+      historyDir: "/history",
       ...run,
     },
     {
@@ -104,6 +104,28 @@ const scriptedSh = (output: Record<string, { chunks: string[]; code: number }>):
 // A test that waits on the run fails when the run never gets there, instead of hanging the suite.
 const RUN_TIMEOUT = { timeout: 10_000 };
 
+/** The engine's events for `node`, as a store hears them from a run. */
+const dispatchOf = (node: Node): ExecEvent => ({ type: "dispatch", node: node.name });
+const startOf = (node: Node): ExecEvent => ({ type: "start", node: node.name });
+const outputOf = (node: Node, chunk: string): ExecEvent => ({
+  type: "output",
+  node: node.name,
+  chunk,
+});
+type Settled<R = Result> = R extends unknown ? Omit<R, "name"> : never;
+const resultOf = (node: Node, result: Settled): ExecEvent => ({
+  type: "result",
+  node: node.name,
+  result: { name: node.name, ...result },
+});
+const failureOf = (node: Node, actionKey: string, message: string, cause?: unknown) =>
+  resultOf(node, {
+    actionKey,
+    status: "failed",
+    error: { name: "Error", message, ...(cause !== undefined && { cause }) },
+    elapsed: 1,
+  });
+
 /** Lets the run go on a turn at a time until `done`, or until the test has timed out. */
 async function waitUntil(t: TestContext, done: () => boolean | Promise<boolean>, turn = () => {}) {
   while (!(await done())) {
@@ -137,10 +159,11 @@ describe("local session, grouped style", () => {
       build: (w) => {
         w.restoreCache({ name: "restore", path: [".dagactions/cas"], key: "k" });
         const lint = w.run({ name: "lint", cmd: ["lint"], cacheable: false });
-        w.run({ name: "../up", cmd: ["up"], cacheable: false });
-        w.run({ name: "/abs", cmd: ["up"], cacheable: false });
-        w.run({ name: ":", cmd: ["up"], cacheable: false });
-        w.gate({ deps: { lint } });
+        const up = w.run({ name: "../up", cmd: ["up"], cacheable: false });
+        const abs = w.run({ name: "/abs", cmd: ["up"], cacheable: false });
+        const colon = w.run({ name: ":", cmd: ["up"], cacheable: false });
+        // After every other step, so its start line follows their groups.
+        w.gate({ deps: { lint, up, abs, colon } });
       },
     });
     const session = localRun("grouped", ports, { workflow, workflowFile: "ci flows.ts" });
@@ -226,7 +249,7 @@ describe("local session, failures style", () => {
         w.run({
           name: "upload",
           cmd: ["upload"],
-          deps: { lint: w.optional(lint) },
+          deps: { lint: w.settled(lint) },
           cacheable: false,
         });
         w.run({ name: "pack", cmd: ["pack"], outputs: { tarball: "pkg.tgz" }, cacheable: false });
@@ -564,17 +587,19 @@ describe("local session, failures style, at the edges", () => {
     const { ports } = createTestPorts({ files: { "/cas.logs/ks.log": "saved from the cache\n" } });
     const session = localRun("failures", ports);
     const { store } = session.runOptions;
-    const save: Node = { name: "save", kind: "save", deps: [], config: "" };
+    const save: Node = { name: "save", kind: "save", deps: [] };
     const post = { title: "dagactions · ci.ts · post", nodes: [save] };
     store.begin({ title: "dagactions · ci.ts", nodes: [save] });
-    store.onEvent({ type: "dispatch", node: save });
-    store.onEvent({ type: "start", node: save });
-    store.onOutput(save, "saving\n");
+    store.onEvent(dispatchOf(save));
+    store.onEvent(startOf(save));
+    store.onEvent(outputOf(save, "saving\n"));
     store.cancel();
-    store.onEvent({ type: "cancelled", node: save, actionKey: "" });
+    store.onEvent(resultOf(save, { actionKey: "", status: "cancelled" }));
     store.begin(post);
-    store.onEvent({ type: "dispatch", node: save });
-    store.onEvent({ type: "cached", node: save, actionKey: "ks", outputs: "", contentHash: "h" });
+    store.onEvent(dispatchOf(save));
+    store.onEvent(
+      resultOf(save, { actionKey: "ks", status: "cached", outputs: "", contentHash: "h" }),
+    );
     await store.report(post);
     assert.deepEqual(session.logs(), { ".dagactions/logs/save.log": "saved from the cache\n" });
   });
@@ -597,9 +622,10 @@ describe("local session, failures style, at the edges", () => {
       },
       clock: { now: () => 0 },
     });
-    const upload = defineStep<{ kind: string }, string>({
-      config: "1",
-      action: () => async () => {
+    const upload = defineStep<BaseParams, string>({
+      kind: "upload",
+      inputs: { version: 1 },
+      action: async () => {
         // A cause shaped like a command's but for its cwd: no command.
         throw new Error("upload refused", { cause: { argv: ["curl", "-f", "s3://b"], code: 22 } });
       },
@@ -610,10 +636,10 @@ describe("local session, failures style, at the edges", () => {
       "failures",
       ports,
       {
-        workflow: async (graph, ports) => {
+        workflow: async (graph) => {
           for (const name of ["hang", "stuck"])
-            run(graph, ports, { name, cmd: [name], timeoutMinutes: 0.0001, cacheable: false });
-          upload.addNode(graph, ports, { kind: "upload" });
+            run(graph, { name, cmd: [name], timeoutMinutes: 0.0001, cacheable: false });
+          upload.addNode(graph, {});
         },
       },
       { isTTY: true, hasColors: () => true },
@@ -773,7 +799,7 @@ describe("local session, failures style, at the edges", () => {
       build: (w) => {
         const fast = w.run({ name: "fast", cmd: ["fast"], cacheable: false });
         const slow = w.run({ name: "slow", cmd: ["slow"], cacheable: false });
-        w.post({ name: "save", main: fast, cmd: ["save"], deps: { slow: w.optional(slow) } });
+        w.post({ name: "save", main: fast, cmd: ["save"], deps: { slow: w.settled(slow) } });
       },
     });
     const session = localRun("failures", ports, { workflow });
@@ -838,7 +864,7 @@ describe("local session, failures style, at the edges", () => {
         if (builds++ > 0) throw new Error("second build");
         const fast = w.run({ name: "fast", cmd: ["fast"], cacheable: false });
         const slow = w.run({ name: "slow", cmd: ["slow"], cacheable: false });
-        w.post({ name: "save", main: fast, cmd: ["save"], deps: { slow: w.optional(slow) } });
+        w.post({ name: "save", main: fast, cmd: ["save"], deps: { slow: w.settled(slow) } });
       },
     });
     const session = localRun("failures", ports, { workflow });
@@ -908,7 +934,7 @@ describe("local session, live style", () => {
       });
       const { store } = session.runOptions;
       const nodeNamed = (name: string, more: Partial<Node> = {}): Node => {
-        return { name, kind: name, deps: [], config: "", ...more };
+        return { name, kind: name, deps: [], ...more };
       };
       const lint = nodeNamed("lint");
       const e2e = nodeNamed("integration:packages-dagactions-e2e");
@@ -930,16 +956,14 @@ describe("local session, live style", () => {
         await store.report(pass);
         session.tick();
       };
-      const done = (node: Node): ExecEvent => {
-        return {
-          type: "done",
-          node: node,
+      const done = (node: Node): ExecEvent =>
+        resultOf(node, {
           actionKey: "",
+          status: "done",
           outputs: "",
           contentHash: "h",
           elapsed: 1,
-        };
-      };
+        });
 
       // The workflow's body prints as it builds the graph, before the run begins.
       session.streams.stdout.write("resolving workspace\n");
@@ -948,49 +972,41 @@ describe("local session, live style", () => {
       // The run begins before its first event, as the runner's awaits make it.
       await new Promise(setImmediate);
       for (const node of [lint, e2e, testA]) {
-        store.onEvent({ type: "dispatch", node: node });
-        store.onEvent({ type: "start", node: node });
+        store.onEvent(dispatchOf(node));
+        store.onEvent(startOf(node));
       }
-      store.onEvent({ type: "dispatch", node: build });
-      store.onOutput(lint, "checking src\n");
-      store.onOutput(e2e, "x".repeat(100));
-      store.onOutput(testA, "ok 1 - parses\tthe feed\n");
+      store.onEvent(dispatchOf(build));
+      store.onEvent(outputOf(lint, "checking src\n"));
+      store.onEvent(outputOf(e2e, "x".repeat(100)));
+      store.onEvent(outputOf(testA, "ok 1 - parses\tthe feed\n"));
       await new Promise((written) =>
         session.streams.stderr.write("a stray stderr write\n", written),
       );
       session.streams.stdout.write("::debug::walking src\n");
       // Only a cache hit has settled, and the footer already has each node's last run.
       await emitAt(600, [
-        { type: "dispatch", node: fmt },
-        { type: "cached", node: fmt, actionKey: "", outputs: "", contentHash: "h" },
+        dispatchOf(fmt),
+        resultOf(fmt, { actionKey: "", status: "cached", outputs: "", contentHash: "h" }),
       ]);
       const midRun = await session.screen();
       // The terminal echoes a ^C at the cursor, the end of the status row.
       session.writes.push("^C");
       await emitAt(900, [
-        {
-          type: "fail",
-          node: lint,
-          actionKey: "k1",
-          error: new Error("eslint . exited 1", {
-            cause: { argv: ["eslint", "."], cwd: ".", code: 1 },
-          }),
-          elapsed: 1,
-        },
-        { type: "dispatch", node: gate },
-        { type: "start", node: gate },
-        { type: "fail", node: gate, actionKey: "", error: new Error("failed: lint"), elapsed: 1 },
-        { type: "dep-failed", node: deploy, error: new Error("gate failed") },
+        failureOf(lint, "k1", "eslint . exited 1", { argv: ["eslint", "."], cwd: ".", code: 1 }),
+        dispatchOf(gate),
+        startOf(gate),
+        failureOf(gate, "", "failed: lint"),
+        resultOf(deploy, { actionKey: "", status: "dep-failed", dep: "gate" }),
       ]);
       await emitAt(1500, [
         done(testA),
-        { type: "dispatch", node: testB },
-        { type: "start", node: testB },
+        dispatchOf(testB),
+        startOf(testB),
         done(testB),
         done(e2e),
-        { type: "cached", node: build, actionKey: "kb", outputs: "", contentHash: "h" },
-        { type: "dispatch", node: docs },
-        { type: "cached", node: docs, actionKey: "", outputs: "", contentHash: "h" },
+        resultOf(build, { actionKey: "kb", status: "cached", outputs: "", contentHash: "h" }),
+        dispatchOf(docs),
+        resultOf(docs, { actionKey: "", status: "cached", outputs: "", contentHash: "h" }),
       ]);
       await session.runOptions.store.close();
       assert.deepEqual(
@@ -1091,7 +1107,7 @@ describe("local session, live style", () => {
           name: "teardown",
           main: fast,
           cmd: ["teardown"],
-          deps: { slow: w.optional(slow) },
+          deps: { slow: w.settled(slow) },
         });
         w.post({ name: "save", main: fast, cmd: ["save"], deps: { slow } });
       },
@@ -1138,15 +1154,14 @@ describe("local session, live style", () => {
           "✔︎ fast     0.0s · 1 line",
           "◼︎ slow     cancelled after 31.0s",
           "summary: .dagactions/summary.md",
-          "post · 2 of 2 post steps owed",
-          "⏭︎ save     skipped",
+          "post · 1 of 2 post steps owed",
           "✔︎ teardown 0.0s · 1 line",
           "summary: .dagactions/summary.md",
           "",
           "◼︎ cancelled, 2 nodes not run · ci.ts · w",
           "all 31.0s",
           "built 2 · cached 0 · failed 0 · skipped ",
-          "1 · cancelled 1",
+          "0 · cancelled 2",
           "",
           "logs     .dagactions/logs/",
           "after the run",
@@ -1165,7 +1180,7 @@ describe("local session, live style", () => {
           "# Failures · ci.ts",
           "",
           "status: cancelled · started 1970-01-01T00:00:00.000Z · wall 31.0s",
-          "◼︎ cancelled, 2 nodes not run · built 2 · cached 0 · failed 0 · skipped 1 · cancelled 1",
+          "◼︎ cancelled, 2 nodes not run · built 2 · cached 0 · failed 0 · skipped 0 · cancelled 2",
           "",
           "No failures.",
           "",
@@ -1198,7 +1213,7 @@ describe("local session, live style", () => {
     delete process.env.FORCE_HYPERLINK;
     const { store } = session.runOptions;
     const nodeNamed = (name: string, more: Partial<Node> = {}): Node => {
-      return { name, kind: name, deps: [], config: "", ...more };
+      return { name, kind: name, deps: [], ...more };
     };
     const [a1, a2, a3, a4, a5, a6] = [
       nodeNamed("a1"),
@@ -1226,16 +1241,11 @@ describe("local session, live style", () => {
       execEvents.forEach((event) => store.onEvent(event));
       await store.report(pass);
     };
-    const started = (node: Node): ExecEvent[] => [
-      { type: "dispatch", node: node },
-      { type: "start", node: node },
-    ];
-    const done = (node: Node): ExecEvent => {
-      return { type: "done", node: node, actionKey: "", outputs: "", contentHash: "h", elapsed: 1 };
-    };
-    const cancelled = (node: Node, actionKey = ""): ExecEvent => {
-      return { type: "cancelled", node: node, actionKey };
-    };
+    const started = (node: Node): ExecEvent[] => [dispatchOf(node), startOf(node)];
+    const done = (node: Node): ExecEvent =>
+      resultOf(node, { actionKey: "", status: "done", outputs: "", contentHash: "h", elapsed: 1 });
+    const cancelled = (node: Node, actionKey = ""): ExecEvent =>
+      resultOf(node, { actionKey, status: "cancelled" });
     const screenAt = async (occurredAt: number) => {
       now = occurredAt;
       session.tick();
@@ -1249,28 +1259,24 @@ describe("local session, live style", () => {
     // Started last to first, so the earliest in flight is the last in the graph.
     for (const [i, node] of [a6, a5, a4, a3, a2, a1].entries())
       await emitAt(1000 + i * 10, started(node));
-    store.onOutput(a6, "ok\tparses\u00ad the feed\n");
-    store.onOutput(a5, "\x1b[32m50%\x1b[39m");
-    store.onOutput(a4, "built\n\n::debug::walking src");
-    store.onOutput(a3, "linked\n  ");
+    store.onEvent(outputOf(a6, "ok\tparses\u00ad the feed\n"));
+    store.onEvent(outputOf(a5, "\x1b[32m50%\x1b[39m"));
+    store.onEvent(outputOf(a4, "built\n\n::debug::walking src"));
+    store.onEvent(outputOf(a3, "linked\n  "));
     const beforeFirstDraw = await screenAt(1300);
     await screenAt(1600);
     const crowded = session.footer();
     await emitAt(1900, [
-      {
-        type: "fail",
-        node: a1,
-        actionKey: "k1",
-        error: new Error("declared output report missing: lint.xml", {
-          cause: { argv: ["eslint", "."], cwd: ".", code: 0 },
-        }),
-        elapsed: 1,
-      },
-      ...started(g),
-      { type: "fail", node: g, actionKey: "", error: new Error("failed: a1"), elapsed: 1 },
-      ...skipped.map((node): ExecEvent => {
-        return { type: "dep-failed", node: node, error: new Error("a dependency failed") };
+      failureOf(a1, "k1", "declared output report missing: lint.xml", {
+        argv: ["eslint", "."],
+        cwd: ".",
+        code: 0,
       }),
+      ...started(g),
+      failureOf(g, "", "failed: a1"),
+      ...skipped.map((node) =>
+        resultOf(node, { actionKey: "", status: "dep-failed", dep: node.deps[0]! }),
+      ),
       ...[a2, a3, a4, a5].map(done),
       ...started(b),
     ]);
@@ -1279,14 +1285,14 @@ describe("local session, live style", () => {
     const waiting = await screenAt(2200);
     session.streams.stdout.write("building");
     await emitAt(2300, [done(a6), ...started(x)]);
-    store.onOutput(x, "uploading");
+    store.onEvent(outputOf(x, "uploading"));
     await screenAt(2400);
     const queued = session.footer();
     store.cancel();
     await emitAt(2500, [
       done(b),
-      { type: "dispatch", node: c },
-      { type: "cached", node: c, actionKey: "", outputs: "", contentHash: "h" },
+      dispatchOf(c),
+      resultOf(c, { actionKey: "", status: "cached", outputs: "", contentHash: "h" }),
       cancelled(x, "kx"),
       cancelled(y),
       cancelled(w),
@@ -1399,23 +1405,23 @@ describe("local session, live style", () => {
       const { ports } = createTestPorts({ clock: { now: () => now } });
       const session = localRun("live", ports);
       const { store } = session.runOptions;
-      const save: Node = { name: "save", kind: "save", deps: [], config: "" };
+      const save: Node = { name: "save", kind: "save", deps: [] };
       const main = { title: "ci.ts", nodes: [save] };
       const post = { title: "ci.ts · post", nodes: [save] };
       const start = () => {
-        store.onEvent({ type: "dispatch", node: save });
-        store.onEvent({ type: "start", node: save });
+        store.onEvent(dispatchOf(save));
+        store.onEvent(startOf(save));
       };
       store.begin(main);
       await new Promise(setImmediate);
       start();
-      store.onOutput(save, "saving\n");
+      store.onEvent(outputOf(save, "saving\n"));
       store.cancel();
-      store.onOutput(save, "killed by SIGINT\n");
+      store.onEvent(outputOf(save, "killed by SIGINT\n"));
       now = 600;
       session.tick();
       const stopping = session.writes.at(-1);
-      store.onEvent({ type: "cancelled", node: save, actionKey: "ks" });
+      store.onEvent(resultOf(save, { actionKey: "ks", status: "cancelled" }));
       await store.report(main);
       store.begin(post);
       await new Promise(setImmediate);
@@ -1460,17 +1466,16 @@ describe("local session, live style", () => {
     const session = localRun("live", ports);
     const { store } = session.runOptions;
     const nodes = Array.from({ length: 9 }, (_, i): Node => {
-      return { name: `node${i + 1}`, kind: "node", deps: [], config: "" };
+      return { name: `node${i + 1}`, kind: "node", deps: [] };
     });
     store.begin({ title: "ci.ts", nodes });
     await new Promise(setImmediate);
     for (const nodeNamed of nodes) {
-      store.onEvent({ type: "dispatch", node: nodeNamed });
-      store.onEvent({ type: "start", node: nodeNamed });
+      store.onEvent(dispatchOf(nodeNamed));
+      store.onEvent(startOf(nodeNamed));
     }
-    store.onOutput(
-      nodes[0]!,
-      "src/settings/notifications/email-digest-preferences.test.tsx passed\n",
+    store.onEvent(
+      outputOf(nodes[0]!, "src/settings/notifications/email-digest-preferences.test.tsx passed\n"),
     );
     now = 600;
     const sizedAs = (columns?: number, rows?: number) => {

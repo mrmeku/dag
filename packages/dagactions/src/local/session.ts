@@ -42,16 +42,16 @@ export function createLocalSession(
   runOptions: RunOptions & { workflowFile: string },
   {
     outputStyle,
-    summary = DEFAULT_SUMMARY_PATH,
+    summaryFile = DEFAULT_SUMMARY_PATH,
     logDir = DEFAULT_LOG_DIR,
-    failuresReport = DEFAULT_FAILURES_REPORT_PATH,
+    failuresReportFile = DEFAULT_FAILURES_REPORT_PATH,
     streams = process,
     syncFs = nodeSyncFs,
   }: {
     outputStyle?: OutputStyle | undefined;
-    summary?: string;
+    summaryFile?: string;
     logDir?: string;
-    failuresReport?: string;
+    failuresReportFile?: string;
     streams?: WriteStreams;
     syncFs?: SyncFs;
   },
@@ -74,9 +74,9 @@ export function createLocalSession(
     logFile: logFiles.writtenLogFile,
     rerunCommand,
     workflowFile: runOptions.workflowFile,
-    failuresReportPath: failuresReport,
+    failuresReportPath: failuresReportFile,
     logDir,
-    summaryPath: summary,
+    summaryPath: summaryFile,
   };
   const terminalRenderer =
     style === "live"
@@ -86,7 +86,7 @@ export function createLocalSession(
         : undefined;
   const writeLine =
     terminalRenderer?.printLine ?? ((line: string) => void streams.stdout.write(`${line}\n`));
-  const ci = createLocalCi({ sh, fs, summaryPath: summary, write: writeLine });
+  const ci = createLocalCi({ sh, fs, summaryPath: summaryFile, write: writeLine });
   const store = createRunStore({
     fs,
     clock,

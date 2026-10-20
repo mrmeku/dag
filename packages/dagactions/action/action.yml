@@ -4,17 +4,17 @@ inputs:
   workflow:
     description: Path to the workflow file that default-exports defineWorkflow(...)
     required: true
-  cas:
+  cas-dir:
     description: Local content-addressed cache directory
     default: .dagactions/cas
-  journal:
-    description: Where the run records every settled node, for the post step
-    default: .dagactions/journal.json
+  history-dir:
+    description: Directory where each run records every settled node in a history of its own, for the post step
+    default: .dagactions/history
   force:
     description: Ignore the cache for this run
     default: "false"
   only:
-    description: Comma-separated nodes to run, with their dependencies
+    description: Comma-separated nodes to run, with their dependencies and the post steps of what runs
 runs:
   using: node24
   main: dist/main.js

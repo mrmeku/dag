@@ -1,21 +1,39 @@
 /* eslint-disable @typescript-eslint/no-explicit-any */
-import {
-  addNode,
-  type ActionFunc,
-  type BaseParams,
-  type Graph,
-  type NodeRef,
-  type Normalizers,
-  type Outputs,
-} from "./graph/index.ts";
+import { addNode, type Graph } from "./graph/graph.ts";
+import { checkInputs } from "./graph/inputs.ts";
+import type {
+  ActionContext,
+  BaseParams,
+  InvalidateOn,
+  NodeParams,
+  NodeRef,
+  Outputs,
+} from "./graph/types.ts";
 
-/**
- * Bound action ready to wire into a graph. Call addNode() to register it in a Graph, or
- * createAction() to get the raw function (useful for testing or Temporal activity registration).
- */
-export interface Action<Ctx, P extends BaseParams, R extends Outputs> {
-  addNode: (graph: Graph, ctx: Ctx, params: P) => NodeRef<R>;
-  createAction: (ctx: Ctx) => ActionFunc<P, R>;
+/** The longest delay setTimeout honors; a longer one fires at once. */
+const MAX_TIMEOUT_MS = 2_147_483_647;
+
+/** What `defineAction` takes. Only `inputs` and the deps' content join a node's key. */
+export interface ActionSpec<Ports, P extends BaseParams, R extends Outputs, I> {
+  /** What kind of work it is, as Bazel's mnemonic: a label for display and routing, not keyed. */
+  kind: string;
+  /** Inputs every node of the action has, such as a version that names the action's logic. */
+  inputs?: I;
+  action: (context: ActionContext<Ports, P, I>) => Promise<R>;
+  invalidateOn?: InvalidateOn<Ports, P>;
+  /** `false` runs the node in every execution: its entry is never read or written. */
+  cacheable?: boolean;
+  concurrencyGroup?: string;
+  /** How long the action may run, in ms, counted from its start. Not keyed. */
+  timeoutMs?: number;
+}
+
+/** A kind of work, defined once. `addNode` adds one of its nodes to a graph. */
+export interface Action<Ports, P extends BaseParams, R extends Outputs> {
+  addNode<GraphPorts extends Ports, Meta>(
+    graph: Graph<GraphPorts, Meta>,
+    params: NodeParams<P, Meta>,
+  ): NodeRef<R>;
 }
 
 /** Extract output type R from an Action or a factory function that returns one. */
@@ -29,48 +47,28 @@ export type OutputOf<T> =
 /** Extract NodeRef<R> from an Action or a factory function that returns one. */
 export type NodeRefOf<T> = NodeRef<OutputOf<T>>;
 
-/**
- * JSON.stringify with sorted object keys — ensures identical config objects always produce the
- * same string regardless of property insertion order.
- */
-function deterministicStringify(obj: unknown) {
-  return JSON.stringify(obj, (_, v) =>
-    v && typeof v === "object" && !Array.isArray(v)
-      ? Object.fromEntries(Object.entries(v).sort(([a], [b]) => a.localeCompare(b)))
-      : v,
-  );
-}
+const GONE: Record<string, string> = {
+  config:
+    "config is gone: declare it in inputs (config: { version: 1 } becomes inputs: { version: 1 })",
+  normalize: "normalize is gone: declare invalidateOn: { [role]: (outputs, ports) => fingerprint }",
+};
 
-/**
- * Create a reusable action from a spec. Serializes config deterministically so that
- * config changes invalidate the cache. The returned Action can add nodes to any number of graphs.
- */
-export function defineAction<Ctx, P extends BaseParams, R extends Outputs, C = string>(spec: {
-  config: C;
-  concurrencyGroup?: string;
-  /** `false` runs the node every time; see `Node.cacheable`. */
-  cacheable?: boolean;
-  /** How long the action may run before its signal aborts; see `Node.timeoutMs`. Not in the key. */
-  timeoutMs?: number;
-  action: (ctx: Ctx, config: C) => ActionFunc<P, R>;
-  /** Fingerprints for deps this action reads only part of; see `Node.normalize`. */
-  normalize?: (ctx: Ctx) => Normalizers<P>;
-}): Action<Ctx, P, R> {
-  const configStr =
-    typeof spec.config === "string" ? spec.config : deterministicStringify(spec.config);
-  return {
-    addNode: (graph, ctx, params) =>
-      addNode({
-        graph,
-        name: params.kind,
-        config: configStr,
-        ...(spec.concurrencyGroup && { concurrencyGroup: spec.concurrencyGroup }),
-        ...(spec.cacheable === false && { cacheable: false }),
-        ...(spec.timeoutMs !== undefined && { timeoutMs: spec.timeoutMs }),
-        params,
-        action: spec.action(ctx, spec.config),
-        ...(spec.normalize && { normalize: spec.normalize(ctx) }),
-      }),
-    createAction: (ctx) => spec.action(ctx, spec.config),
-  };
+export function defineAction<
+  Ports,
+  P extends BaseParams,
+  R extends Outputs,
+  I = Record<string, unknown>,
+>(spec: ActionSpec<Ports, P, R, I>): Action<Ports, P, R> {
+  if (typeof spec.kind !== "string" || spec.kind === "")
+    throw new Error("defineAction: kind is required, the kind of work the action does");
+  const where = `action "${spec.kind}"`;
+  for (const field of Object.keys(spec))
+    if (GONE[field]) throw new Error(`${where}: ${GONE[field]}`);
+  const t = spec.timeoutMs;
+  if (t !== undefined && !(Number.isInteger(t) && t > 0 && t <= MAX_TIMEOUT_MS))
+    throw new RangeError(
+      `${where}: timeoutMs must be a whole number of ms from 1 to ${MAX_TIMEOUT_MS}, got ${t}`,
+    );
+  const checked = { ...spec, inputs: checkInputs(spec.inputs, where) };
+  return { addNode: (graph, params) => addNode<R>(graph, checked, params as object) };
 }

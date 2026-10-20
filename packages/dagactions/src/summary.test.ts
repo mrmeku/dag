@@ -1,4 +1,4 @@
-import type { ExecResult, Node } from "@mrmeku/dagraph";
+import type { Node, Result } from "@mrmeku/dagraph";
 import assert from "node:assert/strict";
 import { describe, test } from "node:test";
 import { recapLines } from "./github/renderer.ts";
@@ -12,12 +12,7 @@ import {
   type RunReport,
 } from "./summary.ts";
 
-const node = (name: string, kind: string, deps: string[] = []): Node => ({
-  name,
-  kind,
-  deps,
-  config: "",
-});
+const node = (name: string, kind: string, deps: string[] = []): Node => ({ name, kind, deps });
 
 /** A settled node; `ran` is [start, duration] for one that was dispatched. */
 const settled = (
@@ -32,13 +27,13 @@ const settled = (
 });
 
 describe("summary", () => {
-  test("scoped names become subgraphs and a huge graph collapses to one node per kind", () => {
+  test("each node shows its full name, a colon boxing nothing, and a huge graph collapses to one node per kind", () => {
     const scoped = [
       node("gw:build", "build"),
       node("gw:image", "image", ["gw:build"]),
       node("gate", "gate", ["gw:image"]),
     ];
-    const statuses: Record<string, ExecResult["status"]> = {
+    const statuses: Record<string, Result["status"]> = {
       "gw:build": "cached",
       "gw:image": "done",
       gate: "done",
@@ -49,16 +44,14 @@ describe("summary", () => {
     assert.deepEqual(
       {
         scoped: dagMermaid(scoped, (n) => statuses[n]),
-        big: dagMermaid(big, (n) => (n === "t1" ? "fail" : "done")),
+        big: dagMermaid(big, (n) => (n === "t1" ? "failed" : "done")),
       },
       {
         scoped: [
           "```mermaid",
           "flowchart LR",
-          '  subgraph s0 ["gw"]',
-          '    n0["✔\uFE0E build"]',
-          '    n1["✔\uFE0E image"]',
-          "  end",
+          '  n0["✔\uFE0E gw:build"]',
+          '  n1["✔\uFE0E gw:image"]',
           '  n2["✔\uFE0E gate"]',
           "  n0 --> n1",
           "  n1 --> n2",
@@ -114,9 +107,9 @@ describe("summary", () => {
   test("the headline, the failures and the recap lead with a failure's cause, not the failures it caused", async () => {
     const nodes = [
       settled("restore:cas", "cached", [0, 5]),
-      settled("test:unit", "fail", [10, 3000], ["restore:cas"]),
+      settled("test:unit", "failed", [10, 3000], ["restore:cas"]),
       settled("lint", "done", [10, 2000], ["restore:cas"]),
-      settled("gate", "fail", [3010, 3], ["test:unit", "lint"]),
+      settled("gate", "failed", [3010, 3], ["test:unit", "lint"]),
       settled("deploy", "dep-failed", undefined, ["gate"]),
     ];
     const logs: Record<string, string[]> = {

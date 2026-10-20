@@ -1,14 +1,18 @@
+/**
+ * Draws a graph as a Mermaid flowchart. Published as `@mrmeku/dagraph/mermaid`, beside the engine:
+ * it reads only `graph.describe()`, so a team can copy and change it.
+ */
 import type { Node } from "./graph/index.ts";
 
-export interface MermaidOptions {
-  /** Text inside a node's box. Default: the name, minus its scope when drawn inside one. */
-  label?: (node: Node, scope: string) => string;
-  /** Which subgraph a node belongs to. Default: its `scope:` prefix, none for bare names. */
-  subgraphOf?: (node: Node) => string;
-  /** Title of a subgraph, given its scope and its index. Default: the scope itself. */
-  subgraphLabel?: (scope: string, index: number) => string;
+export interface MermaidOptions<Meta = unknown> {
+  /** Text inside a node's box. Default: its full name. */
+  label?: (node: Node<Meta>) => string;
+  /** The box a node is drawn in, from its `meta`; "" for none. Without it, nothing is boxed. */
+  subgraphOf?: (meta: Meta | undefined) => string;
+  /** Title of a box, given its subgraph and its index. Default: the subgraph itself. */
+  subgraphLabel?: (subgraph: string, index: number) => string;
   /** A class name per node, applied with `class` lines. Default: none. */
-  classOf?: (node: Node) => string | undefined;
+  classOf?: (node: Node<Meta>) => string | undefined;
 }
 
 /**
@@ -20,22 +24,17 @@ export function mermaidQuote(text: string): string {
   return `"${text.replace(/[#"<>`]/g, (c) => `#${c.charCodeAt(0)};`) || " "}"`;
 }
 
-export function scopeOf(name: string): string {
-  const i = name.lastIndexOf(":");
-  return i === -1 ? "" : name.slice(0, i);
-}
-
 /**
- * The body of a mermaid flowchart for a set of nodes: one box per node, scopes as subgraphs
- * (ids `s0`, `s1`, …), one edge per dependency (dashed when optional), then `class` lines
+ * The body of a mermaid flowchart for a set of nodes: one box per node, each `subgraphOf` box as a
+ * subgraph (ids `s0`, `s1`, …), one edge per dependency (dashed when settled), then `class` lines
  * grouping nodes by the class `classOf` gives them. Callers add the header (`flowchart LR`),
  * any `classDef`/`style` lines, and whatever surrounds the graph. `id` maps a node name to its
  * id in the lines and `subgraphs` lists the subgraph ids, so a caller can style them or draw
  * edges to its own pseudo-nodes.
  */
-export function mermaidBody(
-  nodes: Node[],
-  opts: MermaidOptions = {},
+export function mermaidBody<Meta>(
+  nodes: Node<Meta>[],
+  opts: MermaidOptions<Meta> = {},
 ): { lines: string[]; id: (name: string) => string; subgraphs: string[] } {
   const ids = new Map(nodes.map((n, i) => [n.name, `n${i}`]));
   const id = (name: string) => {
@@ -43,26 +42,26 @@ export function mermaidBody(
     if (!found) throw new Error(`mermaidBody: unknown node "${name}"`);
     return found;
   };
-  const subgraphOf = opts.subgraphOf ?? ((n) => scopeOf(n.name));
-  const label = opts.label ?? ((n, scope) => (scope ? n.name.slice(scope.length + 1) : n.name));
+  const subgraphOf = (n: Node<Meta>) => opts.subgraphOf?.(n.meta) ?? "";
+  const label = opts.label ?? ((n) => n.name);
   const lines: string[] = [];
   const subgraphs: string[] = [];
-  for (const [scope, members] of Map.groupBy(nodes, subgraphOf)) {
-    if (scope) {
+  for (const [subgraph, members] of Map.groupBy(nodes, subgraphOf)) {
+    if (subgraph) {
       const sid = `s${subgraphs.length}`;
       subgraphs.push(sid);
       lines.push(
-        `  subgraph ${sid} [${mermaidQuote(opts.subgraphLabel?.(scope, subgraphs.length - 1) ?? scope)}]`,
+        `  subgraph ${sid} [${mermaidQuote(opts.subgraphLabel?.(subgraph, subgraphs.length - 1) ?? subgraph)}]`,
       );
     }
     for (const n of members) {
-      lines.push(`  ${scope ? "  " : ""}${id(n.name)}[${mermaidQuote(label(n, scope))}]`);
+      lines.push(`  ${subgraph ? "  " : ""}${id(n.name)}[${mermaidQuote(label(n))}]`);
     }
-    if (scope) lines.push("  end");
+    if (subgraph) lines.push("  end");
   }
   for (const n of nodes) {
     for (const d of n.deps) {
-      lines.push(`  ${id(d)} ${n.optionalDeps?.includes(d) ? "-.->" : "-->"} ${id(n.name)}`);
+      lines.push(`  ${id(d)} ${n.settledDeps?.includes(d) ? "-.->" : "-->"} ${id(n.name)}`);
     }
   }
   if (opts.classOf) {

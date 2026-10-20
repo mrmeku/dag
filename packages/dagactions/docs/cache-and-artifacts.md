@@ -25,7 +25,7 @@ const install = w.run({
   deps: { pnpm },
   cacheable: false,
 });
-w.saveCache({ name: "save:pnpm", cache: pnpm, deps: { install: w.optional(install) } });
+w.saveCache({ name: "save:pnpm", cache: pnpm, deps: { install: w.settled(install) } });
 ```
 
 The restore tries `key` first. Then it tries each prefix in `restoreKeys` and takes the newest entry that matches.
@@ -69,7 +69,7 @@ w.uploadArtifact({
   name: "upload:junit",
   artifact: "junit",
   path: ["reports/**/*.xml"],
-  deps: { tests: w.optional(tests) },
+  deps: { tests: w.settled(tests) },
   ifNoFilesFound: "ignore",
 });
 ```
@@ -82,7 +82,7 @@ w.uploadArtifact({
 | `overwrite`      | Replace an artifact with the same name.                                |
 | `options`        | The `UploadArtifactOptions` of `@actions/artifact`.                    |
 
-An artifact belongs to the run. Thus the step runs each time, and `deps` tells when. Use `w.optional` to upload a test report also when the tests fail.
+An artifact belongs to the run. Thus the step runs each time, and `deps` tells when. Use `w.settled` to upload a test report also when the tests fail.
 
 The archive starts at the deepest directory that holds all files, as in `actions/upload-artifact`. Thus the outputs of one step are at the top of the archive. Outputs of more than one step keep their CAS paths.
 

@@ -101,7 +101,7 @@ export default defineWorkflow({
       key: `dagactions-${w.ctx.sha}`,
       restoreKeys: ["dagactions-"],
     });
-    const afterRestore = { deps: { cas }, normalize: { cas: () => "" } };
+    const afterRestore = { deps: { cas }, invalidateOn: { cas: () => "" } };
     const src = await w.glob("src/**", "package.json", "tsconfig.json");
     const checks = w.runAll({
       typecheck: { cmd: ["npx", "tsc", "--noEmit"], inputs: src, ...afterRestore },
@@ -109,14 +109,14 @@ export default defineWorkflow({
       test: { cmd: ["npm", "test"], inputs: src, ...afterRestore },
     });
     const gate = w.gate({ deps: checks });
-    w.saveCache({ name: "save:cas", cache: cas, deps: { gate: w.optional(gate) } });
+    w.saveCache({ name: "save:cas", cache: cas, deps: { gate: w.settled(gate) } });
   },
 });
 ```
 
 - `deps: { cas }` starts each check after the restore.
-- `normalize: { cas: () => "" }` keeps the restored key out of the cache key of each check.
-- `w.optional(gate)` saves the cache also when a check fails.
+- `invalidateOn: { cas: () => "" }` keeps the restored key out of the cache key of each check.
+- `w.settled(gate)` saves the cache also when a check fails.
 
 ## Features
 
@@ -133,14 +133,14 @@ export default defineWorkflow({
 
 dagactions runs a graph of steps, and it caches the result of each step by the content of what the step reads. The graph engine is [`@mrmeku/dagraph`](https://github.com/mrmeku/dag/tree/main/packages/dagraph). dagactions adds the steps that a GitHub Actions job uses.
 
-| Term       | Meaning                                                                                                                |
-| ---------- | ---------------------------------------------------------------------------------------------------------------------- |
-| Step       | One command, or one GitHub operation such as a cache restore. The output calls a step a _node_.                        |
-| Dependency | A step that must finish before another step starts. Declare it in `deps`.                                              |
-| Input      | A file outside the graph that a step reads. Declare it in `inputs`.                                                    |
-| Output     | A file that a step writes to `$DAGACTIONS_OUT`. Other steps read it.                                                   |
-| CAS        | The content-addressed store in `.dagactions/cas`. It holds the outputs of each step, by cache key.                     |
-| Cache key  | A hash of the step's name, command and `env`, the content of its inputs, and the content of its dependencies' outputs. |
+| Term       | Meaning                                                                                                          |
+| ---------- | ---------------------------------------------------------------------------------------------------------------- |
+| Step       | One command, or one GitHub operation such as a cache restore. The output calls a step a _node_.                  |
+| Dependency | A step that must finish before another step starts. Declare it in `deps`.                                        |
+| Input      | A file outside the graph that a step reads. Declare it in `inputs`.                                              |
+| Output     | A file that a step writes to `$DAGACTIONS_OUT`. Other steps read it.                                             |
+| CAS        | The content-addressed store in `.dagactions/cas`. It holds the outputs of each step, by cache key.               |
+| Cache key  | A hash of the step's command and `env`, the content of its inputs, and the content of its dependencies' outputs. |
 
 Before a step runs, dagactions calculates its cache key. If the CAS has an entry for the key, the step does not run. dagactions uses the stored outputs.
 

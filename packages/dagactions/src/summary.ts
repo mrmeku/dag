@@ -1,4 +1,5 @@
-import { mermaidBody, mermaidQuote, type ExecResult, type Node } from "@mrmeku/dagraph";
+import type { Node, Result } from "@mrmeku/dagraph";
+import { mermaidBody, mermaidQuote } from "@mrmeku/dagraph/mermaid";
 import {
   CRITICAL_PATH_FLOOR_MS,
   FAILURES_REPORT_LOG_LINES,
@@ -9,7 +10,7 @@ import {
 import { countsLine, errorMessage, formatDuration, reportHeadline } from "./kernel/format.ts";
 import { namesOf, wallTimeOf, type NodeReport } from "./kernel/report.ts";
 
-type Status = ExecResult["status"];
+type Status = Result["status"];
 
 /** The run's data, as every renderer gets it. In the post pass it holds the owed post steps alone. */
 export interface RunReport {
@@ -37,7 +38,7 @@ export const DEFAULT_SUMMARY_RENDERERS: readonly SummaryRenderer[] = [
 const MERMAID_CLASS: Record<Status, string> = {
   done: "done",
   cached: "cached",
-  fail: "fail",
+  failed: "fail",
   "dep-failed": "skipped",
   cancelled: "skipped",
 };
@@ -55,11 +56,12 @@ function formatDelta(now: number, before: number): string {
 }
 
 const byName = (nodes: NodeReport[]) => [...nodes].sort((a, b) => a.name.localeCompare(b.name));
-const ran = (n: NodeReport) => n.status === "done" || n.status === "fail";
+const ran = (n: NodeReport) => n.status === "done" || n.status === "failed";
 const sum = (ns: number[]) => ns.reduce((s, n) => s + n, 0);
 /**
- * The DAG as a mermaid flowchart colored by status: the engine's `mermaidBody` with status
- * icons and classes. Deps outside `nodes` are left out, so a filtered set draws. Past
+ * The DAG as a mermaid flowchart colored by status: `@mrmeku/dagraph/mermaid`'s `mermaidBody`,
+ * each node under its full name, with status icons and classes. Deps outside `nodes` are left
+ * out, so a filtered set draws. Past
  * MAX_GRAPH_NODES it draws one node per kind with counts instead, because GitHub refuses very
  * large diagrams.
  */
@@ -72,7 +74,7 @@ export function dagMermaid(all: Node[], statusOf: (name: string) => Status | und
     const out = ["```mermaid", "flowchart LR"];
     for (const kind of kinds) {
       const members = nodes.filter((n) => n.kind === kind);
-      const counts = (["done", "cached", "fail", "dep-failed", "cancelled"] as Status[])
+      const counts = (["done", "cached", "failed", "dep-failed", "cancelled"] as Status[])
         .map((s) => [s, members.filter((n) => statusOf(n.name) === s).length] as const)
         .filter(([, c]) => c > 0)
         .map(([s, c]) => `${STATUS_ICON[s]}${c}`)
@@ -92,9 +94,9 @@ export function dagMermaid(all: Node[], statusOf: (name: string) => Status | und
     return out;
   }
   const { lines: body } = mermaidBody(nodes, {
-    label: (n, scope) => {
+    label: (n) => {
       const status = statusOf(n.name);
-      return `${status ? STATUS_ICON[status] : "·"} ${scope ? n.name.slice(scope.length + 1) : n.name}`;
+      return `${status ? STATUS_ICON[status] : "·"} ${n.name}`;
     },
     classOf: (n) => {
       const status = statusOf(n.name);
@@ -165,7 +167,7 @@ export function renderTimeline({ nodes }: RunReport): string[] {
     .flatMap((n) =>
       n.start === undefined
         ? []
-        : `  ${n.name.replace(/:/g, "/")} :${n.status === "fail" ? "crit" : "done"}, ${n.start}, ${n.start + (n.duration ?? 0)}`,
+        : `  ${n.name.replace(/:/g, "/")} :${n.status === "failed" ? "crit" : "done"}, ${n.start}, ${n.start + (n.duration ?? 0)}`,
     );
   if (bars.length === 0) return [];
   return [
@@ -205,10 +207,10 @@ export async function renderFailures({ nodes, log }: RunReport): Promise<string[
     if (n.status === "dep-failed")
       lines.push(`- ${STATUS_ICON["dep-failed"]} ${n.name}: skipped, dependency failed`);
     if (n.status === "cancelled") lines.push(`- ${STATUS_ICON.cancelled} ${n.name}: cancelled`);
-    if (n.status !== "fail") continue;
+    if (n.status !== "failed") continue;
     const dur = n.duration !== undefined ? ` (${formatDuration(n.duration)})` : "";
     lines.push(
-      `<details><summary>${STATUS_ICON.fail} ${n.name}${dur}</summary>`,
+      `<details><summary>${STATUS_ICON.failed} ${n.name}${dur}</summary>`,
       "",
       "```text",
       ...(await log(n.name)).slice(-FAILURES_REPORT_LOG_LINES),

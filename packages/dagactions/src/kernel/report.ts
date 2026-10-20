@@ -1,16 +1,16 @@
-import type { ExecResult, Node, Outputs } from "@mrmeku/dagraph";
+import type { Node, Outputs, Result } from "@mrmeku/dagraph";
 
-type Status = ExecResult["status"];
+type Status = Result["status"];
 
 /** One node as the run left it: the graph's node, plus how and when it settled. */
 export interface NodeReport extends Node {
   status: Status;
-  /** Epoch ms at dispatch, and dispatch to settle. Absent for a node never dispatched; a cache hit's is its cache check. */
+  /** Epoch ms its action started, and from then to its settle; a cache hit's is its cache check, from dispatch. Absent for a node never dispatched. */
   start?: number;
   duration?: number;
   /** Its duration the last time it was built or failed, from last-run.json. */
   previous?: number;
-  /** The message of a fail or dep-failed. */
+  /** The message of a failed or dep-failed node. */
   error?: string;
   /** A done or cached node's outputs: paths into the CAS. */
   outputs?: Outputs;
@@ -23,11 +23,11 @@ export const namesOf = (nodes: NodeReport[], status: Status): string[] =>
 export function rootFailures(nodes: NodeReport[]): string[] {
   const failed = new Set(
     nodes
-      .filter((node) => node.status === "fail" || node.status === "dep-failed")
+      .filter((node) => node.status === "failed" || node.status === "dep-failed")
       .map((node) => node.name),
   );
   return nodes
-    .filter((node) => node.status === "fail" && !node.deps.some((dep) => failed.has(dep)))
+    .filter((node) => node.status === "failed" && !node.deps.some((dep) => failed.has(dep)))
     .map((node) => node.name);
 }
 

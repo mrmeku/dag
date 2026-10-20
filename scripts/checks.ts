@@ -17,7 +17,7 @@ const REFERENCE_SOURCES = [
 ];
 
 export async function addChecks(w: Steps<"test">, after: NodeRef): Promise<NodeRef<string>> {
-  const afterRestore = { deps: { after }, normalize: { after: (_: Outputs) => "" } };
+  const afterRestore = { deps: { after }, invalidateOn: { after: (_: Outputs) => "" } };
   const [all, engine, runner] = await Promise.all([
     w.glob("packages/*/src/**", "scripts/**", "eslint.config.ts", ...TOOLCHAIN),
     w.glob(ENGINE, ...TOOLCHAIN),

@@ -54,7 +54,7 @@ export function truncate(text: string, maxColumns: number): string {
 
 const STATUS_COLOR = {
   done: "green",
-  fail: "red",
+  failed: "red",
   "dep-failed": "yellow",
   cancelled: "gray",
 } as const;
@@ -76,7 +76,7 @@ function settledNodeLines(
     return failureBlockLines(nodeState, run, localContext);
   const detail = {
     done: () => detailOf(nodeState),
-    fail: () => withCauses(run, nodeState, "failed"),
+    failed: () => withCauses(run, nodeState, "failed"),
     "dep-failed": () => withCauses(run, nodeState, "skipped"),
     cancelled: () => {
       const duration = selectors.durationOf(nodeState);
@@ -172,7 +172,7 @@ function footerRows(
   const inFlightRow = (nodeState: InFlightNodeState) => {
     const lastRunDuration = run.lastRunDurations?.[nodeState.node.name];
     const rowHead = truncate(
-      `${spinnerFrame} ${paddedNameOf(nodeState)} ${clockOf(now - nodeState.dispatchedAt)}${lastRunDuration ? ` / ~${clockOf(lastRunDuration)}` : ""}`,
+      `${spinnerFrame} ${paddedNameOf(nodeState)} ${clockOf(now - nodeState.startedAt)}${lastRunDuration ? ` / ~${clockOf(lastRunDuration)}` : ""}`,
       footerWidth,
     );
     const latestLineColumns = footerWidth - stringWidth(rowHead) - LIVE_LATEST_LINE_GAP;
@@ -199,8 +199,8 @@ function footerRows(
     bodyRows.push(paint("dim", truncate(`· ${paddedNameOf(nodeState)} ${reason}`, footerWidth)));
 
   const allNodes = [...run.nodes.values()];
-  const failedCount = allNodes.filter((nodeState) => nodeState.status === "fail").length;
-  const progress = `[${allNodes.filter(selectors.isSettled).length}/${allNodes.length}${failedCount > 0 ? ` ${STATUS_ICON.fail}${failedCount}` : ""}]`;
+  const failedCount = allNodes.filter((nodeState) => nodeState.status === "failed").length;
+  const progress = `[${allNodes.filter(selectors.isSettled).length}/${allNodes.length}${failedCount > 0 ? ` ${STATUS_ICON.failed}${failedCount}` : ""}]`;
   const queuedCount = waitingNodes.filter((waitingNode) => waitingNode.queued).length;
   const statusText =
     run.lifecycle.status === "cancelling"

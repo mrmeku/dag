@@ -38,7 +38,7 @@ export function clockOf(durationMs: number): string {
 export function detailOf(nodeState: SettledNodeState): string {
   const duration = selectors.durationOf(nodeState);
   return [
-    nodeState.status !== "fail"
+    nodeState.status !== "failed"
       ? ""
       : nodeState.timedOut
         ? "timed out"
@@ -62,7 +62,7 @@ export const rerunLine = (rerunCommand: string, nodeNames: string[]): string =>
 /** That the run errored, its own failures, that it was cancelled, or else what it came to. */
 export function runHeadline(run: RunState): string {
   if (run.lifecycle.status === "errored")
-    return `${STATUS_ICON.fail} errored: ${logLines(run.lifecycle.error)[0] ?? ""}`;
+    return `${STATUS_ICON.failed} errored: ${logLines(run.lifecycle.error)[0] ?? ""}`;
   const nodeReports = selectors.nodeReports(run);
   const ownFailureNames = selectors.ownFailures(run).map((failure) => failure.node.name);
   if (ownFailureNames.length > 0) return reportHeadline(nodeReports, ownFailureNames);

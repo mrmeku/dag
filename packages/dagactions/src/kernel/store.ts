@@ -1,4 +1,4 @@
-import { outputDirFor, type ExecEvent, type Node } from "@mrmeku/dagraph";
+import type { ExecEvent } from "@mrmeku/dagraph";
 import { LAST_RUN_FILE } from "../config.ts";
 import type { Ports } from "../ports.ts";
 import { logPath } from "../step-records.ts";
@@ -81,7 +81,7 @@ export function createRunStore(
   };
 
   const casLogLines = async (actionKey: string | undefined): Promise<string[]> => {
-    const path = actionKey && logPath(outputDirFor(casBaseDir, actionKey));
+    const path = actionKey && logPath(casBaseDir, actionKey);
     if (!path || !(await fs.exists(path))) return [];
     return logLines(await fs.readText(path)).filter((line) => !isDebugCommand(line));
   };
@@ -112,7 +112,7 @@ export function createRunStore(
   const settleNode = async (nodeState: SettledNodeState) => {
     const log = await casLogLines(selectors.actionKeyOf(nodeState));
     const duration = selectors.durationOf(nodeState);
-    if ((nodeState.status === "done" || nodeState.status === "fail") && duration !== undefined) {
+    if ((nodeState.status === "done" || nodeState.status === "failed") && duration !== undefined) {
       durations[nodeState.node.name] = duration;
       await writeLastRun();
     }
@@ -134,10 +134,11 @@ export function createRunStore(
         if (opts.lastRunAtBegin) queueInOrder(readLastRun);
         return;
       }
-      case "outputPrinted": {
-        const unfinishedLine = previous.nodes.get(action.node.name)?.unfinishedLine ?? "";
-        const nodeState = state.nodes.get(action.node.name)!;
-        announceCompletedLines(nodeState, completedLines(unfinishedLine, action.chunk));
+      case "output": {
+        const unfinishedLine = previous.nodes.get(action.node)?.unfinishedLine ?? "";
+        const nodeState = state.nodes.get(action.node);
+        if (nodeState)
+          announceCompletedLines(nodeState, completedLines(unfinishedLine, action.chunk));
         return;
       }
       case "runCancelled":
@@ -148,14 +149,15 @@ export function createRunStore(
       case "logRead":
         return;
     }
-    const nodeState = state.nodes.get(action.node.name)!;
+    const nodeState = state.nodes.get(action.node);
+    if (!nodeState) return;
     if (nodeState.status === "running") {
       for (const listener of listeners)
         runImmediately(() => listener.immediate?.start?.(nodeState));
       queueInOrder(() => listeners.forEach((listener) => listener.start?.(nodeState, state)));
     } else if (selectors.isSettled(nodeState)) {
       // The command has exited: its last line ends with it.
-      const unfinishedLine = previous.nodes.get(action.node.name)?.unfinishedLine;
+      const unfinishedLine = previous.nodes.get(action.node)?.unfinishedLine;
       if (unfinishedLine) announceCompletedLines(nodeState, completedLines(unfinishedLine, "\n"));
       queueInOrder(() => settleNode(nodeState));
     }
@@ -166,10 +168,8 @@ export function createRunStore(
     getState: (): RunState => state,
     begin: (pass: Pass) => dispatch({ type: "passBegun", pass }),
     cancel: () => dispatch({ type: "runCancelled" }),
-    onEvent: (event: ExecEvent) => {
-      if (event.type !== "settled") dispatch({ ...event, occurredAt: opts.clock.now() });
-    },
-    onOutput: (node: Node, chunk: string) => dispatch({ type: "outputPrinted", node, chunk }),
+    onEvent: (event: ExecEvent) =>
+      dispatch(event.type === "output" ? event : { ...event, occurredAt: opts.clock.now() }),
     /** `pass`'s nodes, once every settle is told and the last run's durations are known. */
     report: async (pass: Pass): Promise<NodeReport[]> => {
       await listenerQueue;
@@ -184,7 +184,7 @@ export function createRunStore(
       return nodeState
         ? groupLines(
             nodeState,
-            (nodeState.status === "fail" ? nodeState.log : undefined) ??
+            (nodeState.status === "failed" ? nodeState.log : undefined) ??
               (await casLogLines(selectors.actionKeyOf(nodeState))),
           )
         : [];

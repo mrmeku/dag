@@ -1,74 +1,109 @@
-import {
-  ExecState,
-  type ExecEvent,
-  type ExecResult,
-  type ProcessNodeResult,
-} from "./exec-state.ts";
-import type { Node, Outputs } from "./graph/index.ts";
+import type { CacheEntry } from "./cache.ts";
+import { ExecState, type Ready } from "./exec-state.ts";
+import type { Node } from "./graph/index.ts";
+import type { ExecEvent, Result } from "./types.ts";
+import { errorOf } from "./utils.ts";
+
+export type { Ready } from "./exec-state.ts";
 
 /**
- * Callback that executes a single node given its dep hashes and outputs. The orchestrator calls
- * this for each ready node — the implementation decides *how* to run it (local, remote, etc.).
- * It calls `started` when the node's action begins, which emits `start`.
+ * Processes one node somewhere, given its deps' entries by dep name, and returns its result. On
+ * a miss it awaits `acquire`, the gate the scheduler answers once the node's group has a slot,
+ * before the action runs. `acquire` rejects once the execution is cancelled. A rejection of
+ * `RunNode` becomes a failure with no cause, or `cancelled` once the execution is cancelled.
  */
-export type RunNode = (
-  node: Node,
-  depContentHashes: Map<string, string>,
-  depOutputs: Record<string, Outputs>,
-  started: () => void,
-) => Promise<ProcessNodeResult>;
+export type RunNode<Meta = unknown> = (
+  node: Node<Meta>,
+  depEntries: Record<string, CacheEntry>,
+  acquire: () => Promise<void>,
+) => Promise<Result>;
 
 /**
- * Interface the scheduler uses to interact with the orchestrator. Provides pull-based node
- * acquisition (take), async execution (run), and backpressure (workAvailable).
+ * What a scheduler drives. `take` returns the first ready node, in orchestration's order, that
+ * `filter` admits: a node comes once when it is ready and, when its lookup misses and it has a
+ * concurrency group, again `acquiring` its group's slot. `run` hands a ready node to processing,
+ * or grants an acquiring one its slot; it resolves once the node settles or, waiting for a slot,
+ * gives its place back. `workAvailable` resolves when that may have changed what `take` returns.
  */
 export interface SchedulerContext {
-  take(filter?: (node: Node) => boolean): Node | null;
-  run(node: Node): Promise<void>;
+  take(filter?: (ready: Ready) => boolean): Ready | null;
+  run(ready: Ready): Promise<void>;
   hasWork(): boolean;
   workAvailable(): Promise<void>;
 }
 
 /**
- * Pluggable execution strategy that controls parallelism and ordering. The scheduler pulls
- * ready nodes via ctx.take() and launches them via ctx.run().
+ * The policy that admits ready nodes. It takes them in orchestration's order and only filters
+ * it: it may hold a node back, but never reorders them.
  */
 export type Scheduler = (ctx: SchedulerContext) => Promise<void>;
 
 /**
- * Coordinate DAG execution with a pluggable scheduler. Bridges the state machine (ExecState)
- * and the scheduler by wiring up node completion callbacks that advance the state and resume
- * the scheduling loop. Most callers should use execute() instead — orchestrate is the lower-level
- * primitive for custom runner setups (e.g. Temporal activities).
+ * The scheduling half of `execute`, for an executor that processes nodes elsewhere. It works on
+ * nodes as data: it tracks which are ready, admits them through the scheduler, hands each its
+ * deps' entries, and propagates a failure. It does no I/O, hashes nothing and never sees an
+ * action, so it runs in a sandbox such as Temporal's workflow.
  */
-export async function orchestrate(
-  nodes: Iterable<Node>,
-  run: RunNode,
+export async function orchestrate<Meta>(
+  nodes: Iterable<Node<Meta>>,
+  run: RunNode<Meta>,
   schedule: Scheduler,
-  onEvent?: (event: ExecEvent) => void,
+  onEvent?: (event: ExecEvent<Meta>) => void,
   signal?: AbortSignal,
-): Promise<ExecResult[]> {
-  const state = new ExecState(nodes);
+): Promise<Result[]> {
+  const all = [...nodes];
+  const given = new Set(all.map((n) => n.name));
+  const unmet = all.flatMap((n) => {
+    const absent = n.deps.filter((d) => !given.has(d));
+    return absent.length > 0 ? [`"${n.name}" needs ${absent.map((d) => `"${d}"`).join(", ")}`] : [];
+  });
+  if (unmet.length > 0)
+    throw new Error(`orchestrate: nodes depend on nodes it was not given: ${unmet.join("; ")}`);
+  const state = new ExecState(all);
+  let processing = 0;
   let resumeLoop: () => void = () => {};
-  signal?.addEventListener("abort", () => resumeLoop(), { once: true });
+  const wake = () => resumeLoop();
+  signal?.addEventListener("abort", wake, { once: true });
+  /** Resolves the scheduler's `run` for the place each node holds. */
+  const places = new Map<string, () => void>();
+  const releasePlace = (name: string) => {
+    places.get(name)?.();
+    places.delete(name);
+  };
+  /** The grant each miss waiting for its slot awaits. */
+  const slots = new Map<string, { resolve: () => void; reject: (reason: unknown) => void }>();
 
-  const emit = (event: ExecEvent) => {
-    state.send(event);
-    onEvent?.(event);
+  const meta = (node: Node) => (node.meta === undefined ? {} : { meta: node.meta as Meta });
+  const settle = (node: Node, result: Result) => {
+    state.settle(node, result);
+    onEvent?.({ type: "result", node: node.name, ...meta(node), result });
+    releasePlace(node.name);
+    wake();
   };
 
-  const done = (node: Node, result: ProcessNodeResult) => {
-    for (const event of ExecState.resultToEvents(node, result)) emit(event);
-    emit({ type: "settled", node });
-    resumeLoop();
-  };
-
-  // Once cancelled, every node that becomes ready settles as cancelled instead of running, so
-  // the scheduler sees nothing to take and the loop drains as in-flight nodes settle.
+  // Once cancelled, every node that becomes ready settles cancelled instead of running, and every
+  // miss waiting for its slot stops waiting, so the loop drains as running nodes settle.
   const drainCancelled = () => {
-    let node: Node | null;
-    while ((node = state.tryTakeNext()))
-      done(node, { name: node.name, actionKey: "", status: "cancelled" });
+    let next: Ready | null;
+    while ((next = state.take())) {
+      if (next.acquiring) slots.get(next.node.name)?.reject(signal!.reason);
+      else settle(next.node, { name: next.node.name, actionKey: "", status: "cancelled" });
+    }
+  };
+
+  const acquireFor = (node: Node) => {
+    let gate: Promise<void> | undefined;
+    const waitForSlot = () => {
+      if (signal?.aborted) return Promise.reject(signal.reason);
+      if (node.concurrencyGroup === undefined) return Promise.resolve();
+      return new Promise<void>((resolve, reject) => {
+        slots.set(node.name, { resolve, reject });
+        state.waitForSlot(node);
+        releasePlace(node.name);
+        wake();
+      });
+    };
+    return () => (gate ??= waitForSlot());
   };
 
   const ctx: SchedulerContext = {
@@ -77,47 +112,45 @@ export async function orchestrate(
         drainCancelled();
         return null;
       }
-      return state.tryTakeNext(filter);
+      return state.take(filter);
     },
-    run(node) {
-      const failed = state.failedDep(node);
-      if (failed) {
-        done(node, {
-          name: node.name,
-          actionKey: "",
-          status: "dep-failed",
-          error: `dependency ${failed} failed`,
-        });
-        return Promise.resolve();
+    run({ node, acquiring }) {
+      if (acquiring) {
+        const slot = slots.get(node.name);
+        slots.delete(node.name);
+        if (!slot) return Promise.resolve();
+        const place = new Promise<void>((resolve) => places.set(node.name, resolve));
+        slot.resolve();
+        return place;
       }
-      emit({ type: "dispatch", node });
-      const depContentHashes = new Map(
-        node.deps
-          .filter((d) => state.getContentHash(d) !== undefined)
-          .map((d) => [d, state.getContentHash(d)!]),
-      );
-      const depOutputs = state.inputsFor(node);
-      return run(node, depContentHashes, depOutputs, () => emit({ type: "start", node }))
-        .catch(
-          (e): ProcessNodeResult => ({
-            name: node.name,
-            actionKey: "",
-            status: "fail",
-            error: e instanceof Error ? e.message : String(e),
-            elapsed: 0,
-          }),
-        )
+      const place = new Promise<void>((resolve) => places.set(node.name, resolve));
+      const dep = state.failedDep(node);
+      if (dep !== undefined) {
+        settle(node, { name: node.name, actionKey: "", status: "dep-failed", dep });
+        return place;
+      }
+      onEvent?.({ type: "dispatch", node: node.name, ...meta(node) });
+      processing++;
+      void run(node as Node<Meta>, state.depEntries(node), acquireFor(node))
+        .catch((e): Result => {
+          if (signal?.aborted) return { name: node.name, actionKey: "", status: "cancelled" };
+          const { cause: _, ...error } = errorOf(e);
+          return { name: node.name, actionKey: "", status: "failed", error, elapsed: 0 };
+        })
         .then((result) => {
-          done(node, result);
+          processing--;
+          slots.delete(node.name);
+          settle(node, result);
         });
+      return place;
     },
     hasWork() {
-      return state.hasWork;
+      return state.hasReady || processing > 0;
     },
     workAvailable() {
-      if (state.inflight === 0) return Promise.resolve();
-      return new Promise<void>((r) => {
-        resumeLoop = r;
+      if (processing === 0) return Promise.resolve();
+      return new Promise<void>((resolve) => {
+        resumeLoop = resolve;
       });
     },
   };

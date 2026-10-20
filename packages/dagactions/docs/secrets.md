@@ -12,11 +12,12 @@ Give secrets to commands only through the environment of the action step. Never 
 
 ## What a command can see
 
-A command gets the environment of the action step, as a `run:` step gets the environment of the job. dagactions removes the variables that a `run:` step never sees:
+A command gets the whole environment of the process that runs it, locally and on GitHub. In the action, that includes variables that a `run:` step never sees:
 
 - the inputs of the action (`INPUT_*`),
-- `GITHUB_TOKEN`,
 - the runner's `ACTIONS_RUNTIME_TOKEN`, `ACTIONS_RUNTIME_URL`, `ACTIONS_CACHE_URL` and `ACTIONS_RESULTS_URL`.
+
+With the runtime token, any command can read and write the Actions cache of the repository. Run only commands that you trust with it, as for any action.
 
 ## Masking
 

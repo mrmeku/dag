@@ -1,6 +1,6 @@
 /**
  * dagactions as a JavaScript action, `post` entry: GitHub runs it at the end of the job whatever
- * became of `main`, in its own process. It runs the post steps the main run's journal shows as
+ * became of `main`, in its own process. It runs the post steps the main run's history shows as
  * not reached: none after an ordinary run, the owed ones after a cancel or a kill.
  */
 import { runPost } from "../runner.ts";

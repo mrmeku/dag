@@ -1,6 +1,14 @@
 import assert from "node:assert/strict";
 import { spawn, type ChildProcess } from "node:child_process";
-import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import {
+  mkdirSync,
+  mkdtempSync,
+  readdirSync,
+  readFileSync,
+  realpathSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { after, describe, test } from "node:test";
@@ -21,7 +29,8 @@ interface Invocation {
   args?: string[];
   env?: Record<string, string>;
   tty?: boolean;
-  files?: Record<string, string>;
+  /** Files beside ci.ts, or a function of the directory's real path that gives them. */
+  files?: Record<string, string> | ((dir: string) => Record<string, string>);
   interrupts?: string[];
 }
 
@@ -53,7 +62,8 @@ function cli(
   }: Invocation = {},
 ) {
   const dir = mkdtempSync(join(root, "run-"));
-  for (const [path, text] of Object.entries({ "ci.ts": workflow, ...files })) {
+  const given = typeof files === "function" ? files(realpathSync(dir)) : files;
+  for (const [path, text] of Object.entries({ "ci.ts": workflow, ...given })) {
     mkdirSync(dirname(join(dir, path)), { recursive: true });
     writeFileSync(join(dir, path), text);
   }
@@ -120,8 +130,8 @@ describe("dagactions run", () => {
     });
   });
 
-  test("a journal and a summary named without a directory", LIMIT, async () => {
-    const run = cli(EMPTY, { args: ["--journal", "j.json", "--summary", "s.md"] });
+  test("a history and a summary named without a directory", LIMIT, async () => {
+    const run = cli(EMPTY, { args: ["--history-dir", "history", "--summary-file", "s.md"] });
     const { code } = await run.exited;
     assert.deepEqual(
       { code, files: run.files() },
@@ -132,7 +142,7 @@ describe("dagactions run", () => {
           ".dagactions/cas",
           ".dagactions/failures.md",
           "ci.ts",
-          "j.json",
+          "history",
           "s.md",
         ],
       },
@@ -182,7 +192,7 @@ describe("dagactions run", () => {
         files: [
           ".dagactions",
           ".dagactions/cas",
-          ".dagactions/journal.json",
+          ".dagactions/history",
           "ci.ts",
           "step-summary.md",
         ],
@@ -244,15 +254,20 @@ describe("dagactions run", () => {
 });
 
 describe("dagactions post", () => {
-  test("a post step the journal owes that fails exits 1", LIMIT, async () => {
+  test("a post step a stopped run's history owes that fails exits 1", LIMIT, async () => {
     const workflow = workflowOf(`
       const up = w.run({ name: "up", cmd: ["true"] });
       w.post({ name: "down", main: up, cmd: ["false"], deps: {} });
     `);
-    const journal = JSON.stringify({ up: { status: "done", outputs: {}, contentHash: "" } });
+    // A stopped run's history: it holds no lock, and names its workflow file by its real path.
+    const history = (dir: string) =>
+      JSON.stringify({
+        workflow: join(dir, "ci.ts"),
+        nodes: { up: { status: "done", outputs: {}, contentHash: "" } },
+      });
     const { code, stdout } = await cli(workflow, {
       command: "post",
-      files: { ".dagactions/journal.json": journal },
+      files: (dir) => ({ ".dagactions/history/stopped.json": history(dir) }),
     }).exited;
     // The banner alone: the lines after it carry timings, and the runner's goldens pin them.
     assert.deepEqual(

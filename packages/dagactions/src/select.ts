@@ -1,18 +1,55 @@
-import { Graph, validateNoCycles } from "@mrmeku/dagraph";
+import { closure, settled, type Graph, type NodeRef } from "@mrmeku/dagraph";
+import type { Ports } from "./ports.ts";
+import { postsOf, recordPost } from "./steps.ts";
 
-/** The subgraph needed to run `names`: those nodes and their transitive dependencies. */
-export function selectNodes(graph: Graph, names: string[]): Graph {
-  const nodes = graph.getNodes();
-  const keep = new Set<string>();
-  const visit = (name: string) => {
-    if (keep.has(name)) return;
-    const node = nodes.get(name);
-    if (!node) throw new Error(`unknown node "${name}"`);
-    keep.add(name);
-    node.deps.forEach(visit);
+/**
+ * The subgraph needed to run `names`: the engine's `closure` of those nodes, and the post steps
+ * of every node among them. A post keeps its deps in that set; a dep left out is replaced by the
+ * nodes in the set it reaches, as settled deps, so a post ordered after the run through a gate
+ * still waits for what runs, whether it succeeds or not. A post whose command or env refers to an
+ * output of a node left out is left out too, and with it its own posts, rather than run with no
+ * path where the output was. The facade adds such a post again from its record, with those deps.
+ */
+export function selectNodes(graph: Graph<Ports>, names: string[]): Graph<Ports> {
+  const nodes = new Map(graph.describe().map((node) => [node.name, node]));
+  const posts = postsOf(graph);
+  const keep = new Set(
+    closure(graph, names)
+      .describe()
+      .map((node) => node.name),
+  );
+  const out = closure(graph, keep);
+  // The kept nodes `name` is or reaches through left-out deps, each node visited once per post.
+  const reach = (name: string, seen: Set<string>): string[] => {
+    if (seen.has(name)) return [];
+    seen.add(name);
+    return keep.has(name) ? [name] : nodes.get(name)!.deps.flatMap((d) => reach(d, seen));
   };
-  names.forEach(visit);
-  const out = new Graph();
-  for (const name of validateNoCycles(nodes)) if (keep.has(name)) out.add(nodes.get(name)!);
+  // In the order they were added, so a post comes after its main, and a post of a post after both.
+  for (const [name, node] of nodes) {
+    const post = posts.get(name);
+    if (!post) continue;
+    if (keep.has(name)) {
+      recordPost(out, name, post);
+      continue;
+    }
+    if (!keep.has(post.main) || !post.refs.every((d) => keep.has(d))) continue;
+    keep.add(name);
+    const direct = Object.fromEntries(
+      Object.entries(post.deps).filter(([, ref]) => ref && keep.has(ref.name)),
+    );
+    const directNames = Object.values(direct).map((ref) => ref!.name);
+    const seen = new Set<string>();
+    const through = node.deps
+      .filter((d) => !keep.has(d))
+      .flatMap((d) => reach(d, seen))
+      .filter((d) => !directNames.includes(d));
+    const deps = {
+      ...direct,
+      ...Object.fromEntries(through.map((d) => [`only:${d}`, settled({ name: d } as NodeRef)])),
+    };
+    post.addTo(out, name, deps);
+    recordPost(out, name, { ...post, deps });
+  }
   return out;
 }

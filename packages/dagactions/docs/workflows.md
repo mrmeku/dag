@@ -35,7 +35,7 @@ export default defineWorkflow({
       test: { cmd: ["pnpm", "test"], inputs: src, deps: { install }, group: "test" },
     });
     w.gate({ deps: checks });
-    w.saveCache({ name: "save:pnpm", cache: pnpm, deps: { install: w.optional(install) } });
+    w.saveCache({ name: "save:pnpm", cache: pnpm, deps: { install: w.settled(install) } });
   },
 });
 ```
@@ -62,10 +62,10 @@ The sections that follow explain each part of this example.
 
 Each function returns a reference to its step. To make step B wait for step A, put the reference to A in the `deps` of B. This is the only way to order steps. Steps without a dependency between them start at the same time.
 
-If a dependency fails, dagactions skips the dependent step. To run the dependent step also when the dependency fails, wrap the dependency in `w.optional`. This is the `if: always()` of a GitHub workflow:
+If a dependency fails, dagactions skips the dependent step. To run the dependent step also when the dependency fails, wrap the dependency in `w.settled`. This is the `if: always()` of a GitHub workflow:
 
 ```typescript
-w.saveCache({ name: "save:pnpm", cache: pnpm, deps: { install: w.optional(install) } });
+w.saveCache({ name: "save:pnpm", cache: pnpm, deps: { install: w.settled(install) } });
 ```
 
 ## Limits
@@ -95,13 +95,14 @@ Both functions are `@actions/glob`. Each call excludes the directories in `DEFAU
 
 The cache key of a step is a hash of these items:
 
-- the step's name,
 - its command, `cwd` and `env`,
 - its `config`,
-- the content of each file in `inputs`,
-- the content of the outputs of each dependency.
+- the path and the content of each file in `inputs`,
+- the content of the outputs of each dependency, under its key in `deps`.
 
 If the CAS has an entry for the key, the step does not run. dagactions uses the stored outputs. The order of `deps` and `inputs` does not change the key.
+
+The step's name is not in the key: it is the step's address, for `--only`, the logs and the check runs. Thus a renamed step does not run again, and two steps that run the same command on the same inputs and dependencies share one entry, and one log.
 
 If a step runs again but writes the same outputs, its dependents do not run again. Thus a change that does not change a step's outputs stops at that step.
 
@@ -111,13 +112,13 @@ These options change how a step uses the cache:
 | ------------------- | ------------------------------------------------------------------------------------------------------------------------------ |
 | `config`            | The result depends on something that no file shows, for example the version of a tool. Change the value to run the step again. |
 | `cacheable: false`  | The step must run each time, for example an install on a new runner or an integration test. Its outputs are still hashed.      |
-| `normalize`         | The step reads only part of a dependency's outputs. Give a function that returns the part that the step reads.                 |
+| `invalidateOn`      | The step reads only part of a dependency's outputs. Give a function that returns the part that the step reads.                 |
 | `--force` (the CLI) | You want to ignore the cache for one run.                                                                                      |
 
-A constant `normalize` function orders a step after a dependency but keeps that dependency out of the key. Use this for a cache restore:
+A constant `invalidateOn` function orders a step after a dependency but keeps that dependency out of the key. Use this for a cache restore:
 
 ```typescript
-w.run({ name: "lint", cmd: ["pnpm", "lint"], deps: { cas }, normalize: { cas: () => "" } });
+w.run({ name: "lint", cmd: ["pnpm", "lint"], deps: { cas }, invalidateOn: { cas: () => "" } });
 ```
 
 ## Outputs
@@ -138,7 +139,8 @@ w.run({ name: "publish", cmd: ["npm", "publish", pack.outputs.tarball], deps: { 
 When the command runs, the reference becomes the path of the file in the CAS. These rules apply:
 
 - The step that refers to an output must have the step that writes it in `deps`. If it does not, the workflow does not build.
-- If the dependency is optional and it failed, the reference becomes the empty string, as on GitHub.
+- The cache key holds the reference as the dependency's key in `deps` and the output's name, never the path or the name of the step that writes it. Thus renaming `pack` does not run `publish` again.
+- If the dependency is settled and it failed, a reference that is a whole argument becomes the empty string, as on GitHub. A reference inside a template string fails the step instead, because `${pack.outputs.dir}/tmp` would become `/tmp`.
 
 ## The actions toolkit
 
@@ -153,3 +155,5 @@ dagactions uses the [actions toolkit](https://github.com/actions/toolkit). It do
 | `@actions/glob`     | `w.glob` and `w.hash`.                        |
 
 Each JSON output of a step holds the value that the toolkit returned, without changes.
+
+Only `@actions/glob` is a dependency. The other packages are optional peer dependencies: the action bundles them, and `dagactions run` in a `run:` step needs `@actions/core` and `@actions/github`. Importing `@mrmeku/dagactions` loads none of them; the GitHub adapter, `createGithubCi`, is the subpath `@mrmeku/dagactions/github`. A typecheck needs none of them either: the published declarations hold the toolkit's types.

@@ -1,75 +1,48 @@
-import type { ExecEvent, ExecResult } from "./exec-state.ts";
-import type { Graph, Node } from "./graph/index.ts";
-import { validateNoCycles } from "./graph/index.ts";
-import type { RunNode, Scheduler } from "./orchestrate.ts";
-import { orchestrate } from "./orchestrate.ts";
-import { processNode, type ExecutionContext } from "./process-node.ts";
+import type { Graph } from "./graph/index.ts";
+import { orchestrate, type RunNode, type Scheduler } from "./orchestrate.ts";
+import { inputHashMemos, processNode, type ExecutionContext } from "./process-node.ts";
 import { unboundedScheduler } from "./schedulers.ts";
+import type { ExecEvent, Result } from "./types.ts";
 
-export {
-  NOT_CACHED,
-  processNode,
-  type ExecutionContext,
-  type ProcessNodeOptions,
-} from "./process-node.ts";
-
-/** A per-run switch: on for every node, or for the nodes a predicate selects. */
-export type NodeSwitch = boolean | ((node: Node) => boolean);
-
-/**
- * Per-invocation overrides for DAG execution. Separate from ExecutionContext because these vary
- * per run (e.g. --force for a retry) while the context is stable infrastructure.
- */
-export interface ExecuteOptions {
-  /**
-   * Re-run the selected nodes even when a cached result exists, then store the new one. Their
-   * dependents re-run only if the output actually changed (early cutoff).
-   */
-  force?: NodeSwitch;
-  /**
-   * Hold back the selected nodes: one without a verified cache entry fails with NOT_CACHED and
-   * its dependents dep-fail. Reports the cache's state of a graph without doing its work.
-   */
-  cacheOnly?: NodeSwitch;
-  onEvent?: (event: ExecEvent) => void;
-  /** What each node's action prints, as it prints it (its `ctx.output`). */
-  onOutput?: (node: Node, chunk: string) => void;
+/** The options of one execution. The execution context outlives it. */
+export interface ExecuteOptions<Meta = unknown> {
+  /** Every node skips its entry read, runs, and writes its new entry. */
+  force?: boolean;
+  onEvent?: (event: ExecEvent<Meta>) => void;
   scheduler?: Scheduler;
   /**
-   * Cancels the execution: nodes still waiting settle as `cancelled` and nothing new starts.
-   * Nodes already running get the signal through their action context and settle as
-   * `cancelled` whatever their action returns; nothing they produce is cached. The returned
-   * results are complete either way.
+   * Cancels the execution: nodes still waiting settle `cancelled` and nothing new starts. A
+   * running node gets the signal through its action context and settles `cancelled` whatever its
+   * action returns. The returned results are complete either way.
    */
   signal?: AbortSignal;
 }
 
-const selects = (sw: NodeSwitch | undefined, node: Node) =>
-  typeof sw === "function" ? sw(node) : (sw ?? false);
-
 /**
- * Run an entire DAG to completion. This is the primary entry point for dagraph — call it with a
- * built Graph, an ExecutionContext (cache + fs), and optional scheduling overrides. Returns
- * per-node results (done, cached, fail, dep-failed, cancelled).
+ * Run a graph in one process: orchestration, and each node processed in the same process with
+ * the same graph and `onEvent`. Each input file is hashed once per execution, however many
+ * nodes declare it. Returns one result per node, in the order they settled.
  */
-export async function execute(
-  graph: Graph,
-  ctx: ExecutionContext,
-  opts?: ExecuteOptions,
-): Promise<ExecResult[]> {
-  const nodes = graph.getNodes();
-  validateNoCycles(nodes);
-  const scheduler = opts?.scheduler ?? unboundedScheduler();
-  const execCtx = { ...ctx, inputHashes: ctx.inputHashes ?? new Map() };
-  const run: RunNode = (desc, depContentHashes, depOutputs, started) => {
-    const node = nodes.get(desc.name)!;
-    return processNode(node, depContentHashes, depOutputs, execCtx, {
-      force: selects(opts?.force, node),
-      cacheOnly: selects(opts?.cacheOnly, node),
-      ...(opts?.signal && { signal: opts.signal }),
-      onStart: started,
-      ...(opts?.onOutput && { onOutput: (chunk: string) => opts.onOutput!(desc, chunk) }),
+export function execute<Ports, Meta>(
+  graph: Graph<Ports, Meta>,
+  executionContext: ExecutionContext<NoInfer<Ports>>,
+  options: ExecuteOptions<Meta> = {},
+): Promise<Result[]> {
+  // v0.3.0's per-node forms, which an untyped caller can still pass: refused, never misread.
+  const perNode = "A choice per node is an executor's: pass it in processNode's options";
+  if ("cacheOnly" in options)
+    return Promise.reject(new Error(`execute takes no cacheOnly. ${perNode}.`));
+  if (options.force !== undefined && typeof options.force !== "boolean")
+    return Promise.reject(new Error(`execute's force is true or false. ${perNode}.`));
+  const { force = false, onEvent, scheduler = unboundedScheduler(), signal } = options;
+  const execution = { ...executionContext };
+  inputHashMemos.set(execution, new Map());
+  const run: RunNode<Meta> = (node, depEntries, acquire) =>
+    processNode(graph, node.name, depEntries, execution, {
+      force,
+      acquire,
+      ...(signal && { signal }),
+      ...(onEvent && { onEvent }),
     });
-  };
-  return orchestrate(nodes.values(), run, scheduler, opts?.onEvent, opts?.signal);
+  return orchestrate(graph.describe(), run, scheduler, onEvent, signal);
 }

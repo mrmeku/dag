@@ -1,4 +1,4 @@
-import type { ExecResult, Node } from "@mrmeku/dagraph";
+import type { Node, Result } from "@mrmeku/dagraph";
 import { createGithubStore } from "./github/renderer.ts";
 import { titleOf } from "./kernel/format.ts";
 import type { Pass } from "./kernel/run-slice.ts";
@@ -14,7 +14,7 @@ export async function finishPass(
   ports: Pick<Ports, "ci">,
   store: RunStore,
   pass: Pass,
-  results: ExecResult[],
+  results: Result[],
   renderers: readonly SummaryRenderer[] = DEFAULT_SUMMARY_RENDERERS,
 ): Promise<{ failed: number; markdown: string }> {
   const nodes = await store.report(pass);
@@ -34,7 +34,7 @@ export async function finishPass(
  * Turns dagraph's event stream into CI output as the GitHub renderer draws it
  * (github/renderer.ts), with a markdown summary drawn by the renderers in `summary`
  * (summary.ts). `rerunCommand` is the command that ran this workflow, for the recap's reproduce line.
- * Logs are read back from the CAS, which is why cached and failed nodes still show their output.
+ * Logs are read back from beside the CAS, which is why cached and failed nodes still show their output.
  */
 export function createReporter(
   ports: Ports,
@@ -55,6 +55,6 @@ export function createReporter(
   store.begin(pass);
   return {
     onEvent: store.onEvent,
-    finish: (results: ExecResult[]) => finishPass(ports, store, pass, results, opts.summary),
+    finish: (results: Result[]) => finishPass(ports, store, pass, results, opts.summary),
   };
 }

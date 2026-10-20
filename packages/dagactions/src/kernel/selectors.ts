@@ -17,31 +17,31 @@ export const isSettled = (nodeState: NodeState): nodeState is SettledNodeState =
 const isInFlight = (nodeState: NodeState): nodeState is InFlightNodeState =>
   nodeState.status === "dispatched" || nodeState.status === "running";
 
-export const dispatchedAtOf = (nodeState: NodeState): number | undefined =>
-  "dispatchedAt" in nodeState ? nodeState.dispatchedAt : undefined;
+export const startedAtOf = (nodeState: NodeState): number | undefined =>
+  "startedAt" in nodeState ? nodeState.startedAt : undefined;
 
 /** "" for a node cancelled before it had one, none for a skipped or unsettled one. */
 export const actionKeyOf = (nodeState: NodeState): string | undefined =>
   "actionKey" in nodeState ? nodeState.actionKey : undefined;
 
-/** Dispatch to settle, at least 1 ms: always, for a node that ran to its end. */
+/** From its action's start (a cache hit's dispatch) to its settle, at least 1 ms: always, for a node that ran to its end. */
 export function durationOf(nodeState: SucceededNodeState | FailedNodeState): number;
 export function durationOf(nodeState: NodeState): number | undefined;
 export function durationOf(nodeState: NodeState): number | undefined {
-  const dispatchedAt = dispatchedAtOf(nodeState);
-  return dispatchedAt === undefined || !isSettled(nodeState)
+  const startedAt = startedAtOf(nodeState);
+  return startedAt === undefined || !isSettled(nodeState)
     ? undefined
-    : Math.max(1, nodeState.endedAt - dispatchedAt);
+    : Math.max(1, nodeState.endedAt - startedAt);
 }
 
 /** The nodes dispatched and not settled, the earliest first. */
 export const nodesInFlight = (run: RunState): InFlightNodeState[] =>
   [...run.nodes.values()]
     .filter(isInFlight)
-    .sort((earlier, later) => earlier.dispatchedAt - later.dispatchedAt);
+    .sort((earlier, later) => earlier.startedAt - later.startedAt);
 
 export function runStartedAt(run: RunState): number | undefined {
-  const starts = [...run.nodes.values()].flatMap((nodeState) => dispatchedAtOf(nodeState) ?? []);
+  const starts = [...run.nodes.values()].flatMap((nodeState) => startedAtOf(nodeState) ?? []);
   return starts.length > 0 ? Math.min(...starts) : undefined;
 }
 
@@ -54,7 +54,7 @@ export function nodeReports(
     const nodeState = run.nodes.get(node.name);
     if (!nodeState || !isSettled(nodeState)) return [];
     const previous = run.lastRunDurations?.[node.name];
-    const start = dispatchedAtOf(nodeState);
+    const start = startedAtOf(nodeState);
     return [
       {
         ...node,
@@ -70,12 +70,12 @@ export function nodeReports(
 
 /*
  * The terminal's and failures.md's rule for which failures to fix: a node that ran its command
- * failed for its own reason, even after a failed optional dep. GitHub's log names the failures no
+ * failed for its own reason, even after a failed settled dep. GitHub's log names the failures no
  * failure upstream explains instead (`rootFailures` in report.ts).
  */
 
 const isFailed = (nodeState: NodeState | undefined): boolean =>
-  nodeState?.status === "fail" || nodeState?.status === "dep-failed";
+  nodeState?.status === "failed" || nodeState?.status === "dep-failed";
 
 export const failedDepsOf = (run: RunState, nodeState: NodeState): string[] =>
   nodeState.node.deps.filter((dep) => isFailed(run.nodes.get(dep)));
@@ -83,10 +83,10 @@ export const failedDepsOf = (run: RunState, nodeState: NodeState): string[] =>
 /** Failed because a dep did: skipped, or failed running no command of its own, as a gate does. */
 const isConsequence = (run: RunState, nodeState: NodeState): boolean =>
   nodeState.status === "dep-failed" ||
-  (nodeState.status === "fail" && !nodeState.command && failedDepsOf(run, nodeState).length > 0);
+  (nodeState.status === "failed" && !nodeState.command && failedDepsOf(run, nodeState).length > 0);
 
 export const isOwnFailure = (run: RunState, nodeState: NodeState): nodeState is FailedNodeState =>
-  nodeState.status === "fail" && !isConsequence(run, nodeState);
+  nodeState.status === "failed" && !isConsequence(run, nodeState);
 
 export const ownFailures = (run: RunState): FailedNodeState[] =>
   [...run.nodes.values()].filter((nodeState) => isOwnFailure(run, nodeState));
@@ -118,5 +118,5 @@ export function consequencesOf(
     consequences
       .filter((nodeState) => nodeState.status === status)
       .map((nodeState) => nodeState.node.name);
-  return { failed: namesWithStatus("fail"), skipped: namesWithStatus("dep-failed") };
+  return { failed: namesWithStatus("failed"), skipped: namesWithStatus("dep-failed") };
 }

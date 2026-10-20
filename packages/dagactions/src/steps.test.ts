@@ -1,7 +1,7 @@
-import { execute, Graph, MemCache, optional } from "@mrmeku/dagraph";
+import { execute, Graph, MemCache, settled } from "@mrmeku/dagraph";
 import assert from "node:assert/strict";
 import { describe, test } from "node:test";
-import type { Sh } from "./ports.ts";
+import type { Ports, Sh } from "./ports.ts";
 import { nullActionsArtifact } from "./ports/actions-artifact.ts";
 import { createMemoryActionsCache } from "./ports/actions-cache.ts";
 import { createTestPorts } from "./ports/memory.ts";
@@ -15,9 +15,18 @@ import {
   runAll,
   saveCache,
   uploadArtifact,
+  type OutputRef,
 } from "./steps.ts";
 
 const CAS = "/cas";
+const newGraph = () => new Graph<Ports>();
+/** Executes `graph` under `ports`, on a cache of its own unless given one. */
+const executeUnder = (
+  graph: Graph<Ports>,
+  ports: Ports,
+  casBaseDir = CAS,
+  cache = new MemCache(),
+) => execute(graph, { ports, cache, fs: ports.fs, casBaseDir });
 
 const ERR = Array.from({ length: 30 }, (_, i) => `err ${i + 1}`).join("\n") + "\n";
 /** A shell whose only commands are `ok` (exit 0) and `bad` (exit 1 with a long stderr). */
@@ -37,30 +46,32 @@ const fakeSh: Sh = {
 describe("runAll + gate", () => {
   test("the result is the output, the logs sit beside it, a non-zero exit fails, and the gate reports what failed", async () => {
     const { ports: p } = createTestPorts({ sh: fakeSh });
-    const graph = new Graph();
-    const checks = runAll(graph, p, { good: { cmd: ["ok"] }, bad: { cmd: ["bad", "--flag"] } });
-    gate(graph, p, { deps: checks });
+    const graph = newGraph();
+    const checks = runAll(graph, { good: { cmd: ["ok"] }, bad: { cmd: ["bad", "--flag"] } });
+    gate(graph, { deps: checks });
 
-    const results = await execute(graph, { cache: new MemCache(), fs: p.fs, casBaseDir: CAS });
+    const results = await executeUnder(graph, p);
     const byName = new Map(results.map((r) => [r.name, r]));
     const goodResult = byName.get("good")!;
     const badResult = byName.get("bad")!;
     const gateResult = byName.get("gate")!;
     const goodKey = goodResult.actionKey;
 
+    const out = goodResult.status === "done" && `${CAS}/${goodKey}/out-${goodResult.contentHash}`;
+
     assert.deepEqual(
       {
         good: goodResult.status === "done" && {
           outputs: goodResult.outputs,
           log: await p.fs.readText(`${CAS}.logs/${goodKey}.log`),
-          result: JSON.parse(await p.fs.readText(`${CAS}/${goodKey}/out/result.json`)),
+          result: JSON.parse(await p.fs.readText(`${out}/result.json`)),
         },
-        bad: badResult.status === "fail" && badResult.error.message,
-        gate: gateResult.status === "fail" && gateResult.error.message,
+        bad: badResult.status === "failed" && badResult.error.message,
+        gate: gateResult.status === "failed" && gateResult.error.message,
       },
       {
         good: {
-          outputs: { result: `${CAS}/${goodKey}/out/result.json` },
+          outputs: { result: `${out}/result.json` },
           log: "hello\n",
           result: { cmd: ["ok"], cwd: "", code: 0 },
         },
@@ -75,31 +86,31 @@ describe("restoreCache + saveCache", () => {
   test("a restore-key match restores the newest prefix match and saves the primary key; an exact hit saves nothing; a refused save warns; the outputs are what the toolkit returned", async () => {
     const service = createMemoryActionsCache(["pnpm-linux-old", "pnpm-linux-new", "cas-main-1"]);
     const { ports: p, fs, rec } = createTestPorts({ sh: fakeSh, actionsCache: service });
-    const graph = new Graph();
-    const pnpm = restoreCache(graph, p, {
+    const graph = newGraph();
+    const pnpm = restoreCache(graph, {
       name: "restore:pnpm",
       path: ["~/.pnpm-store"],
       key: "pnpm-linux-fresh",
       restoreKeys: ["pnpm-linux-"],
     });
-    const cas = restoreCache(graph, p, { name: "restore:cas", path: [".cas"], key: "cas-main-1" });
-    const broken = restoreCache(graph, p, { name: "restore:broken", path: [], key: "broken" });
-    const install = run(graph, p, {
+    const cas = restoreCache(graph, { name: "restore:cas", path: [".cas"], key: "cas-main-1" });
+    const broken = restoreCache(graph, { name: "restore:broken", path: [], key: "broken" });
+    const install = run(graph, {
       name: "install",
       cmd: ["ok"],
       deps: { pnpm },
       cacheable: false,
     });
-    saveCache(graph, p, { name: "save:pnpm", cache: pnpm, deps: { install: optional(install) } });
-    saveCache(graph, p, { name: "save:cas", cache: cas, deps: { install } });
+    saveCache(graph, { name: "save:pnpm", cache: pnpm, deps: { install: settled(install) } });
+    saveCache(graph, { name: "save:cas", cache: cas, deps: { install } });
     const save = service.saveCache;
     service.saveCache = async (paths, key) => {
       if (key === "broken") throw new Error("Path Validation Error: nothing to save");
       return save(paths, key);
     };
-    saveCache(graph, p, { name: "save:broken", cache: broken, deps: {} });
+    saveCache(graph, { name: "save:broken", cache: broken, deps: {} });
 
-    const results = await execute(graph, { cache: new MemCache(), fs: p.fs, casBaseDir: CAS });
+    const results = await executeUnder(graph, p);
     const byName = new Map(results.map((r) => [r.name, r]));
     const json = async (name: string) => {
       const r = byName.get(name)!;
@@ -129,6 +140,7 @@ describe("restoreCache + saveCache", () => {
         warnings: rec.annotations,
         entries: [...service.entries],
         manifests: [...fs.files.keys()].filter((f) => f.endsWith("manifest.json")),
+        posts: Object.fromEntries(postNodes(graph)),
       },
       {
         restored: { pnpm: "pnpm-linux-new", cas: "cas-main-1", broken: null },
@@ -153,13 +165,18 @@ describe("restoreCache + saveCache", () => {
           ["pnpm-linux-fresh", ["~/.pnpm-store"]],
         ],
         manifests: [],
+        posts: {
+          "save:pnpm": "restore:pnpm",
+          "save:cas": "restore:cas",
+          "save:broken": "restore:broken",
+        },
       },
     );
   });
 });
 
 describe("uploadArtifact", () => {
-  test("dep outputs upload from the CAS rooted at their common directory; a taken name needs overwrite; a failed optional dep leaves no files; no service uploads nothing; the client's response is the output", async () => {
+  test("dep outputs upload from the CAS rooted at their common directory; a taken name needs overwrite; a failed settled dep leaves no files; no service uploads nothing; the client's response is the output", async () => {
     const {
       ports: p,
       fs,
@@ -177,73 +194,83 @@ describe("uploadArtifact", () => {
         },
       },
     });
-    const graph = new Graph();
-    const pack = run(graph, p, { name: "pack", cmd: ["pack"], outputs: { tarball: "pkg.tgz" } });
-    const bundle = run(graph, p, { name: "bundle", cmd: ["bundle"], outputs: { main: "main.js" } });
-    const bad = run(graph, p, { name: "bad", cmd: ["bad"], outputs: { report: "report.xml" } });
-    const first = uploadArtifact(graph, p, {
+    const graph = newGraph();
+    const pack = run(graph, { name: "pack", cmd: ["pack"], outputs: { tarball: "pkg.tgz" } });
+    const bundle = run(graph, { name: "bundle", cmd: ["bundle"], outputs: { main: "main.js" } });
+    const bad = run(graph, { name: "bad", cmd: ["bad"], outputs: { report: "report.xml" } });
+    const first = uploadArtifact(graph, {
       name: "upload:tarball",
       artifact: "tarball",
       path: [pack.outputs.tarball],
       deps: { pack },
       options: { retentionDays: 7 },
     });
-    uploadArtifact(graph, p, {
+    uploadArtifact(graph, {
       name: "upload:again",
       artifact: "tarball",
       path: [pack.outputs.tarball],
       deps: { pack, first },
     });
-    const again = uploadArtifact(graph, p, {
+    const again = uploadArtifact(graph, {
       name: "upload:overwrite",
       artifact: "tarball",
       path: [pack.outputs.tarball],
       deps: { pack, first },
       overwrite: true,
     });
-    uploadArtifact(graph, p, {
+    uploadArtifact(graph, {
       name: "upload:both",
       artifact: "both",
       path: [pack.outputs.tarball, bundle.outputs.main],
       deps: { pack, bundle, again },
     });
-    uploadArtifact(graph, p, {
+    uploadArtifact(graph, {
       name: "upload:report",
       artifact: "report",
       path: [bad.outputs.report],
-      deps: { bad: optional(bad) },
+      deps: { bad: settled(bad) },
     });
-    uploadArtifact(graph, p, {
+    uploadArtifact(graph, {
       name: "upload:required",
       artifact: "required",
       path: [bad.outputs.report],
-      deps: { bad: optional(bad) },
+      deps: { bad: settled(bad) },
       ifNoFilesFound: "error",
     });
-    uploadArtifact(
-      graph,
-      { ...p, actionsArtifact: nullActionsArtifact },
-      {
-        name: "upload:offline",
-        artifact: "offline",
-        path: [pack.outputs.tarball],
-        deps: { pack },
+    // Ports are the execution's: the upload with no service runs in an execution of its own.
+    const offline = newGraph();
+    uploadArtifact(offline, {
+      name: "upload:offline",
+      artifact: "offline",
+      path: [pack.outputs.tarball],
+      deps: {
+        pack: run(offline, { name: "pack", cmd: ["pack"], outputs: { tarball: "pkg.tgz" } }),
       },
-    );
+    });
     assert.throws(
-      () =>
-        uploadArtifact(graph, p, { name: "orphan", artifact: "x", path: [pack.outputs.tarball] }),
+      () => uploadArtifact(graph, { name: "orphan", artifact: "x", path: [pack.outputs.tarball] }),
       { message: "orphan uses pack.outputs.tarball, but pack is not in its deps" },
     );
 
-    const results = await execute(graph, { cache: new MemCache(), fs: p.fs, casBaseDir: CAS });
-    const byName = new Map(results.map((r) => [r.name, r]));
-    const out = (name: string) => `${CAS}/${byName.get(name)!.actionKey}/out`;
+    const cache = new MemCache();
+    const results = await executeUnder(graph, p, CAS, cache);
+    const offlineResults = await executeUnder(
+      offline,
+      { ...p, actionsArtifact: nullActionsArtifact },
+      CAS,
+      cache,
+    );
+    // The offline graph's pack is a cache hit of the first's, which keeps its own result here.
+    const byName = new Map([...offlineResults, ...results].map((r) => [r.name, r]));
+    const out = (name: string) => {
+      const r = byName.get(name)!;
+      return r.status === "done" && `${CAS}/${r.actionKey}/out-${r.contentHash}`;
+    };
     const json = async (name: string) => {
       const r = byName.get(name)!;
       return r.status === "done"
         ? JSON.parse(await fs.readText(r.outputs as string))
-        : r.status === "fail" && r.error.message;
+        : r.status === "failed" && r.error.message;
     };
     const names = [
       "upload:tarball",
@@ -257,12 +284,10 @@ describe("uploadArtifact", () => {
     assert.deepEqual(
       {
         outputs: Object.fromEntries(await Promise.all(names.map(async (n) => [n, await json(n)]))),
-        log: await fs.readText(logPath(out("upload:tarball"))),
+        log: await fs.readText(logPath(CAS, byName.get("upload:tarball")!.actionKey)),
         warnings: rec.annotations,
         uploads: [...service.uploads],
-        config: JSON.parse(graph.describe().find((n) => n.name === "upload:tarball")!.config),
-        uncached: graph
-          .describe()
+        uncached: [...graph.describe(), ...offline.describe()]
           .filter((n) => n.cacheable === false)
           .map((n) => n.name),
       },
@@ -293,13 +318,6 @@ describe("uploadArtifact", () => {
             { files: [`${out("pack")}/pkg.tgz`, `${out("bundle")}/main.js`], rootDirectory: CAS },
           ],
         ],
-        config: {
-          v: 1,
-          artifact: "tarball",
-          path: [{ node: "pack", output: "tarball" }],
-          ifNoFilesFound: "warn",
-          options: { retentionDays: 7 },
-        },
         uncached: names,
       },
     );
@@ -312,47 +330,50 @@ describe("declared outputs", () => {
     const { ports: p, fs } = createTestPorts({
       sh: {
         run: async (cmd, opts) => {
-          // What reaches the command; the names it withholds are the secrets test's business.
-          const env = Object.entries(opts?.env ?? {}).filter(([, v]) => v !== undefined);
-          seen.push({ cmd, env: Object.fromEntries(env) });
+          seen.push({ cmd, env: opts?.env });
           if (cmd[0] === "pack")
             await fs.writeText(`${opts!.env!["DAGACTIONS_OUT"]}/pkg.tgz`, "bytes");
           return { code: 0, stdout: "", stderr: "", output: "", ok: true };
         },
       },
     });
-    const graph = new Graph();
-    const pack = run(graph, p, { name: "pack", cmd: ["pack"], outputs: { tarball: "pkg.tgz" } });
-    run(graph, p, {
+    const graph = newGraph();
+    const pack = run(graph, { name: "pack", cmd: ["pack"], outputs: { tarball: "pkg.tgz" } });
+    run(graph, {
       name: "publish",
       cmd: ["publish", pack.outputs.tarball],
       env: { RESULT: pack.outputs.result },
       deps: { pack },
     });
-    run(graph, p, { name: "forgot", cmd: ["ok"], outputs: { tarball: "pkg.tgz" } });
-    assert.throws(() => run(graph, p, { name: "orphan", cmd: ["publish", pack.outputs.tarball] }), {
+    run(graph, { name: "forgot", cmd: ["ok"], outputs: { tarball: "pkg.tgz" } });
+    assert.throws(() => run(graph, { name: "orphan", cmd: ["publish", pack.outputs.tarball] }), {
       message: "orphan uses pack.outputs.tarball, but pack is not in its deps",
     });
-    const results = await execute(graph, { cache: new MemCache(), fs: p.fs, casBaseDir: CAS });
+    const results = await executeUnder(graph, p);
     const byName = new Map(results.map((r) => [r.name, r]));
     const packResult = byName.get("pack")!;
     const forgotResult = byName.get("forgot")!;
-    const packKey = packResult.actionKey;
-    const tarball = `${CAS}/${packKey}/out/pkg.tgz`;
+    const packOut =
+      packResult.status === "done" &&
+      `${CAS}/${packResult.actionKey}/out-${packResult.contentHash}`;
+    const tarball = `${packOut}/pkg.tgz`;
     const publish = seen.find((s) => s.cmd[0] === "publish")!;
     assert.deepEqual(
       {
         packOutputs: packResult.status === "done" && packResult.outputs,
         publishCmd: publish.cmd,
-        publishEnv: publish.env,
-        forgot: forgotResult.status === "fail" && forgotResult.error.message,
+        publishEnv: {
+          ...publish.env,
+          DAGACTIONS_OUT: publish.env?.DAGACTIONS_OUT?.replace(/[0-9a-f-]{36}$/, "<uuid>"),
+        },
+        forgot: forgotResult.status === "failed" && forgotResult.error.message,
       },
       {
-        packOutputs: { result: `${CAS}/${packKey}/out/result.json`, tarball },
+        packOutputs: { result: `${packOut}/result.json`, tarball },
         publishCmd: ["publish", tarball],
         publishEnv: {
-          RESULT: `${CAS}/${packKey}/out/result.json`,
-          DAGACTIONS_OUT: `${CAS}/${byName.get("publish")!.actionKey}/out`,
+          RESULT: `${packOut}/result.json`,
+          DAGACTIONS_OUT: `${CAS}/${byName.get("publish")!.actionKey}/tmp-<uuid>`,
         },
         forgot: "declared output tarball missing: pkg.tgz",
       },
@@ -360,8 +381,188 @@ describe("declared outputs", () => {
   });
 });
 
+describe("refs in template strings", () => {
+  test("a ref inside a template string resolves to its path in cmd, env and an artifact path, and fails the step for a failed settled dep, which a whole ref resolves to nothing; one outside deps is refused at graph build; the key holds names, never paths", async () => {
+    const seen: Array<{ cmd: string[]; map: string | undefined }> = [];
+    const {
+      ports: p,
+      fs,
+      actionsArtifact: service,
+    } = createTestPorts({
+      sh: {
+        run: async (cmd, opts) => {
+          seen.push({ cmd, map: opts?.env?.MAP });
+          const out = opts!.env!["DAGACTIONS_OUT"]!;
+          if (cmd[0] === "build") {
+            await fs.writeText(`${out}/main.js`, "js");
+            await fs.writeText(`${out}/main.js.map`, "map");
+          }
+          const ok = cmd[0] !== "bad";
+          return { code: ok ? 0 : 1, stdout: "", stderr: "", output: "", ok };
+        },
+      },
+    });
+    const graph = newGraph();
+    const built = run(graph, { name: "build", cmd: ["build"], outputs: { bundle: "main.js" } });
+    const bad = run(graph, { name: "bad", cmd: ["bad"] });
+    run(graph, {
+      name: "size",
+      cmd: ["size", `--file=${built.outputs.bundle}`, bad.outputs.result],
+      env: { MAP: `${built.outputs.bundle}.map` },
+      deps: { built, bad: settled(bad) },
+    });
+    run(graph, {
+      name: "report",
+      cmd: ["report", `--from=${bad.outputs.result}`],
+      deps: { bad: settled(bad) },
+    });
+    uploadArtifact(graph, {
+      name: "upload:map",
+      artifact: "map",
+      path: [`${built.outputs.bundle}.map`, bad.outputs.result],
+      deps: { built, bad: settled(bad) },
+    });
+    uploadArtifact(graph, {
+      name: "upload:xml",
+      artifact: "xml",
+      path: [`${bad.outputs.result}.xml`],
+      deps: { bad: settled(bad) },
+    });
+    const refused = [
+      () => run(graph, { name: "orphan", cmd: [`--file=${built.outputs.bundle}`] }),
+      () => run(graph, { name: "orphan", cmd: ["x"], env: { F: `${built.outputs.bundle}` } }),
+      () =>
+        uploadArtifact(graph, {
+          name: "orphan",
+          artifact: "x",
+          path: [`${built.outputs.bundle}.map`],
+        }),
+    ].map((add) => {
+      try {
+        add();
+        return null;
+      } catch (e) {
+        return (e as Error).message;
+      }
+    });
+    const results = await executeUnder(graph, p);
+    // The same graph under another CAS directory, where every output has another path.
+    const elsewhere = await executeUnder(graph, p, "/elsewhere");
+    const keyOf = (rs: typeof results) => rs.find((r) => r.name === "size")!.actionKey;
+    const build = results.find((r) => r.name === "build")!;
+    const out = build.status === "done" && `${CAS}/${build.actionKey}/out-${build.contentHash}`;
+    assert.deepEqual(
+      {
+        size: seen.find((s) => s.cmd[0] === "size"),
+        failed: results
+          .flatMap((r) => (r.status === "failed" ? [[r.name, r.error.message]] : []))
+          .sort(),
+        uploads: [...service.uploads],
+        refused,
+        keyHoldsNoPath: keyOf(elsewhere) === keyOf(results),
+      },
+      {
+        size: { cmd: ["size", `--file=${out}/main.js`, ""], map: `${out}/main.js.map` },
+        failed: [
+          ["bad", "bad exited 1"],
+          ["report", '"--from=bad.outputs.result" has no path: bad, a settled dep, failed'],
+          ["upload:xml", '"bad.outputs.result.xml" has no path: bad, a settled dep, failed'],
+        ],
+        uploads: [["map", { files: [`${out}/main.js.map`], rootDirectory: out }]],
+        refused: Array(3).fill("orphan uses build.outputs.bundle, but build is not in its deps"),
+        keyHoldsNoPath: true,
+      },
+    );
+  });
+});
+
+describe("a dep's output in a command", () => {
+  test("is keyed by the role it points through and the output's name, so renaming the dep runs neither the step nor its dependents again", async () => {
+    const { ports: p, fs } = createTestPorts({
+      sh: {
+        run: async (cmd, opts) => {
+          if (cmd[0] === "pack")
+            await fs.writeText(`${opts!.env!.DAGACTIONS_OUT}/pkg.tgz`, "bytes");
+          return { code: 0, stdout: "", stderr: "", output: "", ok: true };
+        },
+      },
+    });
+    const cache = new MemCache();
+    const statuses = async (packName: string) => {
+      const graph = newGraph();
+      const pack = run(graph, { name: packName, cmd: ["pack"], outputs: { tarball: "pkg.tgz" } });
+      const publish = run(graph, {
+        name: "publish",
+        cmd: ["publish", pack.outputs.tarball, `--file=${pack.outputs.tarball}`],
+        env: { TARBALL: pack.outputs.tarball },
+        deps: { pack },
+      });
+      gate(graph, { deps: { publish } });
+      const results = await executeUnder(graph, p, CAS, cache);
+      return Object.fromEntries(results.map((r) => [r.name, r.status]));
+    };
+    assert.deepEqual(
+      { first: await statuses("pack"), renamed: await statuses("pack:renamed") },
+      {
+        first: { pack: "done", publish: "done", gate: "done" },
+        renamed: { "pack:renamed": "cached", publish: "cached", gate: "cached" },
+      },
+    );
+  });
+});
+
+describe("refs built by hand", () => {
+  test("a plain { node, output } resolves in cmd, env and an artifact path as one from outputs does, and one outside deps is refused, whole or in a template string", async () => {
+    const seen: Array<{ cmd: string[]; f: string | undefined }> = [];
+    const {
+      ports: p,
+      fs,
+      actionsArtifact: service,
+    } = createTestPorts({
+      sh: {
+        run: async (cmd, opts) => {
+          seen.push({ cmd, f: opts?.env?.F });
+          if (cmd[0] === "build") await fs.writeText(`${opts!.env!.DAGACTIONS_OUT}/main.js`, "js");
+          return { code: 0, stdout: "", stderr: "", output: "", ok: true };
+        },
+      },
+    });
+    const graph = newGraph();
+    const built = run(graph, { name: "build", cmd: ["build"], outputs: { bundle: "main.js" } });
+    const bundle: OutputRef = { node: "build", output: "bundle" };
+    run(graph, { name: "size", cmd: ["size", bundle], env: { F: bundle }, deps: { built } });
+    uploadArtifact(graph, { name: "upload", artifact: "js", path: [bundle], deps: { built } });
+    const elsewhere: OutputRef = { node: "elsewhere", output: "bundle" };
+    const refused = [
+      () => run(graph, { name: "orphan", cmd: ["echo", elsewhere] }),
+      () => run(graph, { name: "templated", cmd: [`--file=${bundle}`], deps: { built } }),
+    ].map((add) => {
+      try {
+        add();
+        return null;
+      } catch (e) {
+        return (e as Error).message;
+      }
+    });
+    const results = await executeUnder(graph, p);
+    const build = results.find((r) => r.name === "build")!;
+    const out = build.status === "done" && `${CAS}/${build.actionKey}/out-${build.contentHash}`;
+    assert.deepEqual(
+      { size: seen.find((s) => s.cmd[0] === "size"), uploads: [...service.uploads], refused },
+      {
+        size: { cmd: ["size", `${out}/main.js`], f: `${out}/main.js` },
+        uploads: [["js", { files: [`${out}/main.js`], rootDirectory: out }]],
+        refused: [
+          "orphan uses elsewhere.outputs.bundle, but elsewhere is not in its deps",
+          "templated: an object in a template string; a ref there must come from a step's outputs",
+        ],
+      },
+    );
+  });
+});
+
 describe("post", () => {
-  test("a post runs after its deps even when they failed, not when its main failed, reads its main's outputs, and sees a failed optional dep's output as empty", async () => {
+  test("a post runs after its deps even when they failed, not when its main failed, reads its main's outputs, and sees a failed settled dep's output as empty", async () => {
     const calls: string[][] = [];
     let testsResult: string | undefined;
     const { ports: p, fs } = createTestPorts();
@@ -376,20 +577,20 @@ describe("post", () => {
       },
     };
     p.sh = sh;
-    const graph = new Graph();
-    const db = run(graph, p, { name: "up:db", cmd: ["db", "start"], outputs: { pid: "pid" } });
-    const broken = run(graph, p, { name: "up:broken", cmd: ["bad"] });
-    const tests = run(graph, p, { name: "tests", cmd: ["bad"], deps: { db } });
-    post(graph, p, {
+    const graph = newGraph();
+    const db = run(graph, { name: "up:db", cmd: ["db", "start"], outputs: { pid: "pid" } });
+    const broken = run(graph, { name: "up:broken", cmd: ["bad"] });
+    const tests = run(graph, { name: "tests", cmd: ["bad"], deps: { db } });
+    post(graph, {
       name: "down:db",
       main: db,
       cmd: ["db", "stop", db.outputs.pid],
       env: { TESTS: tests.outputs.result },
-      deps: { tests: optional(tests) },
+      deps: { tests: settled(tests) },
     });
-    post(graph, p, { name: "down:broken", main: broken, cmd: ["never"], deps: {} });
+    post(graph, { name: "down:broken", main: broken, cmd: ["never"], deps: {} });
 
-    const results = await execute(graph, { cache: new MemCache(), fs: p.fs, casBaseDir: CAS });
+    const results = await executeUnder(graph, p);
     const stop = calls.find((c) => c[1] === "stop")!;
     assert.deepEqual(
       {
@@ -401,13 +602,13 @@ describe("post", () => {
           .describe()
           .filter((n) => n.cacheable === false)
           .map((n) => n.name),
-        posts: postNodes(graph).sort(),
+        posts: Object.fromEntries(postNodes(graph)),
       },
       {
         statuses: {
           "up:db": "done",
-          "up:broken": "fail",
-          tests: "fail",
+          "up:broken": "failed",
+          tests: "failed",
           "down:db": "done",
           "down:broken": "dep-failed",
         },
@@ -415,7 +616,7 @@ describe("post", () => {
         stoppedPid: "42",
         testsResult: "",
         uncached: ["down:db", "down:broken"],
-        posts: ["down:broken", "down:db"],
+        posts: { "down:db": "up:db", "down:broken": "up:broken" },
       },
     );
   });

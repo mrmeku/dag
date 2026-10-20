@@ -12,9 +12,11 @@
   "exports": {
     ".": "./src/index.ts",
     "./fs": "./src/ports/fs.ts",
-    "./fs/node": "./src/ports/node-fs.ts"
+    "./fs/node": "./src/ports/node-fs.ts",
+    "./mermaid": "./src/mermaid.ts"
   },
   "dependencies": {
-    "js-sha256": "^0.11.1"
+    "js-sha256": "^0.11.1",
+    "pathe": "^2.0.3"
   }
 }

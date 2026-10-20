@@ -11,7 +11,8 @@ import { createNodeDagFs } from "@mrmeku/dagraph/fs/node";
 import { registerHooks } from "node:module";
 import { resolve } from "node:path";
 import { pathToFileURL } from "node:url";
-import { DEFAULT_CAS_DIR, DEFAULT_JOURNAL_PATH } from "../config.ts";
+import { check, lock } from "proper-lockfile";
+import { DEFAULT_CAS_DIR, DEFAULT_HISTORY_DIR } from "../config.ts";
 import { artifactServiceAvailable, nullActionsArtifact } from "../ports/actions-artifact.ts";
 import { nullActionsCache } from "../ports/actions-cache.ts";
 import { createGithubCi } from "../ports/github.ts";
@@ -56,10 +57,11 @@ export async function actionOptions(bundleUrl: string): Promise<RunOptions> {
       actionsArtifact: artifactServiceAvailable(process.env)
         ? new DefaultArtifactClient()
         : nullActionsArtifact,
+      lockfile: { lock, check },
       env: process.env,
     },
-    casBaseDir: core.getInput("cas") || DEFAULT_CAS_DIR,
-    journalPath: core.getInput("journal") || DEFAULT_JOURNAL_PATH,
+    casBaseDir: core.getInput("cas-dir") || DEFAULT_CAS_DIR,
+    historyDir: core.getInput("history-dir") || DEFAULT_HISTORY_DIR,
     force: core.getBooleanInput("force"),
     ...(only.length && { only }),
     ...(def.limits && { limits: def.limits }),

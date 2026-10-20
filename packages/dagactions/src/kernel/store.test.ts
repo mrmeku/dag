@@ -1,4 +1,4 @@
-import type { ExecEvent, Node } from "@mrmeku/dagraph";
+import type { ExecEvent, Node, Result } from "@mrmeku/dagraph";
 import assert from "node:assert/strict";
 import { describe, test } from "node:test";
 import { createTestPorts, steppingClock } from "../ports/memory.ts";
@@ -7,7 +7,7 @@ import type { NodeReport } from "./report.ts";
 import { completedLines, initialNodeState, nodeReducer, type NodeState } from "./run-slice.ts";
 import { createRunStore, type RunListener } from "./store.ts";
 
-const node = (name: string, deps: string[] = []): Node => ({ name, kind: name, deps, config: "" });
+const node = (name: string, deps: string[] = []): Node => ({ name, kind: name, deps });
 const [a, b, c, d, f, save] = [
   node("a"),
   node("b"),
@@ -16,16 +16,26 @@ const [a, b, c, d, f, save] = [
   node("f", ["a"]),
   node("save"),
 ];
-const built = (n: Node, key: string): ExecEvent => {
-  return { type: "done", node: n, actionKey: key, outputs: key, contentHash: "h", elapsed: 1 };
-};
-const failed = (n: Node, key: string, error: Error): ExecEvent => {
-  return { type: "fail", node: n, actionKey: key, error, elapsed: 1 };
-};
+type Settled<R = Result> = R extends unknown ? Omit<R, "name"> : never;
+const settled = (n: Node, result: Settled): ExecEvent => ({
+  type: "result",
+  node: n.name,
+  result: { name: n.name, ...result },
+});
+const built = (n: Node, key: string): ExecEvent =>
+  settled(n, { actionKey: key, status: "done", outputs: key, contentHash: "h", elapsed: 1 });
+const failed = (n: Node, key: string, message: string, cause?: unknown): ExecEvent =>
+  settled(n, {
+    actionKey: key,
+    status: "failed",
+    error: { name: "Error", message, ...(cause !== undefined && { cause }) },
+    elapsed: 1,
+  });
 const started = (n: Node): ExecEvent[] => [
-  { type: "dispatch", node: n },
-  { type: "start", node: n },
+  { type: "dispatch", node: n.name },
+  { type: "start", node: n.name },
 ];
+const printed = (n: Node, chunk: string): ExecEvent => ({ type: "output", node: n.name, chunk });
 const command = { argv: ["make", "b"], cwd: ".", code: 2 };
 const files = {
   "/cas/last-run.json": JSON.stringify({ durations: { a: 500, f: 1500 } }),
@@ -76,7 +86,7 @@ async function transcript(lastRunAtBegin: boolean) {
             nodeState.node.name,
             nodeState.status,
             log,
-            (nodeState.status === "fail" && nodeState.command) || "no command",
+            (nodeState.status === "failed" && nodeState.command) || "no command",
           ]),
         finish: (pass, nodes) =>
           void heard.push([
@@ -94,26 +104,23 @@ async function transcript(lastRunAtBegin: boolean) {
     lastRunAtBegin,
   );
   store.begin(main);
-  events(...started(a));
-  store.onOutput(a, "a out\npa");
-  store.onOutput(a, "rt");
-  events(...started(b));
-  store.onOutput(b, "::debug::walking\nb out\n");
+  events(...started(a), printed(a, "a out\npa"), printed(a, "rt"));
+  events(...started(b), printed(b, "::debug::walking\nb out\n"));
   events(
     built(a, "ka"),
     ...started(f),
-    failed(b, "kb", new Error("make b exited 2", { cause: command })),
-    { type: "dispatch", node: c },
-    { type: "cached", node: c, actionKey: "kc", outputs: "kc", contentHash: "h" },
-    { type: "dep-failed", node: d, error: new Error("dependency b failed") },
-    failed(f, "kf", new Error("upload refused", { cause: new Error("ECONNREFUSED") })),
+    failed(b, "kb", "make b exited 2", command),
+    { type: "dispatch", node: "c" },
+    settled(c, { actionKey: "kc", status: "cached", outputs: "kc", contentHash: "h" }),
+    settled(d, { actionKey: "", status: "dep-failed", dep: "b" }),
+    failed(f, "kf", "upload refused", new Error("ECONNREFUSED")),
     ...started(save),
-    { type: "cancelled", node: save, actionKey: "ks" },
+    settled(save, { actionKey: "ks", status: "cancelled" }),
   );
   store.begin(post);
   events(...started(save));
   await new Promise(setImmediate);
-  store.onOutput(save, "saved\n");
+  events(printed(save, "saved\n"));
   events(built(save, "kp"));
   await store.finish(post, await store.report(post));
   return heard;
@@ -131,10 +138,10 @@ async function failedRun() {
     ...started(a),
     built(a, "ka"),
     ...started(b),
-    failed(b, "kb", new Error("make b exited 2", { cause: command })),
-    { type: "dep-failed", node: d, error: new Error("dependency b failed") },
+    failed(b, "kb", "make b exited 2", command),
+    settled(d, { actionKey: "", status: "dep-failed", dep: "b" }),
     ...started(c),
-    { type: "cancelled", node: c, actionKey: "kc" },
+    settled(c, { actionKey: "kc", status: "cancelled" }),
     ...started(save),
   );
   return { fs, store, pass, reports: await store.report(pass) };
@@ -156,17 +163,17 @@ describe("run store", () => {
       ["start", "b", "running", undefined],
       ["settle", "a", "done", ["a out", "part"], "no command"],
       ["start", "f", "running", 1500],
-      ["settle", "b", "fail", ["b out"], command],
+      ["settle", "b", "failed", ["b out"], command],
       ["settle", "c", "cached", ["c from an earlier run"], "no command"],
       ["settle", "d", "dep-failed", [], "no command"],
-      ["settle", "f", "fail", [], "no command"],
+      ["settle", "f", "failed", [], "no command"],
       ["start", "save", "running", undefined],
       ["settle", "save", "cancelled", [], "no command"],
       ["begin", "post", false],
       ["start", "save", "running", undefined],
       ["immediate.output", "save", ["saved"]],
       ["settle", "save", "done", ["saved"], "no command"],
-      ["finish", "post", ["save done in 2000ms"]],
+      ["finish", "post", ["save done in 1000ms"]],
     ]);
   });
 
@@ -188,8 +195,8 @@ describe("run store", () => {
     const { store, events } = storeOf([]);
     store.begin(pass);
     events(
-      { type: "dispatch", node: a },
-      { type: "cached", node: a, actionKey: "ka", outputs: "ka", contentHash: "h" },
+      { type: "dispatch", node: "a" },
+      settled(a, { actionKey: "ka", status: "cached", outputs: "ka", contentHash: "h" }),
     );
     assert.deepEqual(await store.report(pass), [
       { ...a, status: "cached", start: 0, duration: 1000, previous: 500, outputs: "ka" },
@@ -199,9 +206,9 @@ describe("run store", () => {
   test("a pass's report: the nodes that settled, as they ended", async () => {
     const { reports } = await failedRun();
     assert.deepEqual(reports, [
-      { ...a, status: "done", start: 0, duration: 2000, previous: 500, outputs: "ka" },
-      { ...b, status: "fail", start: 3000, duration: 2000, error: "make b exited 2" },
-      { ...c, status: "cancelled", start: 7000, duration: 2000 },
+      { ...a, status: "done", start: 1000, duration: 1000, previous: 500, outputs: "ka" },
+      { ...b, status: "failed", start: 4000, duration: 1000, error: "make b exited 2" },
+      { ...c, status: "cancelled", start: 8000, duration: 1000 },
       { ...d, status: "dep-failed", error: "dependency b failed" },
     ]);
   });
@@ -211,7 +218,7 @@ describe("run store", () => {
     fs.files.set("/cas/last-run.json", JSON.stringify({ durations: { a: 500 } }));
     await store.report(pass);
     assert.deepEqual(JSON.parse(fs.files.get("/cas/last-run.json") as string), {
-      durations: { a: 2000, b: 2000, f: 1500 },
+      durations: { a: 1000, b: 1000, f: 1500 },
     });
   });
 
@@ -227,8 +234,8 @@ describe("run store", () => {
         file: JSON.parse(fs.files.get("/cas/last-run.json") as string),
       },
       {
-        reports: [{ ...a, status: "done", start: 0, duration: 2000, outputs: "ka" }],
-        file: { durations: { a: 2000 } },
+        reports: [{ ...a, status: "done", start: 1000, duration: 1000, outputs: "ka" }],
+        file: { durations: { a: 1000 } },
       },
     );
   });
@@ -293,8 +300,7 @@ describe("run store", () => {
       { immediate: { output: (_nodeState, lines) => void heard.push(lines) } },
     ]);
     store.begin(pass);
-    events(...started(a));
-    store.onOutput(a, "a out\n");
+    events(...started(a), printed(a, "a out\n"));
     const error = await store.report(pass).catch((e: Error) => e.message);
     assert.deepEqual({ heard, error }, { heard: [["a out"]], error: "a broken listener" });
   });
@@ -305,7 +311,7 @@ describe("run store", () => {
       let nodeState: NodeState = initialNodeState(node("n"));
       for (const chunk of chunks) {
         completed.push(...completedLines(nodeState.unfinishedLine, chunk));
-        nodeState = nodeReducer(nodeState, { type: "outputPrinted", node: nodeState.node, chunk });
+        nodeState = nodeReducer(nodeState, { type: "output", node: "n", chunk });
       }
       return { completed, unfinishedLine: nodeState.unfinishedLine, lastLine: nodeState.lastLine };
     };
@@ -355,17 +361,14 @@ describe("run store", () => {
 
   test("durations, timeouts and outcomes in a few words", () => {
     const timedOut = (timeoutMs: number) => {
-      const error = Object.assign(new Error("timed out"), { name: "TimeoutError" });
-      const n = { ...node("n"), timeoutMs };
-      const failed = nodeReducer(initialNodeState(n), {
-        type: "fail",
-        node: n,
-        actionKey: "k",
-        error,
-        elapsed: 1,
+      const error = { name: "TimeoutError", message: "timed out" };
+      const failed = nodeReducer(initialNodeState({ ...node("n"), timeoutMs }), {
+        type: "result",
+        node: "n",
+        result: { name: "n", actionKey: "k", status: "failed", error, elapsed: 1 },
         occurredAt: 0,
       });
-      assert(failed.status === "fail");
+      assert(failed.status === "failed");
       return failed.error;
     };
     const ended = (status: NodeReport["status"]): NodeReport => ({ ...node(status), status });

@@ -1,5 +1,7 @@
 import assert from "node:assert/strict";
-import { existsSync, mkdtempSync, rmSync } from "node:fs";
+import { spawn } from "node:child_process";
+import { once } from "node:events";
+import { existsSync, mkdtempSync, readdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, test } from "node:test";
@@ -62,6 +64,57 @@ describe("createSh with a signal", () => {
   });
 });
 
+describe("createSh with children", () => {
+  test("a cancelled command's children stop with it, in the foreground or in the background, where a job gets SIGTERM to stop cleanly before SIGKILL", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "dagactions-sh-"));
+    try {
+      const sh = createSh({ sigintGraceMs: 200, sigtermGraceMs: 200, streamDrainGraceMs: 200 });
+      const controller = new AbortController();
+      const running = [
+        // Waited on in the foreground, as npm run and make do; node resets SIGINT to the default.
+        sh.run(
+          [
+            "sh",
+            "-c",
+            `node -e "setTimeout(() => require('fs').writeFileSync('${join(dir, "foreground")}', ''), 1000)"; true`,
+          ],
+          { signal: controller.signal },
+        ),
+        // Started with &, so it ignores SIGINT, and holding none of the command's output: only
+        // what the group gets once the command exits stops it.
+        sh.run(["sh", "-c", `(sleep 1; : > ${join(dir, "background")}) >/dev/null 2>&1 & wait`], {
+          signal: controller.signal,
+        }),
+        // A background job that stops cleanly on SIGTERM gets the chance.
+        sh.run(
+          [
+            "sh",
+            "-c",
+            `(trap ': > ${join(dir, "graceful")}; exit' TERM; sleep 5 & wait) >/dev/null 2>&1 & wait`,
+          ],
+          { signal: controller.signal },
+        ),
+        // One that ignores SIGTERM too gets SIGKILL once the grace is out.
+        sh.run(
+          [
+            "sh",
+            "-c",
+            `(trap '' TERM; sleep 1; : > ${join(dir, "stubborn")}) >/dev/null 2>&1 & wait`,
+          ],
+          { signal: controller.signal },
+        ),
+      ];
+      await new Promise((r) => setTimeout(r, 300));
+      controller.abort();
+      await Promise.all(running);
+      await new Promise((r) => setTimeout(r, 1200));
+      assert.deepEqual(readdirSync(dir), ["graceful"]);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
 describe("createSh output", () => {
   test("stdout and stderr keep each stream apart and the order they arrived in, and stream as they arrive", async () => {
     // The pauses let each write reach the parent before the next, as a real tool's lines do.
@@ -116,6 +169,73 @@ describe("createSh env", () => {
       assert.equal(r.stdout, "unset set\n");
     } finally {
       delete process.env.DAGACTIONS_TEST_INHERITED;
+    }
+  });
+});
+
+describe("abortOnSignals", () => {
+  test("a second signal exits at once and kills what the running commands started", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "dagactions-signals-"));
+    const [ready, late] = [join(dir, "ready"), join(dir, "late")];
+    // Stops only on a second SIGINT, as a server that shuts down gracefully does; else writes `late`.
+    const command = `
+      let n = 0;
+      process.on("SIGINT", () => ++n === 2 && process.exit(1));
+      require("fs").writeFileSync(${JSON.stringify(ready)}, "");
+      setTimeout(() => require("fs").writeFileSync(${JSON.stringify(late)}, ""), 1500);
+    `;
+    const script = `
+      import { abortOnSignals, createSh } from ${JSON.stringify(new URL("./real.ts", import.meta.url).pathname)};
+      await createSh().run(["node", "-e", ${JSON.stringify(command)}], { signal: abortOnSignals() });
+    `;
+    try {
+      const parent = spawn("node", ["--input-type=module", "-e", script], { stdio: "ignore" });
+      const exited = once(parent, "exit");
+      await until(() => existsSync(ready));
+      parent.kill("SIGINT");
+      await new Promise((r) => setTimeout(r, 200));
+      parent.kill("SIGINT");
+      const [code] = await exited;
+      await new Promise((r) => setTimeout(r, 2000));
+      assert.deepEqual({ code, late: existsSync(late) }, { code: 130, late: false });
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("SIGHUP cancels as SIGINT does, and a process whose terminal is gone still finishes its cleanup", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "dagactions-signals-"));
+    const [ready, done] = [join(dir, "ready"), join(dir, "done")];
+    // On abort, the cleanup prints, as a post pass does, then records that it finished and exits.
+    const script = `
+      import { writeFileSync } from "node:fs";
+      import { abortOnSignals } from ${JSON.stringify(new URL("./real.ts", import.meta.url).pathname)};
+      abortOnSignals().addEventListener("abort", () => {
+        for (let i = 0; i < 100; i++) process.stdout.write("cleaning up\\n");
+        setTimeout(() => {
+          writeFileSync(${JSON.stringify(done)}, "");
+          process.exit(0);
+        }, 100);
+      });
+      writeFileSync(${JSON.stringify(ready)}, "");
+      setTimeout(() => {}, 5000);
+    `;
+    try {
+      const child = spawn("node", ["--input-type=module", "-e", script], {
+        stdio: ["ignore", "pipe", "pipe"],
+      });
+      const exited = once(child, "exit");
+      await until(() => existsSync(ready));
+      child.stdout.destroy();
+      child.stderr.destroy();
+      child.kill("SIGHUP");
+      const [code, signal] = await exited;
+      assert.deepEqual(
+        { code, signal, finished: existsSync(done) },
+        { code: 0, signal: null, finished: true },
+      );
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
     }
   });
 });

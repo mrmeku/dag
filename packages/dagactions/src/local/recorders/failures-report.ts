@@ -91,11 +91,11 @@ function failuresReportMarkdown(run: RunState, localContext: LocalContext): stri
     // Its own error too: a node that ran no command may also have failed for a reason of its own.
     const nameWithError = (name: string) => {
       const consequence = run.nodes.get(name);
-      const error = consequence?.status === "fail" ? consequence.error : "";
+      const error = consequence?.status === "failed" ? consequence.error : "";
       return `${inlineCode(name)} (${logLines(error)[0] ?? "failed"})`;
     };
     markdownLines.push(
-      `## ${STATUS_ICON.fail} ${name} · ${detailOf(nodeState)}`,
+      `## ${STATUS_ICON.failed} ${name} · ${detailOf(nodeState)}`,
       "",
       ...(nodeState.command
         ? [
@@ -136,7 +136,7 @@ export function createFailuresReport(
   return {
     begin: (_pass, run) => writeReport(run),
     settle: (nodeState, run) => {
-      if (nodeState.status === "fail" || nodeState.status === "dep-failed") writeReport(run);
+      if (nodeState.status === "failed" || nodeState.status === "dep-failed") writeReport(run);
     },
     close: writeReport,
     interrupt: writeReport,

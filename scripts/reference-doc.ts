@@ -12,7 +12,7 @@ import { program } from "../packages/dagactions/src/cli.ts";
 import {
   DEFAULT_CAS_DIR,
   DEFAULT_FAILURES_REPORT_PATH,
-  DEFAULT_JOURNAL_PATH,
+  DEFAULT_HISTORY_DIR,
   DEFAULT_LOG_DIR,
   DEFAULT_SUMMARY_PATH,
   LAST_RUN_FILE,
@@ -100,7 +100,7 @@ function fileLines(): string[] {
         "The outputs of each step, by cache key. Cache this directory between runs.",
       ],
       [
-        logPath(`${DEFAULT_CAS_DIR}/<key>/out`),
+        logPath(DEFAULT_CAS_DIR, "<key>"),
         "The log of each step, next to the CAS and not in it. Never cache it.",
       ],
       [
@@ -108,8 +108,8 @@ function fileLines(): string[] {
         "The time of each step in the last run. The footer and the step summary compare with it.",
       ],
       [
-        DEFAULT_JOURNAL_PATH,
-        "Each step that finished. `dagactions post` and the action's `post` entry read it.",
+        `${DEFAULT_HISTORY_DIR}/`,
+        "The history of each run: each step that finished, with the run's lock. `dagactions post`, the action's `post` entry and the next run read them.",
       ],
       [`${DEFAULT_LOG_DIR}/`, "Local runs only: the log of each step, while it runs."],
       [DEFAULT_FAILURES_REPORT_PATH, "Local runs only: the report of the failures."],

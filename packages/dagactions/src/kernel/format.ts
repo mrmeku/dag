@@ -1,4 +1,4 @@
-import type { ExecResult } from "@mrmeku/dagraph";
+import type { Result } from "@mrmeku/dagraph";
 import { stripVTControlCharacters } from "node:util";
 import { STATUS_ICON } from "../config.ts";
 import { namesOf, rootFailures, type NodeReport } from "./report.ts";
@@ -15,6 +15,9 @@ export const plural = (count: number, word: string): string =>
 
 export const errorMessage = (error: unknown): string =>
   error instanceof Error ? error.message : String(error);
+
+/** Why a node did not run: a required dep did not succeed. */
+export const depFailedMessage = (dep: string): string => `dependency ${dep} failed`;
 
 /** What a run is called where its output needs a name: its workflow file. */
 export const titleOf = (workflowFile: string | undefined): string => workflowFile ?? "run";
@@ -53,9 +56,9 @@ export function reportHeadline(
   const skippedCount = namesOf(nodes, "dep-failed").length;
   const cancelledCount = namesOf(nodes, "cancelled").length;
   if (rootFailureNames.length > 3)
-    return `${STATUS_ICON.fail} ${rootFailureNames.slice(0, 3).join(", ")} and ${rootFailureNames.length - 3} more failed`;
+    return `${STATUS_ICON.failed} ${rootFailureNames.slice(0, 3).join(", ")} and ${rootFailureNames.length - 3} more failed`;
   if (rootFailureNames.length > 0)
-    return `${STATUS_ICON.fail} ${rootFailureNames.join(", ")} failed`;
+    return `${STATUS_ICON.failed} ${rootFailureNames.join(", ")} failed`;
   if (skippedCount > 0)
     return `${STATUS_ICON["dep-failed"]} ${plural(skippedCount, "node")} skipped, a dependency failed`;
   if (cancelledCount > 0) return cancelledHeadline(cancelledCount);
@@ -63,13 +66,13 @@ export function reportHeadline(
 }
 
 export function countsLine(nodes: NodeReport[], formatCount: (count: number) => string): string {
-  const countOf = (status: ExecResult["status"]) => namesOf(nodes, status).length;
-  return `built ${formatCount(countOf("done"))} · cached ${formatCount(countOf("cached"))} · failed ${formatCount(countOf("fail"))} · skipped ${formatCount(countOf("dep-failed"))}${countOf("cancelled") > 0 ? ` · cancelled ${formatCount(countOf("cancelled"))}` : ""}`;
+  const countOf = (status: Result["status"]) => namesOf(nodes, status).length;
+  return `built ${formatCount(countOf("done"))} · cached ${formatCount(countOf("cached"))} · failed ${formatCount(countOf("failed"))} · skipped ${formatCount(countOf("dep-failed"))}${countOf("cancelled") > 0 ? ` · cancelled ${formatCount(countOf("cancelled"))}` : ""}`;
 }
 
 /** A node's log as its group prints it: the log, then a failure's error; a skipped node's message. */
 export function groupLines(nodeState: NodeState, log: string[]): string[] {
-  if (nodeState.status === "fail") return [...log, "── error ──", ...logLines(nodeState.error)];
+  if (nodeState.status === "failed") return [...log, "── error ──", ...logLines(nodeState.error)];
   if (nodeState.status === "dep-failed") return [nodeState.error];
   return log;
 }

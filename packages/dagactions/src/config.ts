@@ -1,9 +1,14 @@
-import type { ExecResult } from "@mrmeku/dagraph";
+import type { Result } from "@mrmeku/dagraph";
 
 /** Local CAS directory, relative to the repo root. Carried between runs by actions/cache nodes in the workflow. */
 export const DEFAULT_CAS_DIR = ".dagactions/cas";
-/** Every settled node of the last run, written as nodes settle; `dagactions post` reads it. */
-export const DEFAULT_JOURNAL_PATH = ".dagactions/journal.json";
+/** Each run writes its history, its settled nodes, here as they settle; `dagactions post` reads them. */
+export const DEFAULT_HISTORY_DIR = ".dagactions/history";
+/**
+ * A run holds a lock beside its history and refreshes it while it runs. A lock this old belongs to
+ * a run killed outright, whose posts a later run may then settle; proper-lockfile's default.
+ */
+export const HISTORY_LOCK_STALE_MS = 10_000;
 /**
  * A cancelled command gets SIGINT, then SIGTERM, then SIGKILL, this long apart. GitHub's runner
  * sends the step SIGTERM 7500 ms after its own SIGINT, so the sum must leave the main step time
@@ -101,23 +106,10 @@ export const LAST_RUN_FILE = "last-run.json";
  * terminal set (figures' tick and cross; its TUI's skipped and stopped), where a cache hit is a
  * success and the word "cached" says the rest. U+FE0E keeps a browser from drawing an emoji.
  */
-export const STATUS_ICON: Record<ExecResult["status"], string> = {
+export const STATUS_ICON: Record<Result["status"], string> = {
   done: "✔\uFE0E",
   cached: "✔\uFE0E",
-  fail: "✖\uFE0E",
+  failed: "✖\uFE0E",
   "dep-failed": "⏭\uFE0E",
   cancelled: "◼\uFE0E",
 };
-/**
- * What the action's own process holds and a GitHub `run:` step never gets: GitHub's token and the
- * runner's runtime token, which the runner masks, and the runner's service endpoints. Commands
- * never inherit them.
- */
-export const RUNNER_TOKENS = ["GITHUB_TOKEN", "ACTIONS_RUNTIME_TOKEN"] as const;
-export const RUNNER_ENDPOINTS = [
-  "ACTIONS_RUNTIME_URL",
-  "ACTIONS_CACHE_URL",
-  "ACTIONS_RESULTS_URL",
-] as const;
-/** The action's inputs, which a `run:` step never sees: commands never inherit them. */
-export const ACTION_INPUT_ENV = /^INPUT_/;

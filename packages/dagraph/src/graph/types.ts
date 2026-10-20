@@ -1,138 +1,170 @@
-/** Minimum contract for parameters passed to `addNode`. `kind` groups nodes for display/counting. */
-export interface BaseParams {
-  kind: string;
-  deps?: Record<string, NodeRef | OptionalRef | undefined>;
-  /** Files outside the graph this node reads. Their content hashes join the action key. */
-  inputs?: string[];
-}
-
-/** Constrained output type: actions must return file paths. */
+/** What an action returns: a path, a list of paths, or a record of either, all under its outputDir. */
 export type Outputs = string | string[] | Record<string, string | string[]>;
 
+export const NODE_REF: unique symbol = Symbol.for("@mrmeku/dagraph/NodeRef");
+export const OUTPUT_REF: unique symbol = Symbol.for("@mrmeku/dagraph/OutputRef");
+export const FILE_INPUT: unique symbol = Symbol.for("@mrmeku/dagraph/file");
+
 /**
- * Maps a params object's `deps` record to the deserialized output types of each dependency.
- * Unwired (`?`) and optional deps resolve to `T | undefined`.
+ * A ref to one output of a node whose outputs are a record: `pack.outputs.tarball`. In a value
+ * input it resolves to that output's published path or paths, and keys as the role it points
+ * through and the output's name.
  */
-export type InputsFor<P> = P extends { deps: infer D }
+export interface OutputRef<
+  T extends string | string[] | undefined = string | string[] | undefined,
+> {
+  readonly [OUTPUT_REF]: true;
+  readonly node: string;
+  readonly output: string;
+  readonly _T?: T;
+}
+
+type OutputRefs<T, Missing extends undefined> = [T] extends [Record<string, string | string[]>]
+  ? { readonly outputs: { readonly [K in keyof T]: OutputRef<T[K] | Missing> } }
+  : unknown;
+
+/** Handle to a node, returned by `addNode`. `T` is its action's output type. */
+export type NodeRef<T extends Outputs = Outputs> = {
+  readonly name: string;
+  readonly settled?: false;
+  readonly _T?: T;
+} & OutputRefs<T, never>;
+
+/** A dep its node runs without when it does not succeed, as `Promise.allSettled` waits. */
+export type SettledRef<T extends Outputs = Outputs> = {
+  readonly name: string;
+  readonly settled: true;
+  readonly _T?: T;
+} & OutputRefs<T, undefined>;
+
+/** A file input: its path, as given, and its content's hash join the key. */
+export interface FileInput {
+  readonly [FILE_INPUT]: string;
+}
+
+function outputRefsOf(node: string): object {
+  return new Proxy(
+    {},
+    {
+      get: (_, output) =>
+        typeof output === "string" ? { [OUTPUT_REF]: true, node, output } : undefined,
+    },
+  );
+}
+
+export function nodeRef<T extends Outputs>(name: string): NodeRef<T> {
+  return { [NODE_REF]: true, name, outputs: outputRefsOf(name) } as unknown as NodeRef<T>;
+}
+
+/** Mark a dep its node runs without: when it does not succeed, its role is `undefined`. */
+export function settled<T extends Outputs>(ref: NodeRef<T>): SettledRef<T> {
+  return {
+    [NODE_REF]: true,
+    name: ref.name,
+    settled: true,
+    outputs: outputRefsOf(ref.name),
+  } as unknown as SettledRef<T>;
+}
+
+/** A file input, read by the action as its path. */
+export function file(path: string): FileInput {
+  return { [FILE_INPUT]: path };
+}
+
+const branded = (value: unknown, brand: symbol) =>
+  typeof value === "object" && value !== null && brand in value;
+export const isNodeRef = (value: unknown) => branded(value, NODE_REF);
+export const isOutputRef = (value: unknown): value is OutputRef => branded(value, OUTPUT_REF);
+export const isFileInput = (value: unknown): value is FileInput => branded(value, FILE_INPUT);
+
+/** What a node may declare: deps by role and inputs by name. An action's `P` narrows both. */
+export interface BaseParams {
+  deps?: Record<string, NodeRef | SettledRef | undefined>;
+  inputs?: object;
+}
+
+/** Each dep's outputs by role, as the action reads them: a `settled` dep's are `T | undefined`. */
+export type DepOutputsOf<P> = P extends { deps?: infer D }
   ? {
-      [K in keyof D]: D[K] extends NodeRef<infer T>
+      [K in keyof NonNullable<D>]: NonNullable<D>[K] extends NodeRef<infer T>
         ? T
-        : D[K] extends NodeRef<infer T> | OptionalRef<infer T> | undefined
+        : NonNullable<D>[K] extends NodeRef<infer T> | SettledRef<infer T> | undefined
           ? T | undefined
           : unknown;
     }
-  : Record<string, never>;
+  : never;
+
+/** An input as the action reads it: a file as its path, an output ref as that output's paths. */
+export type Resolved<V> = V extends FileInput
+  ? string
+  : V extends OutputRef<infer T>
+    ? T
+    : V extends readonly (infer U)[]
+      ? Resolved<U>[]
+      : V extends object
+        ? { [K in keyof V]: Resolved<V[K]> }
+        : V;
+
+type NodeInputsOf<P> = P extends { inputs?: infer I } ? NonNullable<I> : unknown;
 
 /**
- * What the executor tells a running action. The signal fires when the execution is cancelled
- * (with the execution signal's reason) or when the node's `timeoutMs` elapses (with a
- * "TimeoutError" DOMException, as `AbortSignal.timeout` aborts). Once it fires the node cannot
- * succeed, whatever the action returns. `output` takes what the action prints as it prints it;
- * the executor hands each chunk to `ExecuteOptions.onOutput` with the node.
+ * Everything one call of an action gets. What is keyed: `inputs` and `depOutputs`. Its tools:
+ * `ports`. What the attempt gives: `outputDir`, a new, empty directory only this attempt writes;
+ * `signal`, which fires on the node's timeout or the execution's cancel; and `output`, for what
+ * the action prints, in chunks as printed.
  */
-export interface ActionContext {
-  signal?: AbortSignal;
-  output?: (chunk: string) => void;
+export interface ActionContext<
+  Ports = unknown,
+  P extends BaseParams = BaseParams,
+  I = Record<string, unknown>,
+> {
+  inputs: Resolved<I & NodeInputsOf<P>>;
+  depOutputs: DepOutputsOf<P>;
+  ports: Ports;
+  outputDir: string;
+  signal: AbortSignal;
+  output: (chunk: string) => void;
 }
 
 /**
- * User-supplied function that implements a DAG node's work. Receives typed params, dep outputs,
- * the CAS output dir, and the execution's context; an action that can stop early watches
- * `ctx.signal`, the rest ignore the argument.
+ * For a dep its nodes read only in part, that part as a fingerprint by role. The string's hash
+ * stands in for the dep's content hash in the key.
  */
-export type ActionFunc<P extends BaseParams, R extends Outputs> = (
-  params: P,
-  inputs: InputsFor<P>,
-  outputDir: string,
-  ctx?: ActionContext,
-) => Promise<R>;
+export type InvalidateOn<Ports, P extends BaseParams> = {
+  [K in keyof DepOutputsOf<P>]?: (
+    outputs: NonNullable<DepOutputsOf<P>[K]>,
+    ports: Ports,
+  ) => Promise<string> | string;
+};
 
-/** Serializable identity of a DAG node — no closures, safe for cross-process communication. */
-export interface Node {
+/** What `addNode` takes: a name, deps, inputs and meta, and nothing else. */
+export type NodeParams<P extends BaseParams, Meta> = {
+  name?: string;
+  meta?: Meta;
+} & Pick<P, "deps" & keyof P> &
+  (P extends { inputs: infer I }
+    ? { inputs: I & Record<string, unknown> }
+    : { inputs?: Record<string, unknown> });
+
+/**
+ * A node as data, from `graph.describe()`: no action, inputs or fingerprints, so it can cross
+ * into orchestration and into another process when its `meta` can.
+ */
+export interface Node<Meta = unknown> {
   name: string;
   kind: string;
-  /** Names of nodes this node depends on (must complete first). */
+  meta?: Meta;
+  /** The names of the nodes it depends on, once each. */
   deps: string[];
-  /** Serialized configuration — included in the action key so config changes invalidate cache. */
-  config: string;
-  /** Subset of `deps` that may fail: the node runs without their outputs instead of failing too. */
-  optionalDeps?: string[];
-  /**
-   * Paths of files outside the graph this node reads (sources, lockfiles). Hashed into the action
-   * key like dep outputs, so a change to any of them re-runs the node. Paths are hashed as given.
-   */
-  inputs?: string[];
-  /** Optional concurrency group. Nodes sharing a group are subject to a per-group parallelism limit. */
+  /** The deps it runs without when they do not succeed. */
+  settledDeps?: string[];
   concurrencyGroup?: string;
-  /**
-   * `false` makes the node run on every execution: the cache is neither read nor written for it.
-   * Its outputs are still hashed, so downstream nodes keep caching by content. For nondeterministic
-   * work such as integration tests.
-   */
+  /** `false`: the node's entry is never read or written, so it runs in every execution. */
   cacheable?: boolean;
-  /**
-   * How long the action may run, in ms, before its signal aborts with a "TimeoutError". Counted
-   * from the action's start: queueing, input hashing and the cache lookup do not count. A node
-   * whose timeout fired fails whatever its action returns and is never cached. Not in the action
-   * key: a deadline is a statement to the executor, not about the output.
-   */
+  /** How long the action may run, in ms, before its signal fires with a "TimeoutError". */
   timeoutMs?: number;
 }
 
-/** A Node with an executable action — the unit of work the executor actually runs. */
-export interface RunnableNode extends Node {
-  params: BaseParams;
-  /** Raw executor-level action. Receives dep outputs as `Record<name, Outputs>` and CAS output dir, returns Outputs. */
-  action: (
-    rawInputs: Record<string, Outputs>,
-    outputDir: string,
-    ctx?: ActionContext,
-  ) => Promise<Outputs>;
-  /**
-   * Fingerprints of dependencies, keyed by dep node name, that stand in for the dep's content
-   * hash in this node's action key. Each declares the part of a dep's output this node reads:
-   * while that part is unchanged, the node stays cached whatever else the dep's output changed.
-   */
-  normalize?: Record<string, (outputs: Outputs) => Promise<string>>;
-}
-
-/**
- * Per-dependency fingerprint functions for a node's deps, keyed by dep role. Return a string that
- * captures exactly what the node reads from that dep; it is hashed into the action key in place
- * of the dep's content hash.
- */
-export type Normalizers<P extends BaseParams> = {
-  [K in keyof InputsFor<P>]?: (outputs: NonNullable<InputsFor<P>[K]>) => Promise<string> | string;
-};
-
-/** Output of `graph.analyze()` — structural info, no cache prediction. */
-export interface AnalysisResult {
-  nodes: Node[];
-  total: number;
-  byKind: Map<string, number>;
-}
-
-/** Type-safe handle to a DAG node. T is the output type of the node's action. */
-export interface NodeRef<T extends Outputs = Outputs> {
-  name: string;
-  readonly _T?: T;
-  readonly optional?: false;
-}
-
-/**
- * Handle to a dependency the consumer can run without. If it fails, the consumer still runs
- * (its input is undefined) and re-runs on a later execution once the dependency succeeds.
- */
-export interface OptionalRef<T extends Outputs = Outputs> {
-  name: string;
-  readonly _T?: T;
-  readonly optional: true;
-}
-
-export function optional<T extends Outputs>(ref: NodeRef<T>): OptionalRef<T> {
-  return { name: ref.name, optional: true };
-}
-
 export function requiredDeps(node: Node): string[] {
-  return node.deps.filter((d) => !node.optionalDeps?.includes(d));
+  return node.deps.filter((d) => !node.settledDeps?.includes(d));
 }

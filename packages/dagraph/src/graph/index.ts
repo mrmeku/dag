@@ -1,17 +1,15 @@
-export { addNode } from "./add-node.ts";
-export { Graph } from "./graph.ts";
-export { validateNoCycles } from "./topology.ts";
-export { optional, requiredDeps } from "./types.ts";
+export { Graph, addNode, closure, graphNodes, type GraphNode } from "./graph.ts";
+export { file, isFileInput, requiredDeps, settled } from "./types.ts";
 export type {
   ActionContext,
-  ActionFunc,
-  AnalysisResult,
   BaseParams,
-  InputsFor,
+  DepOutputsOf,
+  FileInput,
+  InvalidateOn,
   Node,
+  NodeParams,
   NodeRef,
-  Normalizers,
-  OptionalRef,
+  OutputRef,
   Outputs,
-  RunnableNode,
+  SettledRef,
 } from "./types.ts";

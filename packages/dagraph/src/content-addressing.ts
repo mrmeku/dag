@@ -1,4 +1,5 @@
 import { sha256 } from "js-sha256";
+import { normalize } from "pathe";
 import type { CacheEntry } from "./cache.ts";
 import type { Outputs } from "./graph/index.ts";
 
@@ -9,8 +10,6 @@ export function collectPaths(outputs: Outputs): string[] {
   return Object.values(outputs).flatMap((v) => (Array.isArray(v) ? v : [v]));
 }
 
-const MISSING_OPTIONAL_DEP = "missing";
-
 export type HashFileFn = (path: string) => Promise<string>;
 
 /** SHA256 hex of in-memory content; the one hash every DagFs implementation should agree with. */
@@ -18,87 +17,80 @@ export function hashBytes(data: string | Uint8Array): string {
   return sha256.hex(data);
 }
 
-/** Per-execution memo for input file hashes, so many nodes listing the same files hash them once. */
+/** Per-execution memo for input file hashes, so many nodes declaring one file hash it once. */
 export type InputHashMemo = Map<string, Promise<string>>;
 
-/**
- * Hash a node's declared input files. Returns a map path -> content hash, empty when the node
- * declares no inputs.
- */
-export async function hashInputs(
-  node: { inputs?: string[] },
-  hashFile: HashFileFn,
-  memo: InputHashMemo = new Map(),
-): Promise<Map<string, string>> {
-  const result = new Map<string, string>();
-  for (const path of node.inputs ?? []) {
-    let pending = memo.get(path);
-    if (!pending) {
-      pending = hashFile(path);
-      memo.set(path, pending);
-    }
-    result.set(path, await pending);
+export function hashInput(path: string, hashFile: HashFileFn, memo: InputHashMemo) {
+  let pending = memo.get(path);
+  if (!pending) {
+    pending = hashFile(path);
+    memo.set(path, pending);
   }
-  return result;
+  return pending;
 }
 
+/** One input as keyed: a file's path and content hash, or a value's canonical JSON. */
+export type KeyedInput = ["file", string, string] | ["value", string];
+/** One dep role as keyed: its content hash, its fingerprint's hash, or the mark for missing. */
+export type KeyedDep = ["content", string] | ["fingerprint", string] | ["missing"];
+
 /**
- * Compute the action key for a node: SHA256(name + config + sorted dep content hashes + sorted
- * input file hashes). This is the cache key — identical inputs always produce the same key. A
- * failed optional dep hashes as missing, so the node re-runs once that dep succeeds. Nodes
- * without inputs hash exactly as before inputs existed.
+ * The action key: SHA256 of each input by name and each dep by role, both sorted. Nothing else
+ * joins it: not the node's name or its deps' names, its kind, its meta or its how-to-run fields.
  */
 export function computeActionKey(
-  node: {
-    name: string;
-    config: string;
-    deps: string[];
-    optionalDeps?: string[];
-    inputs?: string[];
-  },
-  depHashes: Map<string, string>,
-  inputHashes: Map<string, string> = new Map(),
+  inputs: Record<string, KeyedInput>,
+  deps: Record<string, KeyedDep>,
 ): string {
-  const h = sha256.create();
-  h.update(node.name);
-  h.update(node.config);
-  const sorted = [...node.deps].sort();
-  for (const dep of sorted) {
-    h.update(dep);
-    const depHash = depHashes.get(dep);
-    if (depHash !== undefined) h.update(depHash);
-    else if (node.optionalDeps?.includes(dep)) h.update(MISSING_OPTIONAL_DEP);
-    else throw new Error(`BUG: missing content hash for dep "${dep}"`);
-  }
-  for (const path of [...(node.inputs ?? [])].sort()) {
-    const hash = inputHashes.get(path);
-    if (hash === undefined) throw new Error(`BUG: missing content hash for input "${path}"`);
-    h.update(path);
-    h.update(hash);
-  }
-  return h.hex();
+  const sorted = <T>(record: Record<string, T>) =>
+    Object.keys(record)
+      .sort()
+      .map((k) => [k, record[k]]);
+  return sha256.hex(JSON.stringify([sorted(inputs), sorted(deps)]));
+}
+
+/** A path as its output directory sees it: what follows `<keyDir>/<the attempt's directory>/`. */
+function relativeTo(keyDir: string, path: string): string {
+  const normal = normalize(path);
+  if (!normal.startsWith(`${keyDir}/`)) return normal;
+  const rest = normal.slice(keyDir.length + 1);
+  return rest.slice(rest.indexOf("/") + 1);
 }
 
 /**
- * Compute a content hash over a node's output files. Used after execution to detect whether
- * outputs actually changed (early cutoff) and to store in the cache for downstream dep hashing.
+ * A hash of a node's outputs, early cutoff compares it and dependents key on it: each output's
+ * name, each file's path relative to its output directory, and each file's content. So which
+ * file an output names is part of it, wherever the directory sits.
  */
-export async function hashOutputFiles(outputs: Outputs, hashFile: HashFileFn): Promise<string> {
-  const paths = collectPaths(outputs).sort();
-  const h = sha256.create();
-  h.update(String(paths.length));
-  for (const p of paths) h.update(await hashFile(p));
-  return h.hex();
+export async function hashOutputFiles(
+  outputs: Outputs,
+  hashFile: HashFileFn,
+  keyDir: string,
+): Promise<string> {
+  const files = async (paths: string[]) => {
+    const hashed: string[][] = [];
+    for (const path of paths) hashed.push([relativeTo(keyDir, path), await hashFile(path)]);
+    return hashed;
+  };
+  const shape: unknown[] = [];
+  if (typeof outputs === "string") shape.push(...(await files([outputs])));
+  else if (Array.isArray(outputs)) shape.push(await files(outputs));
+  else
+    for (const name of Object.keys(outputs).sort()) {
+      const value = outputs[name]!;
+      shape.push([name, Array.isArray(value) ? await files(value) : await files([value])]);
+    }
+  return sha256.hex(JSON.stringify(shape));
 }
 
-/**
- * Check that a cache entry's output files still exist and match their recorded content hash.
- * Returns false if any file is missing or corrupted. Called before accepting a cache hit.
- */
-export async function verifyOutputs(entry: CacheEntry, hashFile: HashFileFn): Promise<boolean> {
+/** Whether an entry's files still exist and hash to its content hash. */
+export async function verifyOutputs(
+  entry: CacheEntry,
+  hashFile: HashFileFn,
+  keyDir: string,
+): Promise<boolean> {
   try {
-    const currentHash = await hashOutputFiles(entry.outputs, hashFile);
-    return currentHash === entry.contentHash;
+    return (await hashOutputFiles(entry.outputs, hashFile, keyDir)) === entry.contentHash;
   } catch {
     return false;
   }

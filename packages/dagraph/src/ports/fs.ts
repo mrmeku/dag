@@ -1,9 +1,9 @@
 /**
  * Bun-backed DagFs. Published as the `@mrmeku/dagraph/fs` subpath, never from the package
  * index: it imports node:fs, and the index is bundled into Temporal's V8 workflow sandbox,
- * which admits no I/O modules (see sandbox-safe.test.ts).
+ * which admits no I/O modules (lint refuses them elsewhere, eslint.config.ts).
  */
-import { mkdir } from "node:fs/promises";
+import { mkdir, readdir, rename, rm } from "node:fs/promises";
 import type { DagFs } from "../cache.ts";
 
 /** Streams large files through the native hasher instead of reading them whole. */
@@ -22,5 +22,12 @@ export function createBunDagFs(): DagFs {
     ensureDir: async (path) => {
       await mkdir(path, { recursive: true });
     },
+    rename,
+    remove: (path) => rm(path, { recursive: true, force: true }),
+    readdir: (dir) =>
+      readdir(dir).catch((e: NodeJS.ErrnoException) => {
+        if (e.code === "ENOENT") return [];
+        throw e;
+      }),
   };
 }

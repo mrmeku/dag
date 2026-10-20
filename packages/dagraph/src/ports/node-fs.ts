@@ -1,11 +1,11 @@
 /**
  * Node-backed DagFs. Published as the `@mrmeku/dagraph/fs/node` subpath, never from the
  * package index: it imports node:fs, and the index is bundled into Temporal's V8 workflow
- * sandbox, which admits no I/O modules (see sandbox-safe.test.ts).
+ * sandbox, which admits no I/O modules (lint refuses them elsewhere, eslint.config.ts).
  */
 import { createHash } from "node:crypto";
 import { createReadStream } from "node:fs";
-import { access, mkdir, readFile, writeFile } from "node:fs/promises";
+import { access, mkdir, readdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { dirname } from "node:path";
 import type { DagFs } from "../cache.ts";
 
@@ -30,5 +30,12 @@ export function createNodeDagFs(): DagFs {
     ensureDir: async (path) => {
       await mkdir(path, { recursive: true });
     },
+    rename,
+    remove: (path) => rm(path, { recursive: true, force: true }),
+    readdir: (dir) =>
+      readdir(dir).catch((e: NodeJS.ErrnoException) => {
+        if (e.code === "ENOENT") return [];
+        throw e;
+      }),
   };
 }

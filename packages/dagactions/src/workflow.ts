@@ -1,8 +1,8 @@
 import {
-  optional,
+  settled,
   type Graph,
   type NodeRef,
-  type OptionalRef,
+  type SettledRef,
   type ThrottledSchedulerOptions,
 } from "@mrmeku/dagraph";
 import type { CiContext, Ports } from "./ports.ts";
@@ -34,10 +34,12 @@ export type GroupsOf<L> = L extends { concurrencyLimits: infer C }
 /**
  * The step vocabulary bound to one graph, ports and CI context, so a workflow body never
  * threads them through and needs no runtime import but `defineWorkflow`. `G` is the set of
- * concurrency groups the workflow's limits declare.
+ * concurrency groups the workflow's limits declare. A builder that uses no group takes `Steps`,
+ * the facade of every workflow; one that uses `group: "mix"` takes `Steps<"mix">`, and only a
+ * workflow that declares `mix` can call it.
  */
-export interface Steps<G extends string = string> {
-  graph: Graph;
+export interface Steps<G extends string = never> {
+  graph: Graph<Ports>;
   ports: Ports;
   ctx: CiContext;
   glob: (...patterns: string[]) => Promise<string[]>;
@@ -54,16 +56,16 @@ export interface Steps<G extends string = string> {
   saveCache: (opts: {
     name: string;
     cache: RestoreCacheRef;
-    deps: Record<string, NodeRef | OptionalRef | undefined>;
+    deps: Record<string, NodeRef | SettledRef | undefined>;
   }) => NodeRef<string>;
   /** `actions/upload-artifact` as a node: globs and dep outputs up as one artifact of the run. */
   uploadArtifact: (spec: UploadArtifactSpec) => NodeRef<string>;
   /** Mark a dep the consumer runs without when it failed: GitHub's `if: always()`. */
-  optional: typeof optional;
+  settled: typeof settled;
 }
 
 export function createSteps<G extends string>(
-  graph: Graph,
+  graph: Graph<Ports>,
   ports: Ports,
   ctx: CiContext,
 ): Steps<G> {
@@ -73,14 +75,14 @@ export function createSteps<G extends string>(
     ctx,
     glob: (...patterns) => glob(patterns),
     hash: (...patterns) => hashFiles(patterns),
-    run: (spec) => run(graph, ports, spec),
-    runAll: (specs) => runAll(graph, ports, specs),
-    gate: (opts) => gate(graph, ports, opts),
-    post: (spec) => post(graph, ports, spec),
-    restoreCache: (spec) => restoreCache(graph, ports, spec),
-    saveCache: (opts) => saveCache(graph, ports, opts),
-    uploadArtifact: (spec) => uploadArtifact(graph, ports, spec),
-    optional,
+    run: (spec) => run(graph, spec),
+    runAll: (specs) => runAll(graph, specs),
+    gate: (opts) => gate(graph, opts),
+    post: (spec) => post(graph, spec),
+    restoreCache: (spec) => restoreCache(graph, spec),
+    saveCache: (opts) => saveCache(graph, opts),
+    uploadArtifact: (spec) => uploadArtifact(graph, spec),
+    settled,
   };
 }
 

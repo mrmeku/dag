@@ -21,7 +21,7 @@ process.exitCode = await runJob(
 
 ## The store
 
-`createRunStore` follows Redux. `runReducer` is the only writer of the `RunState`: it turns each action (an event of the engine, the output of a step, a pass that begins, a cancellation) into a new state, with a `NodeState` for each step. After each action the store tells its listeners. `store.getState()` returns the state, and `selectors` derives values from it, such as `selectors.nodesInFlight(store.getState())`.
+`createRunStore` follows Redux. `runReducer` is the only writer of the `RunState`: it turns each action (an event of the engine, a step's output among them, a pass that begins, a cancellation) into a new state, with a `NodeState` for each step. After each action the store tells its listeners. `store.getState()` returns the state, and `selectors` derives values from it, such as `selectors.nodesInFlight(store.getState())`.
 
 A `NodeState` is a union on `status`: each variant has only the fields its status can have, so a `FailedNodeState` has an `error` and a `PendingNodeState` has no times. When a command fails, the `FailedNodeState` holds the command as `command`. This value comes from the `cause` of the error, a `CommandCause`: the arguments, the `cwd` and the exit status.
 
