@@ -137,6 +137,8 @@ export function createMemorySyncFs(): SyncFs & { files: Map<string, string> } {
       throw new Error(`ENOENT: no such file or directory, '${file}'`);
     return file;
   };
+  const text = (data: string | NodeJS.ArrayBufferView) =>
+    typeof data === "string" ? data : new TextDecoder().decode(data);
   return {
     files,
     mkdirSync: (path: unknown) => {
@@ -148,10 +150,10 @@ export function createMemorySyncFs(): SyncFs & { files: Map<string, string> } {
         directories.add(directory);
       return undefined;
     },
-    writeFileSync: (path, data) => void files.set(writablePath(path), String(data)),
+    writeFileSync: (path, data) => void files.set(writablePath(path), text(data)),
     appendFileSync: (path, data) => {
       const file = writablePath(path);
-      files.set(file, (files.get(file) ?? "") + String(data));
+      files.set(file, (files.get(file) ?? "") + text(data));
     },
   };
 }

@@ -66,19 +66,35 @@ function relativeTo(keyDir: string, path: string): string {
   return rest.slice(rest.indexOf("/") + 1);
 }
 
+/** Whether a read failed for want of a file: `DagFs.hashFile` rejects so, as `node:fs` does. */
+const isMissing = (e: unknown) => e instanceof Error && "code" in e && e.code === "ENOENT";
+
 /**
  * A hash of a node's outputs, early cutoff compares it and dependents key on it: each output's
  * name, each file's path relative to its output directory, and each file's content. So which
- * file an output names is part of it, wherever the directory sits.
+ * file an output names is part of it, wherever the directory sits. A path with no file rejects,
+ * naming the output by its name, if it has one, and its file.
  */
 export async function hashOutputFiles(
   outputs: Outputs,
   hashFile: HashFileFn,
   keyDir: string,
 ): Promise<string> {
-  const files = async (paths: string[]) => {
+  const files = async (paths: string[], name?: string) => {
     const hashed: string[][] = [];
-    for (const path of paths) hashed.push([relativeTo(keyDir, path), await hashFile(path)]);
+    for (const path of paths) {
+      const file = relativeTo(keyDir, path);
+      try {
+        hashed.push([file, await hashFile(path)]);
+      } catch (e) {
+        if (!isMissing(e)) throw e;
+        const output = name === undefined ? file : `"${name}" (${file})`;
+        throw new Error(
+          `output ${output} was not written. ` +
+            `Write it at \`\${outputDir}/${file}\` before the action returns.`,
+        );
+      }
+    }
     return hashed;
   };
   const shape: unknown[] = [];
@@ -86,7 +102,7 @@ export async function hashOutputFiles(
   else if (Array.isArray(outputs)) shape.push(await files(outputs));
   else
     for (const [name, value] of Object.entries(outputs).sort(([a], [b]) => (a < b ? -1 : 1)))
-      shape.push([name, Array.isArray(value) ? await files(value) : await files([value])]);
+      shape.push([name, await files(Array.isArray(value) ? value : [value], name)]);
   return sha256.hex(JSON.stringify(shape));
 }
 

@@ -21,6 +21,10 @@ export interface DagFs {
   exists(path: string): Promise<boolean>;
   readText(path: string): Promise<string>;
   writeText(path: string, content: string): Promise<void>;
+  /**
+   * The SHA256 hex of a file's content. With no file at `path`, it rejects with an error whose
+   * `code` is `"ENOENT"`, as `node:fs` does: so the engine names an output that was not written.
+   */
   hashFile(path: string): Promise<string>;
   ensureDir(path: string): Promise<void>;
   /** POSIX `rename`: replaces a file at `to` atomically; fails when `to` is a non-empty directory. */

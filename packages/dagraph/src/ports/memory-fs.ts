@@ -10,9 +10,10 @@ export type MemoryDagFs = DagFs & { files: Map<string, string | Uint8Array> };
  */
 export function createMemoryDagFs(initial?: Record<string, string | Uint8Array>): MemoryDagFs {
   const files = new Map<string, string | Uint8Array>(initial ? Object.entries(initial) : []);
+  const missing = (path: string) => Object.assign(new Error(`ENOENT: ${path}`), { code: "ENOENT" });
   const get = (path: string) => {
     const data = files.get(path);
-    if (data === undefined) throw new Error(`ENOENT: ${path}`);
+    if (data === undefined) throw missing(path);
     return data;
   };
   const under = (dir: string) => [...files.keys()].filter((p) => p.startsWith(`${dir}/`));
@@ -34,7 +35,7 @@ export function createMemoryDagFs(initial?: Record<string, string | Uint8Array>)
         files.delete(from);
         return;
       }
-      if (under(from).length === 0) throw new Error(`ENOENT: ${from}`);
+      if (under(from).length === 0) throw missing(from);
       if (under(to).length > 0) throw new Error(`ENOTEMPTY: ${to}`);
       for (const p of under(from)) {
         files.set(to + p.slice(from.length), get(p));

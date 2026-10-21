@@ -69,7 +69,7 @@ The action does not get the node's name or its `meta`. A value that decides the 
 The function writes its files to `outputDir` and returns their paths: a path, a list of paths, or a record of paths and lists of paths. These are the node's outputs. A path can be absolute, as `outputDir` is, or relative to the working directory. The engine stores each one in the form of `casBaseDir`. See [Caching](caching.md#where-the-files-go).
 
 > [!IMPORTANT]
-> Write outputs only to `outputDir`. A returned path that is not under `outputDir` fails the node. The engine moves the directory after the action succeeds, so no output can hold its own absolute path or the path of another output. A file that names another output names it relative to itself.
+> Write outputs only to `outputDir`. A returned path that is not under `outputDir` fails the node. So does a returned path with no file, and the error names the output and its file: `output "thumb" (audio.jpg) was not written`. The engine moves the directory after the action succeeds, so no output can hold its own absolute path or the path of another output. A file that names another output names it relative to itself.
 
 ### File handles
 

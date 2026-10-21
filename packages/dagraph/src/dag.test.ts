@@ -1050,6 +1050,69 @@ describe("the CAS", () => {
         double: "84",
       });
     });
+
+  /** Each node's error message, or its status when it did not fail. */
+  const errors = (rs: Result[]) =>
+    Object.fromEntries(rs.map((r) => [r.name, r.status === "failed" ? r.error.message : r.status]));
+
+  for (const [label, createFs] of filesystems)
+    test(`${label} fs: a returned path with no file fails its node, naming the output by its name or as the one path, and the failure is never cached`, async () => {
+      const fs = createFs();
+      const casBaseDir = `${await mkdtemp(join(tmpdir(), "dagraph-"))}/cas`;
+      const c = { ports: { fs }, cache: new FsCache(casBaseDir, fs), fs, casBaseDir };
+      const build = () => {
+        const g = new Graph<Ports>();
+        defineActionWithPorts({
+          kind: "download",
+          inputs: { id: "download" },
+          action: async (c) => ({
+            audio: await write(c, "audio.mp3", "mp3"),
+            thumb: `${c.outputDir}/audio.jpg`,
+          }),
+        }).addNode(g, {});
+        defineActionWithPorts({
+          kind: "thumbnail",
+          inputs: { id: "thumbnail" },
+          action: async (c) => `${c.outputDir}/art/audio.jpg`,
+        }).addNode(g, {});
+        return g;
+      };
+      const first = await execute(build(), c);
+      const second = await execute(build(), c);
+      const entries = await Promise.all(second.map((r) => c.cache.get(r.actionKey)));
+      await rm(dirname(casBaseDir), { recursive: true, force: true });
+      const fix = (file: string) =>
+        `Write it at \`\${outputDir}/${file}\` before the action returns.`;
+      const failed = {
+        download: `output "thumb" (audio.jpg) was not written. ${fix("audio.jpg")}`,
+        thumbnail: `output art/audio.jpg was not written. ${fix("art/audio.jpg")}`,
+      };
+      expect({ first: errors(first), second: errors(second), entries }).toEqual({
+        first: failed,
+        second: failed,
+        entries: [undefined, undefined],
+      });
+    });
+
+  for (const [label, createFs] of filesystems.filter(([label]) => label !== "memory"))
+    test(`${label} fs: a returned path that cannot be read for another reason keeps its own error`, async () => {
+      const fs = createFs();
+      const casBaseDir = `${await mkdtemp(join(tmpdir(), "dagraph-"))}/cas`;
+      const c = { ports: { fs }, cache: new FsCache(casBaseDir, fs), fs, casBaseDir };
+      const g = new Graph<Ports>();
+      defineActionWithPorts({
+        kind: "frames",
+        action: async (c) => {
+          await c.ports.fs.ensureDir(`${c.outputDir}/frames`);
+          return `${c.outputDir}/frames`;
+        },
+      }).addNode(g, {});
+      const results = await execute(g, c);
+      await rm(dirname(casBaseDir), { recursive: true, force: true });
+      expect(results.map((r) => r.status === "failed" && r.error.message.split(":")[0])).toEqual([
+        "EISDIR",
+      ]);
+    });
 });
 
 describe("cacheable: false", () => {
