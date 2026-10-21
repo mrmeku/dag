@@ -61,4 +61,11 @@ export {
   unboundedScheduler,
   type ThrottledSchedulerOptions,
 } from "./schedulers.ts";
-export { tally, type ExecEvent, type Result, type Tally } from "./types.ts";
+export {
+  isResult,
+  tally,
+  type ExecEvent,
+  type JsonValue,
+  type Result,
+  type Tally,
+} from "./types.ts";

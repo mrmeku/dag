@@ -10,7 +10,8 @@ export type { Ready } from "./exec-state.ts";
  * Processes one node somewhere, given its deps' entries by dep name, and returns its result. On
  * a miss it awaits `acquire`, the gate the scheduler answers once the node's group has a slot,
  * before the action runs. `acquire` rejects once the execution is cancelled. A rejection of
- * `RunNode` becomes a failure with no cause, or `cancelled` once the execution is cancelled.
+ * `RunNode` becomes a failure, as an action's error does, or `cancelled` once the execution is
+ * cancelled.
  */
 export type RunNode<Meta = unknown> = (
   node: Node<Meta>,
@@ -134,8 +135,13 @@ export async function orchestrate<Meta>(
       void run(node, state.depEntries(node), acquireFor(node))
         .catch((e): Result => {
           if (signal?.aborted) return { name: node.name, actionKey: "", status: "cancelled" };
-          const { cause: _, ...error } = errorOf(e);
-          return { name: node.name, actionKey: "", status: "failed", error, elapsed: 0 };
+          return {
+            name: node.name,
+            actionKey: "",
+            status: "failed",
+            error: errorOf(e),
+            elapsed: 0,
+          };
         })
         .then((result) => {
           processing--;

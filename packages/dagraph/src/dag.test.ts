@@ -33,7 +33,7 @@ import { createBunDagFs } from "./ports/fs.ts";
 import { createMemoryDagFs, type MemoryDagFs } from "./ports/memory-fs.ts";
 import { createNodeDagFs } from "./ports/node-fs.ts";
 import { throttledScheduler } from "./schedulers.ts";
-import { tally, type ExecEvent, type Result } from "./types.ts";
+import { isResult, tally, type ExecEvent, type Result } from "./types.ts";
 import { errorMessage } from "./utils.ts";
 
 interface Ports {
@@ -1201,6 +1201,139 @@ describe("events", () => {
         },
       ],
     ]);
+  });
+});
+
+describe("a result is plain data", () => {
+  test("a failure's cause is JSON as the engine builds it: JSON copied, an Error as its name, message and cause, anything else dropped; a result of every status survives JSON and reads back as a result", async () => {
+    const { ctx } = setup();
+    const errorLoop = new Error("first");
+    errorLoop.cause = new Error("second", { cause: errorLoop });
+    const objectLoop: Record<string, unknown> = { code: 1 };
+    objectLoop.self = objectLoop;
+    const mutated: Record<string, unknown> = { code: 1 };
+    const causes: Record<string, unknown> = {
+      command: { argv: ["bun", "test"], cwd: ".", code: 1 },
+      nested: new TypeError("inner", {
+        cause: new RangeError("innermost", { cause: { code: 2 } }),
+      }),
+      errorLoop,
+      objectLoop,
+      bigint: 1n,
+      instance: new Map([["code", 1]]),
+      nan: { ratio: NaN },
+      unreadable: {
+        get code(): number {
+          throw new Error("not now");
+        },
+      },
+      mutated,
+      normalized: { code: -0, signal: undefined },
+    };
+    const g = new Graph<Ports>();
+    const failing = Object.fromEntries(
+      Object.entries(causes).map(([name, cause]) => [
+        name,
+        task(g, name, {
+          run: () => {
+            throw new Error(`${name} failed`, { cause });
+          },
+        }),
+      ]),
+    );
+    task(g, "made");
+    task(g, "held", { deps: { command: failing.command } });
+    const first = await execute(g, ctx);
+    // The action changes its cause after the failure: the recorded one is a copy.
+    mutated.code = 2;
+    mutated.late = 1n;
+    const results = [
+      ...first,
+      ...(await execute(g, ctx)),
+      ...(await execute(g, ctx, { signal: AbortSignal.abort() })),
+    ];
+    const received: unknown = JSON.parse(JSON.stringify(results));
+    const dropped = (name: string) => ({ name: "Error", message: `${name} failed` });
+    expect({
+      errors: Object.fromEntries(
+        first.flatMap((r) => (r.status === "failed" ? [[r.name, r.error]] : [])),
+      ),
+      tally: tally(results),
+      received,
+      everyIsResult: Array.isArray(received) && received.every(isResult),
+    }).toStrictEqual({
+      errors: {
+        command: {
+          name: "Error",
+          message: "command failed",
+          cause: { argv: ["bun", "test"], cwd: ".", code: 1 },
+        },
+        nested: {
+          name: "Error",
+          message: "nested failed",
+          cause: {
+            name: "TypeError",
+            message: "inner",
+            cause: { name: "RangeError", message: "innermost", cause: { code: 2 } },
+          },
+        },
+        // The chain stops at the error that comes again.
+        errorLoop: {
+          name: "Error",
+          message: "errorLoop failed",
+          cause: { name: "Error", message: "first", cause: { name: "Error", message: "second" } },
+        },
+        objectLoop: dropped("objectLoop"),
+        bigint: dropped("bigint"),
+        instance: dropped("instance"),
+        nan: dropped("nan"),
+        unreadable: dropped("unreadable"),
+        mutated: { name: "Error", message: "mutated failed", cause: { code: 1 } },
+        normalized: { name: "Error", message: "normalized failed", cause: { code: 0 } },
+      },
+      tally: { done: 1, cached: 1, failed: 20, "dep-failed": 2, cancelled: 12 },
+      received: results,
+      everyIsResult: true,
+    });
+  });
+
+  test("isResult refuses a record that lacks a field its status needs, or whose status no result has", () => {
+    const cached = { name: "a", actionKey: "k", status: "cached", outputs: "/o", contentHash: "h" };
+    const records = {
+      // Only a node that ran has an elapsed time.
+      cached,
+      doneWithoutElapsed: { ...cached, status: "done" },
+      cachedWithoutHash: { name: "a", actionKey: "k", status: "cached", outputs: "/o" },
+      outputsNotPaths: { ...cached, outputs: 1 },
+      failedWithoutMessage: {
+        name: "a",
+        actionKey: "k",
+        status: "failed",
+        error: { name: "Error" },
+        elapsed: 1,
+      },
+      causeNotJson: {
+        name: "a",
+        actionKey: "k",
+        status: "failed",
+        error: { name: "Error", message: "m", cause: 1n },
+        elapsed: 1,
+      },
+      depFailedWithoutDep: { name: "a", actionKey: "", status: "dep-failed" },
+      withoutActionKey: { name: "a", status: "cancelled" },
+      unknownStatus: { name: "a", actionKey: "", status: "skipped" },
+    };
+    expect(Object.fromEntries(Object.entries(records).map(([k, v]) => [k, isResult(v)]))).toEqual({
+      cached: true,
+      doneWithoutElapsed: false,
+      cachedWithoutHash: false,
+      outputsNotPaths: false,
+      failedWithoutMessage: false,
+      causeNotJson: false,
+      depFailedWithoutDep: false,
+      withoutActionKey: false,
+      unknownStatus: false,
+    });
   });
 });
 

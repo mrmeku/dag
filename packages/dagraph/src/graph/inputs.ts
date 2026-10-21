@@ -1,5 +1,5 @@
 import type { CacheEntry } from "../cache.ts";
-import { errorMessage } from "../utils.ts";
+import { errorMessage, isPlainObject } from "../utils.ts";
 import {
   isFileInput,
   isOutputRef,
@@ -7,11 +7,6 @@ import {
   type OutputRef,
   type SettledOutputRef,
 } from "./types.ts";
-
-const isPlainObject = (value: object) => {
-  const proto: unknown = Object.getPrototypeOf(value);
-  return proto === null || Object.getPrototypeOf(proto) === null;
-};
 
 /**
  * A copy of a value input, `undefined` properties dropped. Its type is checked already; what no

@@ -205,7 +205,7 @@ export async function processNode<Ports, Meta>(
   };
   options.onEvent?.({ type: "start", node: name, ...meta });
   const startTime = Date.now();
-  const failed = (error: { name: string; message: string; cause?: unknown }): Result => ({
+  const failed = (error: ReturnType<typeof errorOf>): Result => ({
     name,
     actionKey,
     status: "failed",

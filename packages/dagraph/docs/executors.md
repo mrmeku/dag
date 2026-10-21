@@ -35,7 +35,7 @@ For each node that the scheduler admits, `orchestrate` emits `dispatch` and call
 | `depEntries` | The entry (`outputs`, `contentHash`) of each dependency that succeeded, by dependency name. A dependency missing from it did not succeed.                                                                                                                |
 | `acquire`    | The gate of the node's concurrency group. Await it after a cache miss, before the action runs. The scheduler answers it once the group has a slot. It rejects only once the execution is cancelled, and `processNode` then settles the node `cancelled`. |
 
-`RunNode` processes the node somewhere and returns its `Result`. If it rejects, the result is a failure with no `cause`, or `cancelled` when the execution was cancelled.
+`RunNode` processes the node somewhere and returns its `Result`. If it rejects, the result is a failure, as when an action throws, or `cancelled` when the execution was cancelled.
 
 A hit never calls `acquire`, so it never waits for its group. A node without a `concurrencyGroup` gets through `acquire` at once.
 
@@ -94,7 +94,7 @@ return processNode(
 This `RunNode` looks each node up before it sends it to work, so a hit takes no slot on the worker either. These rules apply:
 
 - `orchestrate` emits only `dispatch` and `result`. To get `start` and `output`, forward the worker's events into your own stream.
-- A failed result can hold the `cause` of the error. Serialize it, or remove it, when you send the result between processes.
+- A result is plain data, the `cause` of a failure included. Send it between processes as it is, and check what comes back with `isResult`.
 - To replay a node, return its recorded `Result`. An executor that keeps results between processes keeps them as results.
 
 ## Choose for each node

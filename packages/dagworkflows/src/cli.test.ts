@@ -253,7 +253,16 @@ describe("dag post", () => {
     const history = (dir: string) =>
       JSON.stringify({
         workflow: join(dir, "ci.ts"),
-        nodes: { up: { status: "done", outputs: {}, contentHash: "" } },
+        results: {
+          up: {
+            name: "up",
+            actionKey: "k",
+            status: "done",
+            outputs: {},
+            contentHash: "",
+            elapsed: 0,
+          },
+        },
       });
     const { code, stdout } = await cli(workflow, {
       command: "post",

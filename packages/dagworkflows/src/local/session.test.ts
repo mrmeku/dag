@@ -1,4 +1,4 @@
-import type { ExecEvent, Node, Result } from "@mrmeku/dagraph";
+import type { ExecEvent, JsonValue, Node, Result } from "@mrmeku/dagraph";
 import xterm from "@xterm/headless";
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
@@ -133,7 +133,7 @@ const resultOf = (node: Node, result: Settled): ExecEvent => ({
   node: node.name,
   result: { name: node.name, ...result },
 });
-const failureOf = (node: Node, actionKey: string, message: string, cause?: unknown) =>
+const failureOf = (node: Node, actionKey: string, message: string, cause?: JsonValue) =>
   resultOf(node, {
     actionKey,
     status: "failed",

@@ -1,23 +1,18 @@
-import { isOutputs, type DagFs, type ExecEvent, type Outputs } from "@mrmeku/dagraph";
+import { isResult, type DagFs, type ExecEvent, type Result } from "@mrmeku/dagraph";
 import { HISTORY_LOCK_STALE_MS } from "./config.ts";
 import type { Lockfile } from "./ports.ts";
 
-/** One settled node's result: what a later process needs to feed its dependents. */
-export type RunHistoryEntry =
-  | { status: "done" | "cached"; outputs: Outputs; contentHash: string }
-  | { status: "failed" | "cancelled" }
-  | { status: "dep-failed"; dep: string };
-
-export type RunHistory = Record<string, RunHistoryEntry>;
+/** Each settled node's result: what a later process needs to feed its dependents. */
+export type RunHistory = Record<string, Result>;
 
 /**
  * A run's history file: its workflow file (resolved; empty when none was named) and `--only`, so
- * a later pass of the same workflow rebuilds the graph it ran, and its settled nodes.
+ * a later pass of the same workflow rebuilds the graph it ran, and its settled nodes' results.
  */
 export interface RunHistoryFile {
   workflow: string;
   only?: string[];
-  nodes: RunHistory;
+  results: RunHistory;
 }
 
 const lockOptions = (path: string) => ({
@@ -55,62 +50,31 @@ export async function createRunHistory(
     // The run goes on: at worst a later pass takes it for stopped and settles its posts.
     onCompromised: (e) => process.emitWarning(`the lock on ${path} was lost: ${e.message}`),
   });
-  const entries: RunHistory = { ...initial.nodes };
+  const history: RunHistoryFile = { ...initial, results: { ...initial.results } };
   let chain = Promise.resolve();
-  const write = () => {
+  const saveHistory = () => {
     chain = chain.then(async () => {
       const written = `${path}.${crypto.randomUUID()}.tmp`;
-      await fs.writeText(written, JSON.stringify({ ...initial, nodes: entries }, null, 2));
+      await fs.writeText(written, JSON.stringify(history, null, 2));
       await fs.rename(written, path);
     });
     return chain;
   };
+  const recordResult = (node: string, result: Result) => {
+    history.results[node] = result;
+    void saveHistory();
+  };
   return {
     path,
-    entries,
-    begin: write,
-    onEvent: (ev: ExecEvent) => {
-      if (ev.type !== "result") return;
-      const result = ev.result;
-      switch (result.status) {
-        case "done":
-        case "cached":
-          entries[ev.node] = {
-            status: result.status,
-            outputs: result.outputs,
-            contentHash: result.contentHash,
-          };
-          break;
-        case "dep-failed":
-          entries[ev.node] = { status: "dep-failed", dep: result.dep };
-          break;
-        default:
-          entries[ev.node] = { status: result.status };
-      }
-      void write();
+    results: history.results,
+    begin: saveHistory,
+    onEvent: (event: ExecEvent) => {
+      if (event.type === "result") recordResult(event.node, event.result);
     },
     flush: () => chain,
     close: release,
   };
 }
-
-const isHistoryEntry = (value: unknown): value is RunHistoryEntry => {
-  if (typeof value !== "object" || value === null || !("status" in value)) return false;
-  switch (value.status) {
-    case "done":
-    case "cached":
-      return (
-        "outputs" in value &&
-        isOutputs(value.outputs) &&
-        "contentHash" in value &&
-        typeof value.contentHash === "string"
-      );
-    case "dep-failed":
-      return "dep" in value && typeof value.dep === "string";
-    default:
-      return value.status === "failed" || value.status === "cancelled";
-  }
-};
 
 const isHistoryFile = (value: unknown): value is RunHistoryFile =>
   typeof value === "object" &&
@@ -119,13 +83,14 @@ const isHistoryFile = (value: unknown): value is RunHistoryFile =>
   typeof value.workflow === "string" &&
   (!("only" in value) ||
     (Array.isArray(value.only) && value.only.every((n) => typeof n === "string"))) &&
-  "nodes" in value &&
-  typeof value.nodes === "object" &&
-  value.nodes !== null &&
-  Object.values(value.nodes).every(isHistoryEntry);
+  "results" in value &&
+  typeof value.results === "object" &&
+  value.results !== null &&
+  Object.values(value.results).every(isResult);
 
 export async function readRunHistory(fs: DagFs, path: string): Promise<RunHistoryFile> {
   const file: unknown = JSON.parse(await fs.readText(path));
-  if (!isHistoryFile(file)) throw new Error("not a run's history: it has no nodes, or no workflow");
+  if (!isHistoryFile(file))
+    throw new Error("not a run's history: it has no results, or no workflow");
   return file;
 }

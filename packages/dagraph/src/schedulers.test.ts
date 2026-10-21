@@ -195,11 +195,11 @@ describe("orchestrate", () => {
     );
   });
 
-  test("a RunNode that rejects settles its node failed with no cause, or cancelled once the execution is cancelled", async () => {
+  test("a RunNode that rejects settles its node failed, its cause kept as JSON, or cancelled once the execution is cancelled", async () => {
     const controller = new AbortController();
     const run: RunNode = async (n) => {
       if (n.name === "later") controller.abort();
-      throw new RangeError(`${n.name} broke`, { cause: "dropped" });
+      throw new RangeError(`${n.name} broke`, { cause: { code: 1 } });
     };
     const later: Node = { ...node("later", undefined, ["first"]), settledDeps: ["first"] };
     const results = await orchestrate(
@@ -214,7 +214,7 @@ describe("orchestrate", () => {
         name: "first",
         actionKey: "",
         status: "failed",
-        error: { name: "RangeError", message: "first broke" },
+        error: { name: "RangeError", message: "first broke", cause: { code: 1 } },
         elapsed: 0,
       },
       { name: "later", actionKey: "", status: "cancelled" },

@@ -18,7 +18,6 @@ import {
   readRunHistory,
   runHistoryLive,
   type RunHistory,
-  type RunHistoryEntry,
   type RunHistoryFile,
 } from "./history.ts";
 import { errorMessage, titleOf } from "./kernel/format.ts";
@@ -148,7 +147,7 @@ async function settle(
       await drop(path);
       continue;
     }
-    const owed = owedPosts(graph, file.nodes);
+    const owed = owedPosts(graph, file.results);
     if (owed.size === 0) {
       await drop(path);
       continue;
@@ -216,7 +215,7 @@ export async function runWorkflow(opts: RunOptions): Promise<RunOutcome> {
     {
       workflow: workflowOf(opts),
       ...(opts.only?.length && { only: opts.only }),
-      nodes: {},
+      results: {},
     },
   );
   let results: Result[];
@@ -242,7 +241,7 @@ export async function runWorkflow(opts: RunOptions): Promise<RunOutcome> {
     );
     await history.flush();
     // A run that owes nothing leaves no history behind.
-    if (owedPosts(graph, history.entries).size === 0) await ports.fs.remove(history.path);
+    if (owedPosts(graph, history.results).size === 0) await ports.fs.remove(history.path);
   } finally {
     await history.close();
   }
@@ -251,21 +250,8 @@ export async function runWorkflow(opts: RunOptions): Promise<RunOutcome> {
 }
 
 /** A node's result as the run's history recorded it, replayed so the engine feeds its outputs to the post steps. */
-function replay(name: string, entry: RunHistoryEntry | undefined): Result {
-  switch (entry?.status) {
-    case "done":
-    case "cached":
-      // Replayed as cached: it ran in the main run, and its outputs are what matter here.
-      return { name, actionKey: "", ...entry, status: "cached" };
-    case "failed": {
-      const error = { name: "Error", message: "failed in the main run" };
-      return { name, actionKey: "", status: "failed", error, elapsed: 0 };
-    }
-    case "dep-failed":
-      return { name, actionKey: "", status: "dep-failed", dep: entry.dep };
-    default:
-      return { name, actionKey: "", status: "cancelled" };
-  }
+function replay(name: string, recorded: Result | undefined): Result {
+  return recorded ?? { name, actionKey: "", status: "cancelled" };
 }
 
 /**
@@ -302,7 +288,7 @@ async function postPass(
   store: RunStore,
 ): Promise<RunOutcome> {
   const { ports } = opts;
-  const before = { ...history.entries };
+  const before = { ...history.results };
   const pass: Pass = {
     banner: {
       title: `post · ${owed.size} of ${postNodes(graph).size} post steps owed`,

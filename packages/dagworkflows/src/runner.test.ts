@@ -136,9 +136,7 @@ describe("cancel, then post", () => {
     await fastSettled;
     controller.abort();
     const run = await running;
-    const recorded = (await histories(fs)).map((j) =>
-      Object.fromEntries(Object.entries(j.nodes).map(([n, e]) => [n, e.status])),
-    );
+    const recorded = (await histories(fs)).map((j) => j.results);
     const post = await runPost(common);
     const again = await runPost(common);
     const status = (rs: { name: string; status: string }[]) =>
@@ -174,17 +172,8 @@ describe("cancel, then post", () => {
             "down:db": "cancelled",
           },
         },
-        recorded: [
-          {
-            "restore:bun": "done",
-            "up:db": "done",
-            fast: "done",
-            slow: "cancelled",
-            after: "cancelled",
-            "save:bun": "cancelled",
-            "down:db": "cancelled",
-          },
-        ],
+        // Each node's whole result, as the run settled it.
+        recorded: [Object.fromEntries(run.results.map((r) => [r.name, r]))],
         post: { "save:bun": "done", "down:db": "done" },
         again: {},
         calls: [["db", "start"], ["fast"], ["slow"], ["db", "stop"]],
@@ -435,7 +424,7 @@ describe("a damaged history", () => {
         left: [...fs.files.keys()].filter((k) => k.startsWith(HISTORY_DIR)),
       },
       {
-        midWrite: [{ workflow: "", nodes: {} }],
+        midWrite: [{ workflow: "", results: {} }],
         after: [["lint", "done"]],
         annotations: [
           {

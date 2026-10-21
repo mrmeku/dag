@@ -1,4 +1,4 @@
-import type { ExecEvent, Node, Result } from "@mrmeku/dagraph";
+import type { ExecEvent, JsonValue, Node, Result } from "@mrmeku/dagraph";
 import assert from "node:assert/strict";
 import { describe, test } from "node:test";
 import { createTestPorts, steppingClock } from "../ports/memory.ts";
@@ -25,7 +25,7 @@ const settled = (n: Node, result: Settled): ExecEvent => ({
 });
 const built = (n: Node, key: string): ExecEvent =>
   settled(n, { actionKey: key, status: "done", outputs: key, contentHash: "h", elapsed: 1 });
-const failed = (n: Node, key: string, message: string, cause?: unknown): ExecEvent =>
+const failed = (n: Node, key: string, message: string, cause?: JsonValue): ExecEvent =>
   settled(n, {
     actionKey: key,
     status: "failed",
@@ -114,7 +114,7 @@ async function transcript(lastRunAtBegin: boolean) {
     { type: "dispatch", node: "c" },
     settled(c, { actionKey: "kc", status: "cached", outputs: "kc", contentHash: "h" }),
     settled(d, { actionKey: "", status: "dep-failed", dep: "b" }),
-    failed(f, "kf", "upload refused", new Error("ECONNREFUSED")),
+    failed(f, "kf", "upload refused", { name: "Error", message: "ECONNREFUSED" }),
     ...started(save),
     settled(save, { actionKey: "ks", status: "cancelled" }),
   );

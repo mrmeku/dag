@@ -1,19 +1,66 @@
-import type { Outputs } from "./graph/index.ts";
+import { isOutputs, type Outputs } from "./graph/index.ts";
+import { isJsonValue } from "./utils.ts";
+
+/** A value as JSON holds it. A property that is `undefined` is left out when it is written. */
+export type JsonValue =
+  | string
+  | number
+  | boolean
+  | null
+  | readonly JsonValue[]
+  | { readonly [key: string]: JsonValue | undefined };
 
 /**
- * How one node settled. `actionKey` is "" when it never got one. A result is plain data, except
- * `error.cause`, the thrown value as is: an executor that carries a result across processes
- * serializes it or drops it.
+ * How one node settled. `actionKey` is "" when it never got one. A result is plain data, to write
+ * to a file or send to another process as it is. The engine copies a failure's cause when it is
+ * JSON. It changes an `Error` to its name, message and cause, converted the same way. It drops
+ * anything else.
  */
 export type Result = { name: string; actionKey: string } & (
   | { status: "done"; outputs: Outputs; contentHash: string; elapsed: number }
   | { status: "cached"; outputs: Outputs; contentHash: string }
   /** `error.name` is "TimeoutError" after the node's own timeout. */
-  | { status: "failed"; error: { name: string; message: string; cause?: unknown }; elapsed: number }
+  | {
+      status: "failed";
+      error: { name: string; message: string; cause?: JsonValue };
+      elapsed: number;
+    }
   /** `dep` is a required dep that did not succeed. */
   | { status: "dep-failed"; dep: string }
   | { status: "cancelled" }
 );
+
+/** Whether `value` is a `Result`: the guard for one read back from a file or another process. */
+export function isResult(value: unknown): value is Result {
+  if (typeof value !== "object" || value === null || !("status" in value)) return false;
+  if (!("name" in value && typeof value.name === "string")) return false;
+  if (!("actionKey" in value && typeof value.actionKey === "string")) return false;
+  const hasOutputs = "outputs" in value && isOutputs(value.outputs);
+  const hasHash = "contentHash" in value && typeof value.contentHash === "string";
+  const hasElapsed = "elapsed" in value && typeof value.elapsed === "number";
+  switch (value.status) {
+    case "done":
+      return hasOutputs && hasHash && hasElapsed;
+    case "cached":
+      return hasOutputs && hasHash;
+    case "failed":
+      return (
+        hasElapsed &&
+        "error" in value &&
+        typeof value.error === "object" &&
+        value.error !== null &&
+        "name" in value.error &&
+        typeof value.error.name === "string" &&
+        "message" in value.error &&
+        typeof value.error.message === "string" &&
+        (!("cause" in value.error) || isJsonValue(value.error.cause))
+      );
+    case "dep-failed":
+      return "dep" in value && typeof value.dep === "string";
+    default:
+      return value.status === "cancelled";
+  }
+}
 
 export type Tally = Record<Result["status"], number>;
 

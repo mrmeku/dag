@@ -12,7 +12,6 @@ export {
   readRunHistory,
   runHistoryLive,
   type RunHistory,
-  type RunHistoryEntry,
   type RunHistoryFile,
 } from "./history.ts";
 export { formatDuration } from "./kernel/format.ts";

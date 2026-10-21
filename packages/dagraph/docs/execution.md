@@ -113,7 +113,13 @@ A `Scheduler` is a function that gets a `SchedulerContext` and returns when the 
 
 A node succeeded when its result is `done` or `cached`. Only a success has outputs. `done` tells that the action ran, not that its content changed. `tally(results)` counts the results by status, in a record keyed by the five statuses.
 
-A result is plain data, except `error.cause`, which is the value that the action attached, as is.
+A result is plain data, its `error.cause` included, so you can write it to a file or send it to another process as it is. The engine converts the `cause` of the thrown error:
+
+- A string, a finite number, a boolean, `null`, an array or a plain object of these is copied. The copy leaves out a property that is `undefined` and writes `-0` as `0`. Thus a change to the cause after the failure does not change the result, and the result is equal to its JSON.
+- An `Error` becomes an object with its `name`, its `message` and its own `cause`, converted the same way. The chain stops at an error that comes again.
+- The engine drops any other cause, for example a `BigInt`, a function, a class instance, a `Date` or an object that refers to itself.
+
+`isResult(value)` checks a value that you read back.
 
 ## Events
 
@@ -149,7 +155,7 @@ await execute(graph, context, {
 
 With this stream you can make a progress view, a log file for each node or a live status, with no change to the actions. The engine renders nothing.
 
-A `failed` result holds the error's `name`, its `message` and its `cause`. Thus a listener can tell why a node failed, for example a command's exit code, without reading the node's files.
+A `failed` result holds the error's `name`, its `message` and its `cause`, converted as [Results](#results) tells. Thus a listener can tell why a node failed, for example a command's exit code, without reading the node's files.
 
 ## Timeouts and cancellation
 
