@@ -24,7 +24,10 @@ export function createNodeDagFs(): DagFs {
     },
     hashFile: async (path) => {
       const hasher = createHash("sha256");
-      for await (const chunk of createReadStream(path)) hasher.update(chunk as Uint8Array);
+      for await (const chunk of createReadStream(path)) {
+        if (!(chunk instanceof Uint8Array)) throw new Error(`${path}: a read gave no bytes`);
+        hasher.update(chunk);
+      }
       return hasher.digest("hex");
     },
     ensureDir: async (path) => {

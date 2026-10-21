@@ -16,6 +16,19 @@ import { defineWorkflow } from "../workflow.ts";
 import { createLocalSession } from "./session.ts";
 import type { WriteStreams } from "./terminal/frame.ts";
 
+const signalOf = (opts: Parameters<Sh["run"]>[1]) => {
+  const signal = opts?.signal;
+  assert.ok(signal, "signal for the command");
+  return signal;
+};
+
+/** A line of the terminal's buffer, as text. */
+const lineText = (buffer: xterm.IBuffer, i: number) => {
+  const line = buffer.getLine(i);
+  assert.ok(line, `line ${i}`);
+  return line.translateToString(true);
+};
+
 /**
  * A local run as the CLI wires it, on memory files and a 40×12 terminal recording its writes;
  * `terminal` changes what the terminal says of itself. `job` runs it as `dagactions run` does,
@@ -60,12 +73,16 @@ function localRun(
     files,
     streams,
     writes,
-    report: () => files.files.get(".dagactions/failures.md")!.split("\n"),
+    report: () => {
+      const report = files.files.get(".dagactions/failures.md");
+      assert.ok(typeof report === "string", "failures report");
+      return report.split("\n");
+    },
     logs: () => Object.fromEntries([...files.files].filter(([path]) => path.endsWith(".log"))),
     stdout: () => writes.join("").split("\n"),
     screen: () => screen(writes),
     /** The rows the last frame drew under the scrollback, escapes and all. */
-    footer: () => /\x1b\[\?7l([^]*)\r\x1b\[\?7h/.exec(writes.at(-1)!)?.[1]!.split("\n") ?? [],
+    footer: () => /\x1b\[\?7l([^]*)\r\x1b\[\?7h/.exec(writes.at(-1) ?? "")?.[1]?.split("\n") ?? [],
     tick: () => mock.timers.tick(LIVE_FRAME_MS),
   };
 }
@@ -81,9 +98,7 @@ async function screen(writes: string[]): Promise<string[]> {
   });
   await new Promise<void>((written) => term.write(writes.join(""), written));
   const buffer = term.buffer.active;
-  const out = Array.from({ length: buffer.length }, (_, i) =>
-    buffer.getLine(i)!.translateToString(true),
-  );
+  const out = Array.from({ length: buffer.length }, (_, i) => lineText(buffer, i));
   while (out.at(-1) === "") out.pop();
   return out;
 }
@@ -94,7 +109,7 @@ async function screen(writes: string[]): Promise<string[]> {
  */
 const scriptedSh = (output: Record<string, { chunks: string[]; code: number }>): Sh => ({
   run: async (cmd, opts) => {
-    const { chunks, code } = output[cmd[0]!] ?? { chunks: [], code: 0 };
+    const { chunks, code } = output[cmd[0] ?? ""] ?? { chunks: [], code: 0 };
     for (const chunk of chunks) opts?.onOutput?.(chunk);
     const all = chunks.join("");
     return { code, stdout: all, stderr: "", output: all, ok: code === 0 };
@@ -614,7 +629,7 @@ describe("local session, failures style, at the edges", () => {
           const output = "waiting\n";
           const code = cmd[0] === "hang" ? 0 : 130;
           return new Promise((resolve) =>
-            opts!.signal!.addEventListener("abort", () =>
+            signalOf(opts).addEventListener("abort", () =>
               resolve({ code, stdout: output, stderr: "", output, ok: code === 0 }),
             ),
           );
@@ -779,7 +794,7 @@ describe("local session, failures style, at the edges", () => {
           if (cmd[0] === "slow") {
             opts?.onOutput?.("compiling\n");
             return new Promise((resolve) =>
-              opts!.signal!.addEventListener("abort", () => {
+              signalOf(opts).addEventListener("abort", () => {
                 const output = "compiling\n";
                 resolve({ code: -1, stdout: output, stderr: "", output, ok: false });
               }),
@@ -849,7 +864,7 @@ describe("local session, failures style, at the edges", () => {
           if (cmd[0] !== "slow") return scriptedSh({}).run(cmd, opts);
           opts?.onOutput?.("compiling\n");
           return new Promise((resolve) =>
-            opts!.signal!.addEventListener("abort", () =>
+            signalOf(opts).addEventListener("abort", () =>
               resolve({ code: -1, stdout: "", stderr: "", output: "", ok: false }),
             ),
           );
@@ -1089,7 +1104,7 @@ describe("local session, live style", () => {
           opts?.onOutput?.("compiling");
           started();
           return new Promise((resolve) =>
-            opts!.signal!.addEventListener("abort", () => {
+            signalOf(opts).addEventListener("abort", () => {
               opts?.onOutput?.("\nkilled by SIGINT\n");
               const output = "compiling\nkilled by SIGINT\n";
               resolve({ code: -1, stdout: "", stderr: "", output, ok: false });
@@ -1274,9 +1289,11 @@ describe("local session, live style", () => {
       }),
       ...started(g),
       failureOf(g, "", "failed: a1"),
-      ...skipped.map((node) =>
-        resultOf(node, { actionKey: "", status: "dep-failed", dep: node.deps[0]! }),
-      ),
+      ...skipped.map((node) => {
+        const [dep] = node.deps;
+        assert.ok(dep, "dep");
+        return resultOf(node, { actionKey: "", status: "dep-failed", dep });
+      }),
       ...[a2, a3, a4, a5].map(done),
       ...started(b),
     ]);
@@ -1474,8 +1491,10 @@ describe("local session, live style", () => {
       store.onEvent(dispatchOf(nodeNamed));
       store.onEvent(startOf(nodeNamed));
     }
+    const [first] = nodes;
+    assert.ok(first, "node");
     store.onEvent(
-      outputOf(nodes[0]!, "src/settings/notifications/email-digest-preferences.test.tsx passed\n"),
+      outputOf(first, "src/settings/notifications/email-digest-preferences.test.tsx passed\n"),
     );
     now = 600;
     const sizedAs = (columns?: number, rows?: number) => {

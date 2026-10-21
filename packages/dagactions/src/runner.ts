@@ -21,7 +21,7 @@ import {
   type RunHistoryEntry,
   type RunHistoryFile,
 } from "./history.ts";
-import { titleOf } from "./kernel/format.ts";
+import { errorMessage, titleOf } from "./kernel/format.ts";
 import type { Pass } from "./kernel/run-slice.ts";
 import type { RunStore } from "./kernel/store.ts";
 import type { CiContext, Ports } from "./ports.ts";
@@ -97,7 +97,8 @@ function owedPosts(graph: Graph<Ports>, history: RunHistory): Set<string> {
   const finished = (n: string) => ["done", "cached"].includes(history[n]?.status ?? "");
   // Nodes come in the order they were added, each after its deps.
   for (const node of graph.describe()) {
-    const pending = !history[node.name] || history[node.name]!.status === "cancelled";
+    const status = history[node.name]?.status;
+    const pending = status === undefined || status === "cancelled";
     const required = node.deps.filter((d) => !node.settledDeps?.includes(d));
     if (posts.has(node.name) && pending && required.every((d) => finished(d) || owed.has(d)))
       owed.add(node.name);
@@ -146,7 +147,7 @@ async function settle(
       ci.annotate(
         "warning",
         "dagactions",
-        `ignoring the run's history ${path}: ${(e as Error).message}`,
+        `ignoring the run's history ${path}: ${errorMessage(e)}`,
       );
       await drop(path);
       continue;

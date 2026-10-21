@@ -1,5 +1,5 @@
 import { createMemoryActionsCache, createTestPorts, okSh, type Ports } from "@mrmeku/dagactions";
-import { Graph } from "@mrmeku/dagraph";
+import { Graph, namedOutput, soleOutput } from "@mrmeku/dagraph";
 import assert from "node:assert/strict";
 import { basename } from "node:path";
 import { describe, test } from "node:test";
@@ -20,9 +20,13 @@ describe("release workflow", () => {
         actionsCache,
         sh: {
           run: async (cmd, opts) => {
-            const out = opts!.env!.DAGACTIONS_OUT!;
-            if (cmd[1] === "scripts/pack.ts")
-              await fs.writeText(`${out}/mrmeku-${cmd[2]}-${cmd[3]}.tgz`, cmd[2]!);
+            const out = opts?.env?.["DAGACTIONS_OUT"];
+            assert.ok(out, "the step's DAGACTIONS_OUT");
+            const [, script, pkg, version] = cmd;
+            if (script === "scripts/pack.ts") {
+              assert.ok(pkg, "the package pack.ts packs");
+              await fs.writeText(`${out}/mrmeku-${pkg}-${version}.tgz`, pkg);
+            }
             if (cmd[1] === "build")
               for (const file of ["main.js", "post.js"]) await fs.writeText(`${out}/${file}`, file);
             return okSh.run(cmd, opts);
@@ -38,8 +42,10 @@ describe("release workflow", () => {
       const ran = (name: string) => processed.get(name)?.commands[0];
       const output = (name: string, key: string) => {
         const result = resultOf(name);
-        return result?.status === "done" && (result.outputs as Record<string, string>)[key];
+        assert.ok(result?.status === "done", `${name} is done`);
+        return namedOutput(result.outputs, key);
       };
+      const parsed = async (path: string): Promise<unknown> => JSON.parse(await fs.readText(path));
       const restored = resultOf("restore:cas");
       return {
         nodes: graph.describe(),
@@ -49,8 +55,7 @@ describe("release workflow", () => {
         cmdOf,
         ran,
         output,
-        restored:
-          restored?.status === "done" && JSON.parse(await fs.readText(restored.outputs as string)),
+        restored: restored?.status === "done" && (await parsed(soleOutput(restored.outputs))),
         saved: [...actionsCache.entries].slice(2),
         uploads: [...actionsArtifact.uploads].map(([name, { files }]) => [
           name,
@@ -60,7 +65,12 @@ describe("release workflow", () => {
     };
     const tagged = await build("refs/tags/v1.2.3");
     const branch = await build("refs/heads/main");
-    const by = (name: string) => tagged.nodes.find((n) => n.name === name)!;
+    const nodesByName = new Map(tagged.nodes.map((n) => [n.name, n]));
+    const by = (name: string) => {
+      const node = nodesByName.get(name);
+      assert.ok(node, `no node ${name}`);
+      return node;
+    };
     const pack = tagged.resultOf("pack:dagactions");
     assert.deepEqual(
       {
@@ -73,8 +83,8 @@ describe("release workflow", () => {
           pack?.status === "done" &&
           Object.entries(pack.outputs).map(([output, path]) => [output, basename(String(path))]),
         packInputs: tagged.processed
-          .get("pack:dagactions")!
-          .files.includes("packages/dagactions/package.json"),
+          .get("pack:dagactions")
+          ?.files.includes("packages/dagactions/package.json"),
         publishCmd: tagged.ran("publish:dagraph"),
         dryRunPublishCmd: branch.ran("publish:dagraph"),
         publishDaghaDeps: by("publish:dagactions").deps.sort(),

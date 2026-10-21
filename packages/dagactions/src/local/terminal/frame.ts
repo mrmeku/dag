@@ -29,12 +29,14 @@ export function createFrame(streams: WriteStreams) {
   const endHeldLine = () => {
     if (heldScrollback && !heldScrollback.endsWith("\n")) heldScrollback += "\n";
   };
-  const holdWrite: WriteStream["write"] = (chunk: string | Uint8Array, ...rest: unknown[]) => {
+  const holdWrite: WriteStream["write"] = (
+    chunk: string | Uint8Array,
+    encoding?: BufferEncoding | ((err?: Error | null) => void),
+    cb?: (err?: Error | null) => void,
+  ) => {
     const text = typeof chunk === "string" ? chunk : Buffer.from(chunk).toString();
     if (!isDebugCommand(text)) heldScrollback += text;
-    const callback = rest.find((argument) => typeof argument === "function") as
-      | (() => void)
-      | undefined;
+    const callback = typeof encoding === "function" ? encoding : cb;
     if (callback) process.nextTick(callback);
     return true;
   };

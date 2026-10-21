@@ -6,6 +6,7 @@ import type {
   NodeState,
   RunState,
   SettledNodeState,
+  SkippedNodeState,
   SucceededNodeState,
 } from "./run-slice.ts";
 
@@ -74,11 +75,19 @@ export function nodeReports(
  * failure upstream explains instead (`rootFailures` in report.ts).
  */
 
-const isFailed = (nodeState: NodeState | undefined): boolean =>
+const isFailed = (
+  nodeState: NodeState | undefined,
+): nodeState is FailedNodeState | SkippedNodeState =>
   nodeState?.status === "failed" || nodeState?.status === "dep-failed";
 
+const failedDepStatesOf = (run: RunState, nodeState: NodeState): NodeState[] =>
+  nodeState.node.deps.flatMap((dep) => {
+    const depState = run.nodes.get(dep);
+    return isFailed(depState) ? [depState] : [];
+  });
+
 export const failedDepsOf = (run: RunState, nodeState: NodeState): string[] =>
-  nodeState.node.deps.filter((dep) => isFailed(run.nodes.get(dep)));
+  failedDepStatesOf(run, nodeState).map((depState) => depState.node.name);
 
 /** Failed because a dep did: skipped, or failed running no command of its own, as a gate does. */
 const isConsequence = (run: RunState, nodeState: NodeState): boolean =>
@@ -95,14 +104,14 @@ export const ownFailures = (run: RunState): FailedNodeState[] =>
 export function causesOf(run: RunState, nodeState: NodeState): string[] {
   const causes = new Set<string>();
   const seen = new Set<string>();
-  const visit = (name: string) => {
+  const visit = (dep: NodeState) => {
+    const name = dep.node.name;
     if (seen.has(name)) return;
     seen.add(name);
-    const dep = run.nodes.get(name)!;
-    if (isConsequence(run, dep)) failedDepsOf(run, dep).forEach(visit);
+    if (isConsequence(run, dep)) failedDepStatesOf(run, dep).forEach(visit);
     else causes.add(name);
   };
-  failedDepsOf(run, nodeState).forEach(visit);
+  failedDepStatesOf(run, nodeState).forEach(visit);
   return [...causes];
 }
 

@@ -3,18 +3,19 @@ import { requiredDeps, type Node } from "./graph/index.ts";
 import type { Result } from "./types.ts";
 
 /** A node the scheduler may take: ready to be processed, or a miss waiting for its group's slot. */
-export interface Ready {
-  node: Node;
+export interface Ready<Meta = unknown> {
+  node: Node<Meta>;
   acquiring: boolean;
 }
 
 /** Build the reverse adjacency list: for each node, which nodes depend on it. */
-function buildDependents(nodes: Iterable<Node>): Map<string, Node[]> {
-  const acc = new Map<string, Node[]>();
+function buildDependents<Meta>(nodes: Iterable<Node<Meta>>): Map<string, Node<Meta>[]> {
+  const acc = new Map<string, Node<Meta>[]>();
   for (const node of nodes) {
     for (const dep of node.deps) {
-      if (!acc.has(dep)) acc.set(dep, []);
-      acc.get(dep)!.push(node);
+      const dependents = acc.get(dep);
+      if (dependents) dependents.push(node);
+      else acc.set(dep, [node]);
     }
   }
   return acc;
@@ -25,18 +26,17 @@ function buildDependents(nodes: Iterable<Node>): Map<string, Node[]> {
  * Lower runs first, so work for earlier-added roots is preferred over later ones.
  */
 function rootPriorities(nodes: Node[]): Map<string, number> {
-  const byName = new Map(nodes.map((n) => [n.name, n]));
-  const position = new Map(nodes.map((n, i) => [n.name, i]));
+  const byName = new Map(nodes.map((node, position) => [node.name, { node, position }]));
   const priority = new Map<string, number>();
-  const visit = (node: Node): number => {
+  const visit = ({ node, position }: { node: Node; position: number }): number => {
     const known = priority.get(node.name);
     if (known !== undefined) return known;
     const deps = node.deps.flatMap((d) => byName.get(d) ?? []);
-    const p = deps.length === 0 ? position.get(node.name)! : Math.min(...deps.map(visit));
+    const p = deps.length === 0 ? position : Math.min(...deps.map(visit));
     priority.set(node.name, p);
     return p;
   };
-  nodes.forEach(visit);
+  byName.forEach(visit);
   return priority;
 }
 
@@ -46,14 +46,14 @@ function rootPriorities(nodes: Node[]): Map<string, number> {
  * branch finishes before the next starts. A miss waiting for its group's slot is ready again, in
  * the same order.
  */
-export class ExecState {
-  private dependents: Map<string, Node[]>;
+export class ExecState<Meta = unknown> {
+  private dependents: Map<string, Node<Meta>[]>;
   private priority: Map<string, number>;
   private entries = new Map<string, CacheEntry>();
   readonly results = new Map<string, Result>();
-  private ready: Ready[];
+  private ready: Ready<Meta>[];
 
-  constructor(nodes: Iterable<Node>) {
+  constructor(nodes: Iterable<Node<Meta>>) {
     const allNodes = Array.from(nodes);
     this.dependents = buildDependents(allNodes);
     this.priority = rootPriorities(allNodes);
@@ -62,25 +62,32 @@ export class ExecState {
       .map((node) => ({ node, acquiring: false }));
   }
 
-  private enqueue(items: Ready[]): void {
+  private priorityOf(node: Node<Meta>): number {
+    const priority = this.priority.get(node.name);
+    if (priority === undefined) throw new Error(`orchestrate was not given "${node.name}"`);
+    return priority;
+  }
+
+  private enqueue(items: Ready<Meta>[]): void {
     this.ready.unshift(...items);
-    this.ready.sort((a, b) => this.priority.get(a.node.name)! - this.priority.get(b.node.name)!);
+    this.ready.sort((a, b) => this.priorityOf(a.node) - this.priorityOf(b.node));
   }
 
   /** Remove and return the first ready node `filter` admits, or null. */
-  take(filter?: (ready: Ready) => boolean): Ready | null {
+  take(filter?: (ready: Ready<Meta>) => boolean): Ready<Meta> | null {
     const idx = filter ? this.ready.findIndex(filter) : 0;
-    if (idx === -1 || idx >= this.ready.length) return null;
-    return this.ready.splice(idx, 1)[0]!;
+    if (idx === -1) return null;
+    const [taken] = this.ready.splice(idx, 1);
+    return taken ?? null;
   }
 
   /** A miss waits for its group's slot: it is ready again, acquiring. */
-  waitForSlot(node: Node): void {
+  waitForSlot(node: Node<Meta>): void {
     this.enqueue([{ node, acquiring: true }]);
   }
 
   /** Record a node's result, and make ready each dependent whose deps have all settled. */
-  settle(node: Node, result: Result): void {
+  settle(node: Node<Meta>, result: Result): void {
     this.results.set(node.name, result);
     this.ready = this.ready.filter((r) => r.node.name !== node.name);
     if (result.status === "done" || result.status === "cached")
@@ -98,7 +105,10 @@ export class ExecState {
   /** The entry of each dep that succeeded, by dep name. */
   depEntries(node: Node): Record<string, CacheEntry> {
     return Object.fromEntries(
-      node.deps.filter((d) => this.entries.has(d)).map((d) => [d, this.entries.get(d)!]),
+      node.deps.flatMap((d): [string, CacheEntry][] => {
+        const entry = this.entries.get(d);
+        return entry ? [[d, entry]] : [];
+      }),
     );
   }
 

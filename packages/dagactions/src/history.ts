@@ -1,4 +1,4 @@
-import type { DagFs, ExecEvent, Outputs } from "@mrmeku/dagraph";
+import { isOutputs, type DagFs, type ExecEvent, type Outputs } from "@mrmeku/dagraph";
 import { HISTORY_LOCK_STALE_MS } from "./config.ts";
 import type { Lockfile } from "./ports.ts";
 
@@ -94,8 +94,38 @@ export async function createRunHistory(
   };
 }
 
+const isHistoryEntry = (value: unknown): value is RunHistoryEntry => {
+  if (typeof value !== "object" || value === null || !("status" in value)) return false;
+  switch (value.status) {
+    case "done":
+    case "cached":
+      return (
+        "outputs" in value &&
+        isOutputs(value.outputs) &&
+        "contentHash" in value &&
+        typeof value.contentHash === "string"
+      );
+    case "dep-failed":
+      return "dep" in value && typeof value.dep === "string";
+    default:
+      return value.status === "failed" || value.status === "cancelled";
+  }
+};
+
+const isHistoryFile = (value: unknown): value is RunHistoryFile =>
+  typeof value === "object" &&
+  value !== null &&
+  "workflow" in value &&
+  typeof value.workflow === "string" &&
+  (!("only" in value) ||
+    (Array.isArray(value.only) && value.only.every((n) => typeof n === "string"))) &&
+  "nodes" in value &&
+  typeof value.nodes === "object" &&
+  value.nodes !== null &&
+  Object.values(value.nodes).every(isHistoryEntry);
+
 export async function readRunHistory(fs: DagFs, path: string): Promise<RunHistoryFile> {
-  const file = JSON.parse(await fs.readText(path)) as Partial<RunHistoryFile>;
-  if (typeof file.nodes !== "object") throw new Error("not a run's history: it has no nodes");
-  return file as RunHistoryFile;
+  const file: unknown = JSON.parse(await fs.readText(path));
+  if (!isHistoryFile(file)) throw new Error("not a run's history: it has no nodes, or no workflow");
+  return file;
 }

@@ -46,7 +46,9 @@ export function createMemoryDagFs(initial?: Record<string, string | Uint8Array>)
     },
     readdir: async (dir) => {
       const parent = dir.replace(/\/$/, "");
-      return [...new Set(under(parent).map((p) => p.slice(parent.length + 1).split("/")[0]!))];
+      return [
+        ...new Set(under(parent).map((p) => p.slice(parent.length + 1).replace(/\/.*/s, ""))),
+      ];
     },
   };
 }

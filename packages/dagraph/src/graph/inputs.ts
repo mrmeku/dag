@@ -1,15 +1,16 @@
 import type { CacheEntry } from "../cache.ts";
+import { errorMessage } from "../utils.ts";
 import { isFileInput, isNodeRef, isOutputRef, type OutputRef } from "./types.ts";
 
 const isPlainObject = (value: object) => {
-  const proto = Object.getPrototypeOf(value);
+  const proto: unknown = Object.getPrototypeOf(value);
   return proto === null || Object.getPrototypeOf(proto) === null;
 };
 
 function kindOf(value: unknown): string {
   if (typeof value === "number") return String(value);
   if (typeof value !== "object" || value === null) return `a ${typeof value}`;
-  return `a ${(value as object).constructor?.name ?? "class instance"}`;
+  return `a ${value.constructor?.name ?? "class instance"}`;
 }
 
 /** A copy of a JSON value, `undefined` properties dropped; anything else is refused by its path. */
@@ -51,7 +52,7 @@ export function checkInputs(inputs: unknown, where: string): Record<string, unkn
         .map(([name, v]) => [name, isFileInput(v) ? v : jsonValue(v, `inputs.${name}`)]),
     );
   } catch (e) {
-    throw new Error(`${where}: ${(e as Error).message}`);
+    throw new Error(`${where}: ${errorMessage(e)}`);
   }
 }
 
@@ -68,11 +69,9 @@ export function canonical(value: unknown, refKey: (ref: OutputRef) => string): s
   if (isOutputRef(value)) return `#ref(${refKey(value)})`;
   if (Array.isArray(value)) return `[${value.map((v) => canonical(v, refKey)).join(",")}]`;
   if (typeof value === "object" && value !== null)
-    return `{${Object.keys(value)
-      .sort()
-      .map(
-        (k) => `${JSON.stringify(k)}:${canonical((value as Record<string, unknown>)[k], refKey)}`,
-      )
+    return `{${Object.entries(value)
+      .sort(([a], [b]) => (a < b ? -1 : 1))
+      .map(([k, v]) => `${JSON.stringify(k)}:${canonical(v, refKey)}`)
       .join(",")}}`;
   return JSON.stringify(value);
 }

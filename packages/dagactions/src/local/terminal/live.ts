@@ -168,7 +168,8 @@ function footerRows(
   );
   const paddedNameOf = (nodeState: NodeState) =>
     padName(truncate(nodeState.node.name, nameColumns), nameColumns);
-  const spinnerFrame = SPINNER_FRAMES[Math.floor(now / LIVE_FRAME_MS) % SPINNER_FRAMES.length]!;
+  const spinnerFrame = SPINNER_FRAMES[Math.floor(now / LIVE_FRAME_MS) % SPINNER_FRAMES.length];
+  if (spinnerFrame === undefined) throw new Error("SPINNER_FRAMES is empty");
   const inFlightRow = (nodeState: InFlightNodeState) => {
     const lastRunDuration = run.lastRunDurations?.[nodeState.node.name];
     const rowHead = truncate(

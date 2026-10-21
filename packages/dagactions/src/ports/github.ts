@@ -1,6 +1,7 @@
 import * as core from "@actions/core";
 import * as github from "@actions/github";
 import { CHECK_TEXT_MAX_CHARS } from "../config.ts";
+import { errorMessage } from "../kernel/format.ts";
 import type { CheckUpdate, Ci } from "../ports.ts";
 
 /**
@@ -57,8 +58,11 @@ export function createGithubCi(
   let checksOff = octokit === undefined;
   // On pull_request events GITHUB_SHA is the merge commit; check runs must target the PR head
   // to show up on the PR.
+  const head: unknown = ctx.payload.pull_request?.["head"];
   const headSha =
-    (ctx.payload.pull_request?.["head"] as { sha?: string } | undefined)?.sha ?? ctx.sha;
+    typeof head === "object" && head !== null && "sha" in head && typeof head.sha === "string"
+      ? head.sha
+      : ctx.sha;
 
   const check = async (u: CheckUpdate) => {
     if (checksOff || !octokit) return;
@@ -97,7 +101,7 @@ export function createGithubCi(
       }
     } catch (e) {
       checksOff = true;
-      core.notice(`check runs disabled: ${e instanceof Error ? e.message : String(e)}`, {
+      core.notice(`check runs disabled: ${errorMessage(e)}`, {
         title: "dagactions",
       });
     }

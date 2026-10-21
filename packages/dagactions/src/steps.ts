@@ -11,6 +11,7 @@ import {
 } from "@mrmeku/dagraph";
 import { basename, dirname } from "node:path";
 import { defineStep } from "./define-step.ts";
+import { errorMessage } from "./kernel/format.ts";
 import type { Ports } from "./ports.ts";
 import { logPath, type CommandCause } from "./step-records.ts";
 
@@ -136,9 +137,27 @@ function outputRef(node: string, output: string): OutputRef {
   return { node, output, toString: () => token };
 }
 
+const isRefJson = (value: unknown): value is [string, string] =>
+  Array.isArray(value) && value.length === 2 && value.every((v) => typeof v === "string");
+
+const isDepJson = (value: unknown): value is [[string, ...string[]], string] =>
+  Array.isArray(value) &&
+  value.length === 2 &&
+  Array.isArray(value[0]) &&
+  value[0].length > 0 &&
+  value[0].every((role) => typeof role === "string") &&
+  typeof value[1] === "string";
+
+/** What a token holds, refused when it is not what `refToken` or `depToken` writes. */
+function tokenJson<T>(json: string, is: (value: unknown) => value is T): T {
+  const value: unknown = JSON.parse(json);
+  if (!is(value)) throw new Error(`not a ref token: ${json}`);
+  return value;
+}
+
 /** `text` with each ref's token replaced by what `fill` makes of its node and output. */
 const fillRefs = (text: string, fill: (node: string, output: string) => string): string =>
-  text.replace(REF, (_, ref: string) => fill(...(JSON.parse(ref) as [string, string])));
+  text.replace(REF, (_, ref: string) => fill(...tokenJson(ref, isRefJson)));
 
 /**
  * The token a step's own command, `env` or artifact path holds for a ref, as its key holds it:
@@ -154,12 +173,15 @@ const fillDeps = (
   fill: (role: string, output: string, token: string) => string,
 ): string =>
   text.replace(DEP, (token, ref: string) => {
-    const [roles, output] = JSON.parse(ref) as [string[], string];
-    return fill(roles[0]!, output, token);
+    const [[role], output] = tokenJson(ref, isDepJson);
+    return fill(role, output, token);
   });
 
-/** What `run` returns: the engine's ref, and `outputs` with an `OutputRef` per output. */
-export type RunRef<O extends string = never> = NodeRef<RunOutputs<O>> & {
+/** What `run` returns: the node's ref, and `outputs` with this facade's `OutputRef` per output. */
+export type RunRef<O extends string = never> = {
+  readonly name: string;
+  readonly settled?: false;
+  readonly _T?: RunOutputs<O>;
   outputs: Record<"result" | O, OutputRef>;
 };
 
@@ -172,16 +194,16 @@ type Arg = string | OutputRef;
 const text = (arg: Arg): string => (typeof arg === "string" ? arg : refToken(arg.node, arg.output));
 
 /**
- * `texts` with each ref, which names a node, as the dep token of the roles that node has in
- * `deps`, and the nodes the refs name. A ref to a node outside `deps` is refused.
+ * `keyed` gives a text with each ref, which names a node, as the dep token of the roles that node
+ * has in `deps`; `refs` holds the nodes the refs name. A ref to a node outside `deps` is refused.
  */
-function byRole(name: string, texts: string[], deps: Deps): { texts: string[]; refs: string[] } {
+function byRole(name: string, deps: Deps): { keyed: (text: string) => string; refs: Set<string> } {
   const refs = new Set<string>();
   const rolesOf = (node: string) =>
     Object.keys(deps)
       .filter((role) => deps[role]?.name === node)
       .sort();
-  const keyed = texts.map((value) => {
+  const keyed = (value: string) => {
     if (value.includes("[object Object]"))
       throw new Error(
         `${name}: an object in a template string; a ref there must come from a step's outputs`,
@@ -193,13 +215,20 @@ function byRole(name: string, texts: string[], deps: Deps): { texts: string[]; r
       refs.add(node);
       return depToken(roles, output);
     });
-  });
-  return { texts: keyed, refs: [...refs] };
+  };
+  return { keyed, refs };
+}
+
+/** The name of the node in `role`, which a dep token names. */
+function depName(deps: Deps, role: string): string {
+  const dep = deps[role];
+  if (!dep) throw new Error(`no dep in role ${role}`);
+  return dep.name;
 }
 
 /** `text` with each ref as the step names it: `node.outputs.output`. */
 const described = (text: string, deps: Deps): string =>
-  fillDeps(text, (role, output) => `${deps[role]!.name}.outputs.${output}`);
+  fillDeps(text, (role, output) => `${depName(deps, role)}.outputs.${output}`);
 
 /**
  * `text` with each ref replaced by its output's path. A settled dep that failed has no path: a
@@ -209,7 +238,7 @@ const described = (text: string, deps: Deps): string =>
 function fillPaths(text: string, deps: Deps, depOutputs: DepOutputs): string | undefined {
   let missing = false;
   const filled = fillDeps(text, (role, output, token) => {
-    const node = deps[role]!.name;
+    const node = depName(deps, role);
     const out = depOutputs[role];
     if (out === undefined) {
       if (text !== token)
@@ -296,22 +325,21 @@ export function run<O extends string = never>(
       `${opts.name}: timeoutMinutes must be more than 0 and at most ${MAX_TIMEOUT_MINUTES}, got ${minutes}`,
     );
   const invalidateOn = opts.invalidateOn;
-  const declared = opts.outputs ?? ({} as Record<O, string>);
+  const declared: Record<string, string> = opts.outputs ?? {};
   const deps = opts.deps ?? {};
-  const cmd = byRole(opts.name, opts.cmd.map(text), deps);
-  const envNames = Object.keys(opts.env ?? {});
-  const envValues = byRole(opts.name, Object.values(opts.env ?? {}).map(text), deps);
+  const { keyed, refs } = byRole(opts.name, deps);
+  const cmd = opts.cmd.map((arg) => keyed(text(arg)));
+  const env =
+    opts.env && Object.fromEntries(Object.entries(opts.env).map(([k, v]) => [k, keyed(text(v))]));
   const inputs: RunInputs = {
     version: "run:v6",
-    cmd: cmd.texts,
+    cmd,
     cwd: opts.cwd ?? "",
-    ...(opts.env && {
-      env: Object.fromEntries(envNames.map((k, i) => [k, envValues.texts[i]!])),
-    }),
+    ...(env && { env }),
     ...(opts.outputs && { outputs: opts.outputs }),
     ...(opts.config !== undefined && { config: opts.config }),
   };
-  const step = defineStep<RunParams, RunOutputs<O>, RunInputs>({
+  const step = defineStep<RunParams, Record<string, string>, RunInputs>({
     kind: opts.name,
     inputs,
     ...(opts.group && { concurrencyGroup: opts.group }),
@@ -321,7 +349,10 @@ export function run<O extends string = never>(
     action: async ({ inputs, depOutputs, ports, outputDir, signal, output }) => {
       const resolve = (text: string): string =>
         fillPaths(text.replace(/\$DAGACTIONS_OUT\b/g, outputDir), deps, depOutputs) ?? "";
-      const vars = Object.entries(inputs.env ?? {}).map(([k, v]) => [k, resolve(v)]);
+      const vars = Object.entries(inputs.env ?? {}).map(([k, v]): [string, string] => [
+        k,
+        resolve(v),
+      ]);
       const argv = inputs.cmd.map(resolve);
       const r = await ports.sh.run(argv, {
         ...(inputs.cwd && { cwd: inputs.cwd }),
@@ -340,8 +371,8 @@ export function run<O extends string = never>(
       if (!r.ok) throw new Error(`${argv.join(" ")} exited ${r.code}`, { cause });
       // One that traps its timeout's signal and exits 0 timed out all the same, as its cause says.
       if (signal.aborted) throw new Error(`${argv.join(" ")} was stopped`, { cause });
-      const outputs = { result } as RunOutputs<O>;
-      for (const [role, file] of Object.entries(declared) as [O, string][]) {
+      const outputs: Record<string, string> = { result };
+      for (const [role, file] of Object.entries(declared)) {
         const path = `${outputDir}/${file}`;
         if (!(await ports.fs.exists(path)))
           throw new Error(`declared output ${role} missing: ${file}`, { cause });
@@ -355,14 +386,15 @@ export function run<O extends string = never>(
   if (opts.postOf)
     recordPost(graph, ref.name, {
       main: opts.postOf,
-      refs: [...new Set([...cmd.refs, ...envValues.refs])],
+      refs: [...refs],
       deps,
       addTo: (g, name, deps) => void step.addNode(g, { ...files, name, deps }),
     });
   const outputs = Object.fromEntries(
     ["result", ...Object.keys(declared)].map((output) => [output, outputRef(ref.name, output)]),
-  ) as Record<"result" | O, OutputRef>;
-  return { ...ref, outputs } as unknown as RunRef<O>;
+  );
+  // eslint-disable-next-line @typescript-eslint/consistent-type-assertions -- `outputs` holds "result" and each declared O, which Object.keys loses
+  return { ...ref, outputs } as RunRef<O>;
 }
 
 /**
@@ -374,13 +406,16 @@ export function runAll<K extends string>(
   graph: StepGraph,
   specs: Record<K, RunSpec<string>>,
 ): Record<K, RunRef> {
-  return Object.fromEntries(
-    (Object.entries(specs) as [K, RunSpec<string>][]).map(([name, spec]) => [
-      name,
-      run(graph, { name, ...spec }),
-    ]),
-  ) as Record<K, RunRef>;
+  const refs: Partial<Record<K, RunRef>> = {};
+  for (const name in specs) refs[name] = run(graph, { name, ...specs[name] });
+  if (!hasEvery(refs, specs)) throw new Error("runAll: a spec added no node");
+  return refs;
 }
+
+const hasEvery = <K extends string, V>(
+  record: Partial<Record<K, V>>,
+  keys: Record<K, unknown>,
+): record is Record<K, V> => Object.keys(keys).every((key) => key in record);
 
 /* ------------------------------------------------------------------ gate */
 
@@ -489,7 +524,7 @@ export function restoreCache(graph: StepGraph, spec: RestoreCacheSpec): RestoreC
 }
 
 interface SaveCacheParams extends BaseParams {
-  deps: Deps;
+  deps: Deps & { cache: NodeRef<string> };
 }
 
 /**
@@ -502,7 +537,7 @@ interface SaveCacheParams extends BaseParams {
  */
 export function saveCache(
   graph: StepGraph,
-  opts: { name: string; cache: RestoreCacheRef; deps: Deps },
+  opts: { name: string; cache: RestoreCacheRef; deps: Deps & { cache?: never } },
 ): NodeRef<string> {
   const { path, key } = opts.cache.spec;
   const step = defineStep<SaveCacheParams, string>({
@@ -510,9 +545,7 @@ export function saveCache(
     inputs: { version: "save-cache:v2" },
     cacheable: false,
     action: async ({ depOutputs, ports: p, outputDir }) => {
-      const matched = JSON.parse(await p.fs.readText(depOutputs["cache"] as string)) as
-        | string
-        | null;
+      const matched: unknown = JSON.parse(await p.fs.readText(depOutputs.cache));
       const out = `${outputDir}/save.json`;
       // The post pass reruns a save the cancel landed on in a new output dir. A copy of what it
       // returned, beside the log where every attempt of the key finds it, keeps it from saving twice.
@@ -526,16 +559,17 @@ export function saveCache(
       if (matched === key) {
         return done(null, `Cache hit occurred on the primary key ${key}, not saving cache.`);
       }
-      const prior = (await p.fs.exists(record))
-        ? (JSON.parse(await p.fs.readText(record)) as number | null)
+      const prior: unknown = (await p.fs.exists(record))
+        ? JSON.parse(await p.fs.readText(record))
         : null;
-      if (prior !== null && prior >= 0) return done(prior, `Cache saved with key: ${key}`);
+      if (typeof prior === "number" && prior >= 0)
+        return done(prior, `Cache saved with key: ${key}`);
       let id: number;
       try {
         id = await p.actionsCache.saveCache(path, key);
       } catch (e) {
         if (e instanceof Error && e.name === "ValidationError") throw e;
-        const message = e instanceof Error ? e.message : String(e);
+        const message = errorMessage(e);
         p.ci.annotate("warning", opts.name, message);
         return done(null, `Failed to save: ${message}`);
       }
@@ -550,7 +584,7 @@ export function saveCache(
     main: opts.cache.name,
     refs: [],
     deps,
-    addTo: (g, name, deps) => void step.addNode(g, { name, deps }),
+    addTo: (g, name, deps) => void step.addNode(g, { name, deps: { ...deps, cache: opts.cache } }),
   });
   return ref;
 }
@@ -599,7 +633,8 @@ function commonDir(files: string[]): string {
 export function uploadArtifact(graph: StepGraph, spec: UploadArtifactSpec): NodeRef<string> {
   const ifNoFilesFound = spec.ifNoFilesFound ?? "warn";
   const deps = spec.deps ?? {};
-  const { texts: path } = byRole(spec.name, spec.path.map(text), deps);
+  const { keyed } = byRole(spec.name, deps);
+  const path = spec.path.map((entry) => keyed(text(entry)));
   const step = defineStep<{ deps?: Deps }, string>({
     kind: spec.name,
     inputs: {

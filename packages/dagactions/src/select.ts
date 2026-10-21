@@ -1,4 +1,4 @@
-import { closure, settled, type Graph, type NodeRef } from "@mrmeku/dagraph";
+import { closure, settled, type Graph } from "@mrmeku/dagraph";
 import type { Ports } from "./ports.ts";
 import { postsOf, recordPost } from "./steps.ts";
 
@@ -23,7 +23,10 @@ export function selectNodes(graph: Graph<Ports>, names: string[]): Graph<Ports> 
   const reach = (name: string, seen: Set<string>): string[] => {
     if (seen.has(name)) return [];
     seen.add(name);
-    return keep.has(name) ? [name] : nodes.get(name)!.deps.flatMap((d) => reach(d, seen));
+    if (keep.has(name)) return [name];
+    const node = nodes.get(name);
+    if (!node) throw new Error(`selectNodes: the graph holds no node "${name}"`);
+    return node.deps.flatMap((d) => reach(d, seen));
   };
   // In the order they were added, so a post comes after its main, and a post of a post after both.
   for (const [name, node] of nodes) {
@@ -35,10 +38,11 @@ export function selectNodes(graph: Graph<Ports>, names: string[]): Graph<Ports> 
     }
     if (!keep.has(post.main) || !post.refs.every((d) => keep.has(d))) continue;
     keep.add(name);
-    const direct = Object.fromEntries(
-      Object.entries(post.deps).filter(([, ref]) => ref && keep.has(ref.name)),
+    const directDeps = Object.entries(post.deps).flatMap(([role, ref]) =>
+      ref && keep.has(ref.name) ? [[role, ref] as const] : [],
     );
-    const directNames = Object.values(direct).map((ref) => ref!.name);
+    const direct = Object.fromEntries(directDeps);
+    const directNames = directDeps.map(([, ref]) => ref.name);
     const seen = new Set<string>();
     const through = node.deps
       .filter((d) => !keep.has(d))
@@ -46,7 +50,7 @@ export function selectNodes(graph: Graph<Ports>, names: string[]): Graph<Ports> 
       .filter((d) => !directNames.includes(d));
     const deps = {
       ...direct,
-      ...Object.fromEntries(through.map((d) => [`only:${d}`, settled({ name: d } as NodeRef)])),
+      ...Object.fromEntries(through.map((d) => [`only:${d}`, settled({ name: d })])),
     };
     post.addTo(out, name, deps);
     recordPost(out, name, { ...post, deps });

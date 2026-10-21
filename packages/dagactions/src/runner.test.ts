@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
 import { describe, test } from "node:test";
 import { STATUS_ICON } from "./config.ts";
-import type { RunHistoryFile } from "./history.ts";
+import { readRunHistory } from "./history.ts";
 import type { Ports, Sh } from "./ports.ts";
 import { createMemoryActionsCache } from "./ports/actions-cache.ts";
 import { createMemoryLockfile, createTestPorts, okSh, type RecordedCi } from "./ports/memory.ts";
@@ -23,8 +23,28 @@ const histories = async (fs: MemoryDagFs) =>
   Promise.all(
     [...fs.files.keys()]
       .filter((k) => k.startsWith(`${HISTORY_DIR}/`) && k.endsWith(".json"))
-      .map(async (k) => JSON.parse(await fs.readText(k)) as RunHistoryFile),
+      .map((k) => readRunHistory(fs, k)),
   );
+
+const parsed = async (fs: MemoryDagFs, path: string): Promise<unknown> =>
+  JSON.parse(await fs.readText(path));
+
+type RunOptions = Parameters<Sh["run"]>[1];
+const envOf = (opts: RunOptions) => {
+  const env = opts?.env;
+  assert.ok(env, "env for the command");
+  return env;
+};
+const outDirOf = (opts: RunOptions) => {
+  const out = envOf(opts)["DAGACTIONS_OUT"];
+  assert.ok(out, "DAGACTIONS_OUT");
+  return out;
+};
+const signalOf = (opts: RunOptions) => {
+  const signal = opts?.signal;
+  assert.ok(signal, "signal for the command");
+  return signal;
+};
 
 describe("cancel, then post", () => {
   test("a cancelled run records what settled in its history; the post pass saves the cache and stops the service from that history, under the workflow's summary; a second pass finds nothing", async () => {
@@ -36,11 +56,10 @@ describe("cancel, then post", () => {
     const sh: Sh = {
       run: async (cmd, opts) => {
         calls.push(cmd);
-        if (cmd[0] === "db" && cmd[1] === "start")
-          await fs.writeText(`${opts!.env!.DAGACTIONS_OUT}/pid`, "7");
+        if (cmd[0] === "db" && cmd[1] === "start") await fs.writeText(`${outDirOf(opts)}/pid`, "7");
         if (cmd[0] !== "slow") return { code: 0, stdout: "", stderr: "", output: "", ok: true };
         return new Promise((resolve) =>
-          opts!.signal!.addEventListener("abort", () =>
+          signalOf(opts).addEventListener("abort", () =>
             resolve({
               code: -1,
               stdout: "",
@@ -109,7 +128,8 @@ describe("cancel, then post", () => {
     const again = await runPost(common);
     const status = (rs: { name: string; status: string }[]) =>
       Object.fromEntries(rs.map((r) => [r.name, r.status]));
-    const stop = calls.find((c) => c[1] === "stop")!;
+    const stopPidFile = calls.find((c) => c[1] === "stop")?.[2];
+    assert.ok(stopPidFile, "stop command");
     assert.deepEqual(
       {
         run: { cancelled: run.cancelled, failed: run.failed, statuses: status(run.results) },
@@ -117,7 +137,7 @@ describe("cancel, then post", () => {
         post: status(post.results),
         again: status(again.results),
         calls: calls.map((c) => c.slice(0, 2)),
-        stoppedPid: await fs.readText(stop[2]!),
+        stoppedPid: await fs.readText(stopPidFile),
         saved: [...service.entries.keys()],
         headersStartsAndRecaps: rec.log
           .map((e) => (typeof e === "string" ? e : e.title))
@@ -204,7 +224,7 @@ describe("runJob", () => {
       run: async (cmd, opts) => {
         if (cmd[0] !== "slow") return { code: 0, stdout: "", stderr: "", output: "", ok: true };
         return new Promise((resolve) =>
-          opts!.signal!.addEventListener("abort", () =>
+          signalOf(opts).addEventListener("abort", () =>
             resolve({ code: -1, stdout: "", stderr: "", output: "", ok: false }),
           ),
         );
@@ -219,11 +239,12 @@ describe("runJob", () => {
         w.post({ name: "notify", main: fast, cmd: ["notify"], deps: {} });
       },
     });
+    assert.ok(workflow.summary, "summary");
     const job = runJob(
       {
         workflow: workflow.workflow,
         workflowFile: "ci.ts",
-        summary: workflow.summary!,
+        summary: workflow.summary,
         ports,
         casBaseDir: CAS,
         historyDir: HISTORY_DIR,
@@ -288,9 +309,12 @@ describe("a run killed before its post pass", () => {
     const controller = new AbortController();
     ports.sh = {
       run: async (cmd, opts) => {
-        if (cmd[1] === "start")
-          await fs.writeText(`${opts!.env!.DAGACTIONS_OUT}/pid`, String(++pid));
-        if (cmd[1] === "stop") stopped.push(await fs.readText(cmd[2]!));
+        if (cmd[1] === "start") await fs.writeText(`${outDirOf(opts)}/pid`, String(++pid));
+        if (cmd[1] === "stop") {
+          const [, , pidFile] = cmd;
+          assert.ok(pidFile, "pid file");
+          stopped.push(await fs.readText(pidFile));
+        }
         if (cmd[0] === "slow" && killed) controller.abort();
         // The report fails the first time it runs, in the post steps owed.
         const ok = cmd[0] !== "report" || reports++ > 0;
@@ -519,7 +543,7 @@ describe("two runs at once", () => {
         events.push(cmd.join(" "));
         if (cmd[0] === "e2e") {
           e2eRunning.resolve();
-          await new Promise((r) => opts!.signal!.addEventListener("abort", r));
+          await new Promise((r) => signalOf(opts).addEventListener("abort", r));
         }
         return { code: 0, stdout: "", stderr: "", output: "", ok: true };
       },
@@ -695,9 +719,12 @@ describe("a killed --only run", () => {
     const controller = new AbortController();
     ports.sh = {
       run: async (cmd, opts) => {
-        if (cmd[1] === "start")
-          await fs.writeText(`${opts!.env!.DAGACTIONS_OUT}/pid`, String(++pid));
-        if (cmd[1] === "stop") stopped.push(await fs.readText(cmd[2]!));
+        if (cmd[1] === "start") await fs.writeText(`${outDirOf(opts)}/pid`, String(++pid));
+        if (cmd[1] === "stop") {
+          const [, , pidFile] = cmd;
+          assert.ok(pidFile, "pid file");
+          stopped.push(await fs.readText(pidFile));
+        }
         if (cmd[0] === "e2e" && killed) controller.abort();
         return { code: 0, stdout: "", stderr: "", output: "", ok: true };
       },
@@ -733,7 +760,7 @@ describe("logs", () => {
     // Run A writes its log first; then B's log write stops halfway while A's reporter reads.
     ports.sh = {
       run: async (_cmd, opts) => {
-        const run = outs.push(opts!.env!.DAGACTIONS_OUT!) === 1 ? "A" : "B";
+        const run = outs.push(outDirOf(opts)) === 1 ? "A" : "B";
         if (run === "B") await aWrote.promise;
         return { code: 0, stdout: "", stderr: "", output: `${run} output\n`, ok: true };
       },
@@ -825,10 +852,11 @@ describe("a step's time", () => {
         for (const name of ["a", "b", "c"]) w.run({ name, cmd: [name], group: "one" });
       },
     });
+    assert.ok(def.limits && def.summary, "limits and summary");
     await runWorkflow({
       workflow: def.workflow,
-      limits: def.limits!,
-      summary: def.summary!,
+      limits: def.limits,
+      summary: def.summary,
       ports,
       casBaseDir: CAS,
       historyDir: HISTORY_DIR,
@@ -839,7 +867,7 @@ describe("a step's time", () => {
         checks: rec.checks
           .filter((c) => c.status === "completed")
           .map((c) => [c.name, c.startedAt, c.completedAt]),
-        lastRun: JSON.parse(await fs.readText(`${CAS}/last-run.json`)),
+        lastRun: await parsed(fs, `${CAS}/last-run.json`),
         summary: rec.summaries,
       },
       {
@@ -924,7 +952,7 @@ describe("timeoutMinutes", () => {
       run: (cmd, opts) =>
         cmd[0] === "hang"
           ? new Promise((resolve) =>
-              opts!.signal!.addEventListener("abort", () =>
+              signalOf(opts).addEventListener("abort", () =>
                 resolve({
                   code: 0,
                   stdout: "partial\n",
@@ -1001,7 +1029,7 @@ describe("secrets", () => {
     const seen: Array<Record<string, string | undefined>> = [];
     ports.sh = {
       run: async (_cmd, opts) => {
-        const { DAGACTIONS_OUT: _, ...rest } = opts!.env!;
+        const { DAGACTIONS_OUT: _, ...rest } = envOf(opts);
         seen.push(rest);
         const output = "token npm-s3cret\n";
         return { code: 0, stdout: output, stderr: "", output, ok: true };

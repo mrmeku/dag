@@ -74,7 +74,7 @@ export function dagMermaid(all: Node[], statusOf: (name: string) => Status | und
     const out = ["```mermaid", "flowchart LR"];
     for (const kind of kinds) {
       const members = nodes.filter((n) => n.kind === kind);
-      const counts = (["done", "cached", "failed", "dep-failed", "cancelled"] as Status[])
+      const counts = (["done", "cached", "failed", "dep-failed", "cancelled"] satisfies Status[])
         .map((s) => [s, members.filter((n) => statusOf(n.name) === s).length] as const)
         .filter(([, c]) => c > 0)
         .map(([s, c]) => `${STATUS_ICON[s]}${c}`)
@@ -84,8 +84,8 @@ export function dagMermaid(all: Node[], statusOf: (name: string) => Status | und
     const byNodeName = new Map(nodes.map((n) => [n.name, n]));
     const edges = new Set<string>();
     for (const n of nodes) {
-      for (const d of n.deps) {
-        const from = id(byNodeName.get(d)!.kind);
+      for (const dep of n.deps.flatMap((d) => byNodeName.get(d) ?? [])) {
+        const from = id(dep.kind);
         const to = id(n.kind);
         if (from !== to) edges.add(`  ${from} --> ${to}`);
       }
@@ -128,12 +128,13 @@ function longestChain(nodes: NodeReport[]): { names: string[]; total: number } |
     total.set(n.name, own + best);
     via.set(n.name, bestDep);
   }
-  let end: string | undefined;
-  for (const [name, t] of total) if (end === undefined || t > total.get(end)!) end = name;
-  if (end === undefined || total.get(end) === 0) return null;
+  let end: { name: string; total: number } | undefined;
+  for (const [name, t] of total) if (end === undefined || t > end.total) end = { name, total: t };
+  if (end === undefined || end.total === 0) return null;
   const names: string[] = [];
-  for (let cur: string | undefined = end; cur !== undefined; cur = via.get(cur)) names.unshift(cur);
-  return { names: names.filter((name) => counted.has(name)), total: total.get(end)! };
+  for (let cur: string | undefined = end.name; cur !== undefined; cur = via.get(cur))
+    names.unshift(cur);
+  return { names: names.filter((name) => counted.has(name)), total: end.total };
 }
 
 /**

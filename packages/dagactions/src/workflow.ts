@@ -56,12 +56,12 @@ export interface Steps<G extends string = never> {
   saveCache: (opts: {
     name: string;
     cache: RestoreCacheRef;
-    deps: Record<string, NodeRef | SettledRef | undefined>;
+    deps: Record<string, NodeRef | SettledRef | undefined> & { cache?: never };
   }) => NodeRef<string>;
   /** `actions/upload-artifact` as a node: globs and dep outputs up as one artifact of the run. */
   uploadArtifact: (spec: UploadArtifactSpec) => NodeRef<string>;
   /** Mark a dep the consumer runs without when it failed: GitHub's `if: always()`. */
-  settled: typeof settled;
+  settled: (ref: NodeRef | RunRef<string>) => SettledRef;
 }
 
 export function createSteps<G extends string>(
@@ -82,15 +82,31 @@ export function createSteps<G extends string>(
     restoreCache: (spec) => restoreCache(graph, spec),
     saveCache: (opts) => saveCache(graph, opts),
     uploadArtifact: (spec) => uploadArtifact(graph, spec),
-    settled,
+    settled: (ref) => settled({ name: ref.name }),
   };
 }
 
+export const WORKFLOW_DEF: unique symbol = Symbol.for("@mrmeku/dagactions/WorkflowDef");
+
 /** What a workflow file default-exports. `R` is what its body returns: refs another workflow composes. */
 export interface WorkflowDef<R = unknown> {
+  readonly [WORKFLOW_DEF]: true;
   workflow: Workflow<R>;
   limits?: ThrottledSchedulerOptions;
   summary?: readonly SummaryRenderer[];
+}
+
+/** Whether a value is what `defineWorkflow` returns, which alone carries its brand. */
+const isWorkflowDef = (value: unknown): value is WorkflowDef =>
+  typeof value === "object" && value !== null && WORKFLOW_DEF in value;
+
+/** The workflow a workflow file's module default-exports; refused when it exports none. */
+export function workflowDefOf(module: unknown, file: string): WorkflowDef {
+  const def =
+    typeof module === "object" && module !== null && "default" in module && module.default;
+  if (!isWorkflowDef(def))
+    throw new Error(`${file} default-exports no workflow: export default defineWorkflow({ ... })`);
+  return def;
 }
 
 /**
@@ -106,6 +122,7 @@ export function defineWorkflow<L extends ThrottledSchedulerOptions, R = void>(de
   build: (w: Steps<GroupsOf<L>>) => R | Promise<R>;
 }): WorkflowDef<R> {
   return {
+    [WORKFLOW_DEF]: true,
     ...(def.limits && { limits: def.limits }),
     ...(def.summary && { summary: def.summary }),
     workflow: async (graph, ports, ctx) => def.build(createSteps<GroupsOf<L>>(graph, ports, ctx)),

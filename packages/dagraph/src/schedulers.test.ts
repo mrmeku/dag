@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test";
+import assert from "node:assert/strict";
 
 import { MemCache, type DagFs } from "./cache.ts";
 import { defineAction } from "./define-action.ts";
@@ -12,6 +13,7 @@ import {
   type ThrottledSchedulerOptions,
 } from "./schedulers.ts";
 import type { Result } from "./types.ts";
+import { errorMessage } from "./utils.ts";
 
 // A miss awaits its gate and then runs until the test finishes it by hand; a hit settles at once.
 // `idle` waits for a macrotask, which comes only after every queued microtask has run, so the
@@ -41,12 +43,16 @@ function harness(
   const idle = () => new Promise((r) => setImmediate(r));
   const finish = async (...names: string[]) => {
     for (const name of names) {
-      finishers.get(name)!();
+      const resolve = finishers.get(name);
+      assert.ok(resolve, `${name} is not running`);
+      resolve();
       await idle();
     }
   };
   const look = async (name: string) => {
-    lookups.get(name)!();
+    const resolve = lookups.get(name);
+    assert.ok(resolve, `${name} is not looking up`);
+    resolve();
     await idle();
   };
   return { log, done, idle, finish, look };
@@ -181,7 +187,9 @@ describe("orchestrate", () => {
 
   test("refuses nodes whose deps it was not given, naming them", async () => {
     const nodes = [node("a", undefined, ["x"]), node("b"), node("c", undefined, ["y", "b", "z"])];
-    const refused = await orchestrate(nodes, done, unboundedScheduler()).catch((e) => e.message);
+    const refused = await orchestrate(nodes, done, unboundedScheduler()).catch((e: unknown) =>
+      errorMessage(e),
+    );
     expect(refused).toBe(
       'orchestrate: nodes depend on nodes it was not given: "a" needs "x"; "c" needs "y", "z"',
     );

@@ -1,4 +1,4 @@
-import type { Outputs } from "./graph/index.ts";
+import { isOutputs, type Outputs } from "./graph/index.ts";
 
 /** What gets stored per action key in the cache. */
 export interface CacheEntry {
@@ -7,6 +7,14 @@ export interface CacheEntry {
   /** SHA256 of actual file contents at those paths. */
   contentHash: string;
 }
+
+const isCacheEntry = (value: unknown): value is CacheEntry =>
+  typeof value === "object" &&
+  value !== null &&
+  "outputs" in value &&
+  isOutputs(value.outputs) &&
+  "contentHash" in value &&
+  typeof value.contentHash === "string";
 
 /** Minimal filesystem contract the DAG executor needs. Implementations ship in `ports/fs`. */
 export interface DagFs {
@@ -42,8 +50,10 @@ export class FsCache implements Cache {
   }
   async get(key: string): Promise<CacheEntry | undefined> {
     try {
-      const raw = await this.fs.readText(`${this.baseDir}/${key}/manifest.json`);
-      return JSON.parse(raw) as CacheEntry;
+      const entry: unknown = JSON.parse(
+        await this.fs.readText(`${this.baseDir}/${key}/manifest.json`),
+      );
+      return isCacheEntry(entry) ? entry : undefined;
     } catch {
       return undefined;
     }

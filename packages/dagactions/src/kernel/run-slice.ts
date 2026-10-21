@@ -184,16 +184,19 @@ function linesAfter(state: NodeState, chunk: string) {
   };
 }
 
+/** A settled node once its log is read. */
+export function settledWithLog(state: SettledNodeState, log: string[]): SettledNodeState {
+  if (state.status === "failed") return { ...state, lineCount: log.length, log };
+  return { ...state, lineCount: log.length };
+}
+
 /** A node after `action`. A node that settles without a dispatch is timed from its settle. */
 export function nodeReducer(state: NodeState, action: NodeAction): NodeState {
   switch (action.type) {
     case "output":
       return { ...state, ...linesAfter(state, action.chunk) };
     case "logRead":
-      if (!isSettled(state)) return state;
-      if (state.status === "failed")
-        return { ...state, lineCount: action.log.length, log: action.log };
-      return { ...state, lineCount: action.log.length };
+      return isSettled(state) ? settledWithLog(state, action.log) : state;
   }
   const { occurredAt } = action;
   const lines = {

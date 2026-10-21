@@ -1,26 +1,24 @@
-/* eslint-disable @typescript-eslint/no-explicit-any */
-import type { ActionSpec } from "../define-action.ts";
+import type { ErasedSpec } from "../define-action.ts";
 import { checkInputs, outputRefsIn } from "./inputs.ts";
 import { nodeRef, type Node, type NodeRef, type Outputs } from "./types.ts";
 
 /** A node as the graph holds it: its data, its action, its deps by role and its inputs. */
-export interface GraphNode {
-  node: Node<unknown>;
-  spec: ActionSpec<any, any, any, any>;
+export interface GraphNode<Meta = unknown> {
+  node: Node<Meta>;
+  spec: ErasedSpec;
   /** Each role's dep, by node name. */
   roles: Record<string, string>;
   /** The action's inputs and the node's own, checked. */
   inputs: Record<string, unknown>;
 }
 
-interface GraphState {
-  nodes: Map<string, GraphNode>;
+interface GraphState<Meta> {
+  nodes: Map<string, GraphNode<Meta>>;
   prefix: string;
-  meta: unknown;
+  meta: Meta | undefined;
 }
 
-const states = new WeakMap<object, GraphState>();
-const stateOf = (graph: object) => states.get(graph)!;
+let stateOf: <Meta>(graph: Graph<unknown, Meta>) => GraphState<Meta>;
 
 /**
  * Nodes and their deps, typed by the ports their actions need and the metadata its nodes carry.
@@ -28,9 +26,10 @@ const stateOf = (graph: object) => states.get(graph)!;
  */
 export class Graph<Ports = unknown, Meta = undefined> {
   declare readonly _ports?: Ports;
+  #state: GraphState<Meta> = { nodes: new Map(), prefix: "", meta: undefined };
 
-  constructor() {
-    states.set(this, { nodes: new Map(), prefix: "", meta: undefined });
+  static {
+    stateOf = (graph) => graph.#state;
   }
 
   /**
@@ -38,41 +37,39 @@ export class Graph<Ports = unknown, Meta = undefined> {
    * gives each its `meta`, unless the node gives its own. Without `meta`, its parent's applies.
    */
   subgraph(prefix: string, meta?: Meta): Graph<Ports, Meta> {
-    const parent = stateOf(this);
+    const parent = this.#state;
     const view = new Graph<Ports, Meta>();
-    states.set(view, {
+    view.#state = {
       nodes: parent.nodes,
       prefix: parent.prefix ? `${parent.prefix}:${prefix}` : prefix,
       meta: meta === undefined ? parent.meta : meta,
-    });
+    };
     return view;
   }
 
   /** Each node as data, in the order they were added. */
   describe(): Node<Meta>[] {
-    return [...stateOf(this).nodes.values()].map(
-      ({ node }) =>
-        ({
-          ...node,
-          deps: [...node.deps],
-          ...(node.settledDeps && { settledDeps: [...node.settledDeps] }),
-        }) as Node<Meta>,
-    );
+    return [...this.#state.nodes.values()].map(({ node }) => ({
+      ...node,
+      deps: [...node.deps],
+      ...(node.settledDeps && { settledDeps: [...node.settledDeps] }),
+    }));
   }
 }
 
-export const graphNodes = (graph: Graph<any, any>): ReadonlyMap<string, GraphNode> =>
-  stateOf(graph).nodes;
+export const graphNodes = <Meta>(
+  graph: Graph<unknown, Meta>,
+): ReadonlyMap<string, GraphNode<Meta>> => stateOf(graph).nodes;
 
 const PARAMS = new Set(["name", "deps", "inputs", "meta"]);
 
-export function addNode<R extends Outputs>(
-  graph: Graph<any, any>,
-  spec: ActionSpec<any, any, any, any>,
+export function addNode<R extends Outputs, Meta>(
+  graph: Graph<unknown, Meta>,
+  spec: ErasedSpec,
   params: {
     name?: string;
-    meta?: unknown;
-    deps?: Record<string, { name: string; settled?: boolean } | undefined>;
+    meta?: Meta;
+    deps?: Record<string, { name: string; settled?: boolean } | undefined> | undefined;
     inputs?: unknown;
   },
 ): NodeRef<R> {
@@ -119,7 +116,7 @@ export function addNode<R extends Outputs>(
         );
 
   const meta = params.meta === undefined ? state.meta : params.meta;
-  const node: Node<unknown> = {
+  const node: Node<Meta> = {
     name,
     kind: spec.kind,
     ...(meta !== undefined && { meta }),

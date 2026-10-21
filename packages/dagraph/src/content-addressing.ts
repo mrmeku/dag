@@ -76,10 +76,8 @@ export async function hashOutputFiles(
   if (typeof outputs === "string") shape.push(...(await files([outputs])));
   else if (Array.isArray(outputs)) shape.push(await files(outputs));
   else
-    for (const name of Object.keys(outputs).sort()) {
-      const value = outputs[name]!;
+    for (const [name, value] of Object.entries(outputs).sort(([a], [b]) => (a < b ? -1 : 1)))
       shape.push([name, Array.isArray(value) ? await files(value) : await files([value])]);
-    }
   return sha256.hex(JSON.stringify(shape));
 }
 

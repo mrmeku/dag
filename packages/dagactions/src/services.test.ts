@@ -31,8 +31,9 @@ describe("the services the CLI picks", () => {
       ],
       { encoding: "utf8" },
     );
+    const out: unknown = JSON.parse(r.stdout || "null");
     assert.deepEqual(
-      { status: r.status, stderr: r.stderr, out: JSON.parse(r.stdout || "null") as unknown },
+      { status: r.status, stderr: r.stderr, out },
       {
         status: 0,
         stderr: "",

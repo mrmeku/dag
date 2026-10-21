@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test";
+import assert from "node:assert/strict";
 
 import { MemCache, type CacheEntry, type DagFs } from "./cache.ts";
 import { defineAction } from "./define-action.ts";
@@ -14,6 +15,7 @@ import {
 } from "./graph/index.ts";
 import { createMemoryDagFs } from "./ports/memory-fs.ts";
 import { processNode } from "./process-node.ts";
+import { errorMessage } from "./utils.ts";
 
 interface Ports {
   fs: DagFs;
@@ -86,7 +88,7 @@ const refusal = (declare: () => unknown) => {
     declare();
     return "accepted";
   } catch (e) {
-    return (e as Error).message;
+    return errorMessage(e);
   }
 };
 
@@ -106,9 +108,11 @@ describe("declarations", () => {
     class Prompt {}
     expect({
       field: refusal(() =>
-        download.addNode(g, { inputs: { videoId: "v" }, videoId: "v" } as never),
+        // @ts-expect-error: params hold no videoId
+        download.addNode(g, { inputs: { videoId: "v" }, videoId: "v" }),
       ),
-      kind: refusal(() => download.addNode(g, { inputs: { videoId: "v" }, kind: "dl" } as never)),
+      // @ts-expect-error: params hold no kind
+      kind: refusal(() => download.addNode(g, { inputs: { videoId: "v" }, kind: "dl" })),
       duplicate: refusal(() => download.addNode(g, { inputs: { videoId: "v3" } })),
       unknownDep: refusal(() => captions.addNode(g, { deps: { download: other } })),
       refNotADep: refusal(() =>
@@ -118,7 +122,8 @@ describe("declarations", () => {
       inherited: refusal(() =>
         versioned.addNode(g, { name: "c", inputs: { constructor: "x", toString: "y" } }),
       ),
-      list: refusal(() => versioned.addNode(g, { name: "n", inputs: ["bun.lock"] as never })),
+      // @ts-expect-error: inputs are a record
+      list: refusal(() => versioned.addNode(g, { name: "n", inputs: ["bun.lock"] })),
       map: refusal(value(new Map())),
       nan: refusal(value({ ratio: Number.NaN })),
       infinity: refusal(value([Infinity])),
@@ -159,9 +164,12 @@ describe("declarations", () => {
     const timeout = (timeoutMs: number) => () =>
       defineAction<Ports, BaseParams, string>({ kind: "t", timeoutMs, action });
     expect({
-      noKind: refusal(() => defineAction({ action } as never)),
-      config: refusal(() => defineAction({ kind: "c", config: "v1", action } as never)),
-      normalize: refusal(() => defineAction({ kind: "n", normalize: () => ({}), action } as never)),
+      // @ts-expect-error: an action has a kind
+      noKind: refusal(() => defineAction({ action })),
+      // @ts-expect-error: config is gone
+      config: refusal(() => defineAction({ kind: "c", config: "v1", action })),
+      // @ts-expect-error: normalize is gone
+      normalize: refusal(() => defineAction({ kind: "n", normalize: () => ({}), action })),
       timeouts: [0, -1, 1.5, Number.NaN, Infinity, 2 ** 31, 1, 2 ** 31 - 1].map((t) =>
         refusal(timeout(t)).replace(/.*got /, "refused "),
       ),
@@ -198,8 +206,11 @@ describe("graphs", () => {
       inputs: { videoId: "v2" },
     });
     const handedOut = g.describe();
-    handedOut[2]!.deps.push("ghost");
-    handedOut[2]!.settledDeps!.length = 0;
+    const entry = handedOut[2];
+    assert.ok(entry, "the third node");
+    entry.deps.push("ghost");
+    assert.ok(entry.settledDeps, "its settled deps");
+    entry.settledDeps.length = 0;
     expect(g.describe()).toEqual([
       {
         name: "v1:download",
@@ -268,19 +279,22 @@ describe("graphs", () => {
     addVideo(oneVideo, "v2");
     const viaOneVideo = await processNode(oneVideo, "v2:download", {}, ctx);
     const failedDep = await processNode(oneVideo, "v2:captions", {}, ctx);
+    const downloadEntry = entryOf("v2:download");
+    assert.ok(downloadEntry, "v2:download's entry");
     const settledMissing = await processNode(
       oneVideo,
       "v2:entry",
-      { "v2:download": entryOf("v2:download")! },
+      { "v2:download": downloadEntry },
       ctx,
     );
     let refused = "";
-    await processNode(oneVideo, "v1:download", {}, ctx).catch((e) => (refused = e.message));
+    await processNode(oneVideo, "v1:download", {}, ctx).catch(
+      (e: unknown) => (refused = errorMessage(e)),
+    );
+    const downloaded = results.find((r) => r.name === "v2:download");
+    assert.ok(downloaded, "v2:download's result");
     expect({
-      viaOneVideo: [
-        viaOneVideo.status,
-        viaOneVideo.actionKey === results.find((r) => r.name === "v2:download")!.actionKey,
-      ],
+      viaOneVideo: [viaOneVideo.status, viaOneVideo.actionKey === downloaded.actionKey],
       failedDep,
       settledMissing: settledMissing.status,
       refused,

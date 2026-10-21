@@ -8,6 +8,7 @@ import { completedLines, initialNodeState, nodeReducer, type NodeState } from ".
 import { createRunStore, type RunListener } from "./store.ts";
 
 const node = (name: string, deps: string[] = []): Node => ({ name, kind: name, deps });
+const parsed = async (text: Promise<string>): Promise<unknown> => JSON.parse(await text);
 const [a, b, c, d, f, save] = [
   node("a"),
   node("b"),
@@ -217,7 +218,7 @@ describe("run store", () => {
     const { fs, store, pass } = await failedRun();
     fs.files.set("/cas/last-run.json", JSON.stringify({ durations: { a: 500 } }));
     await store.report(pass);
-    assert.deepEqual(JSON.parse(fs.files.get("/cas/last-run.json") as string), {
+    assert.deepEqual(JSON.parse(await fs.readText("/cas/last-run.json")), {
       durations: { a: 1000, b: 1000, f: 1500 },
     });
   });
@@ -231,7 +232,7 @@ describe("run store", () => {
     assert.deepEqual(
       {
         reports: await store.report(pass),
-        file: JSON.parse(fs.files.get("/cas/last-run.json") as string),
+        file: await parsed(fs.readText("/cas/last-run.json")),
       },
       {
         reports: [{ ...a, status: "done", start: 1000, duration: 1000, outputs: "ka" }],

@@ -15,8 +15,13 @@ describe("ci workflow", () => {
     };
     const { nodes, processed } = await build("refs/pull/7/merge");
     const onMain = (await build("refs/heads/main")).nodes;
-    const by = (name: string) => nodes.find((n) => n.name === name)!;
-    const reads = (name: string, file: string) => processed.get(name)!.files.includes(file);
+    const nodesByName = new Map(nodes.map((n) => [n.name, n]));
+    const by = (name: string) => nodesByName.get(name);
+    const reads = (name: string, file: string) => {
+      const node = processed.get(name);
+      assert.ok(node, `${name} was not processed`);
+      return node.files.includes(file);
+    };
     const checks = nodes.filter((n) => /^(typecheck|lint|test:)/.test(n.name));
     assert.deepEqual(
       {
@@ -29,9 +34,9 @@ describe("ci workflow", () => {
           !reads("test:dagraph", "packages/dagactions/src/runner.ts"),
         runnerTestsReadThisFile: reads("test:dagactions", "scripts/ci.test.ts"),
         nobodyReadsReadme: nodes.every((n) => !reads(n.name, "README.md")),
-        gateDeps: by("gate").deps.sort(),
-        gateAllSettled: by("gate").settledDeps?.length,
-        saveCas: onMain.find((n) => n.name === "save:cas")!.deps.sort(),
+        gateDeps: by("gate")?.deps.sort(),
+        gateAllSettled: by("gate")?.settledDeps?.length,
+        saveCas: onMain.find((n) => n.name === "save:cas")?.deps.sort(),
         uncached: nodes.filter((n) => n.cacheable === false).map((n) => n.name),
         limits: ci.limits,
       },

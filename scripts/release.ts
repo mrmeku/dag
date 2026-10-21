@@ -21,12 +21,10 @@
  * - upload: each tarball and the bundle go up as artifacts of the run as soon as they are built,
  *   gate or no gate, so what a dry run or a failed publish would have shipped can be inspected.
  */
-import { defineWorkflow, type RunOutputs, type RunRef } from "@mrmeku/dagactions";
-import type { NodeRef } from "@mrmeku/dagraph";
+import { defineWorkflow, type RunRef } from "@mrmeku/dagactions";
 import { addChecks } from "./checks.ts";
 
-const PACKAGES = ["dagraph", "dagactions"] as const; // dependency order: the engine first
-type Pkg = (typeof PACKAGES)[number];
+type Pkg = "dagraph" | "dagactions";
 const TAG = /^refs\/tags\/v(\d+\.\d+\.\d+(?:-[\w.]+)?)$/;
 const TOOLCHAIN = ["tsconfig.json", "tsconfig.build.json", "bun.lock", "scripts/pack.ts"];
 
@@ -52,9 +50,8 @@ export default defineWorkflow({
       "packages/*/README.md",
       ...TOOLCHAIN,
     );
-    const tarballs = {} as Record<Pkg, RunRef<"tarball">>;
-    for (const pkg of PACKAGES) {
-      tarballs[pkg] = w.run({
+    const pack = (pkg: Pkg): RunRef<"tarball"> => {
+      const tarball = w.run({
         name: `pack:${pkg}`,
         cmd: ["bun", "scripts/pack.ts", pkg, version, "$DAGACTIONS_OUT"],
         outputs: { tarball: `mrmeku-${pkg}-${version}.tgz` },
@@ -64,10 +61,16 @@ export default defineWorkflow({
       w.uploadArtifact({
         name: `upload:${pkg}`,
         artifact: `${pkg}-${version}`,
-        path: [tarballs[pkg].outputs.tarball],
-        deps: { pack: tarballs[pkg] },
+        path: [tarball.outputs.tarball],
+        deps: { pack: tarball },
       });
-    }
+      return tarball;
+    };
+    // In dependency order: the engine first.
+    const tarballs: Record<Pkg, RunRef<"tarball">> = {
+      dagraph: pack("dagraph"),
+      dagactions: pack("dagactions"),
+    };
     const bundle = w.run({
       name: "build:action",
       cmd: [
@@ -92,9 +95,8 @@ export default defineWorkflow({
       deps: { bundle },
     });
 
-    const published = {} as Record<Pkg, NodeRef<RunOutputs>>;
-    for (const pkg of PACKAGES) {
-      published[pkg] = w.run({
+    const publish = (pkg: Pkg, engine?: RunRef): RunRef =>
+      w.run({
         name: `publish:${pkg}`,
         cmd: [
           "npm",
@@ -105,13 +107,13 @@ export default defineWorkflow({
           ...(version.includes("-") ? ["--tag", "next"] : []),
           ...(dryRun ? ["--dry-run"] : []),
         ],
-        deps: {
-          gate,
-          pack: tarballs[pkg],
-          ...(pkg === "dagactions" && { engine: published.dagraph }),
-        },
+        deps: { gate, pack: tarballs[pkg], ...(engine && { engine }) },
       });
-    }
+    const engine = publish("dagraph");
+    const published: Record<Pkg, RunRef> = {
+      dagraph: engine,
+      dagactions: publish("dagactions", engine),
+    };
     const action = w.run({
       name: "release:action",
       cmd: [

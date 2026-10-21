@@ -7,8 +7,8 @@ import type { NodeReport } from "./report.ts";
 import {
   completedLines,
   initialRunState,
-  nodeReducer,
   runReducer,
+  settledWithLog,
   type InFlightNodeState,
   type NodeState,
   type Pass,
@@ -40,6 +40,12 @@ export interface RunListener {
     output?: (nodeState: NodeState, lines: string[]) => void;
   };
 }
+
+const isDurations = (value: unknown): value is Record<string, number> =>
+  typeof value === "object" &&
+  value !== null &&
+  !Array.isArray(value) &&
+  Object.values(value).every((ms) => typeof ms === "number");
 
 /**
  * The run every output reads: `runReducer`'s state, and its listeners told of each action. Its IO
@@ -91,8 +97,12 @@ export function createRunStore(
     (lastRunRead ??= (async () => {
       if (!(await fs.exists(lastRunPath))) return;
       try {
-        const { durations } = JSON.parse(await fs.readText(lastRunPath));
-        dispatch({ type: "lastRunRead", durations });
+        const lastRun: unknown = JSON.parse(await fs.readText(lastRunPath));
+        const durations =
+          typeof lastRun === "object" && lastRun !== null && "durations" in lastRun
+            ? lastRun.durations
+            : undefined;
+        if (isDurations(durations)) dispatch({ type: "lastRunRead", durations });
       } catch {
         // A file this version cannot read is a run with no last run.
       }
@@ -118,7 +128,7 @@ export function createRunStore(
     }
     const logRead = { type: "logRead", settled: nodeState, log } as const;
     dispatch(logRead);
-    const settled = nodeReducer(nodeState, logRead) as SettledNodeState;
+    const settled = settledWithLog(nodeState, log);
     for (const listener of listeners) listener.settle?.(settled, state, log);
   };
 

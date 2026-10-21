@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test";
+import assert from "node:assert/strict";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join, relative, resolve } from "node:path";
@@ -9,11 +10,14 @@ import { execute } from "./execute.ts";
 import {
   file,
   Graph,
+  namedOutput,
   settled,
+  soleOutput,
   type ActionContext,
   type BaseParams,
   type NodeRef,
   type OutputRef,
+  type Outputs,
   type SettledRef,
 } from "./graph/index.ts";
 import { createBunDagFs } from "./ports/fs.ts";
@@ -43,7 +47,7 @@ interface TaskOptions {
 }
 
 /** A node that writes one file. Its name is also an input, `id`, so no two nodes share a key. */
-function task(g: Graph<Ports, any>, name: string, opts: TaskOptions = {}): NodeRef<string> {
+function task<Meta>(g: Graph<Ports, Meta>, name: string, opts: TaskOptions = {}): NodeRef<string> {
   const { deps = {}, inputs, run, ...howToRun } = opts;
   return defineAction<Ports, BaseParams, string>({
     kind: "task",
@@ -61,7 +65,20 @@ function setup(cacheOf: (fs: MemoryDagFs) => Cache = () => new MemCache()) {
 const statuses = (rs: Result[]) => Object.fromEntries(rs.map((r) => [r.name, r.status]));
 const counts = (rs: Result[]) => ({ ran: tally(rs).done, hit: tally(rs).cached });
 const outputsOf = (r: Result | undefined) =>
-  r?.status === "done" || r?.status === "cached" ? (r.outputs as string) : "";
+  r?.status === "done" || r?.status === "cached" ? soleOutput(r.outputs) : "";
+/** A result that succeeded; refused when it did not. */
+const succeeded = (r: Result | undefined) => {
+  assert.ok(
+    r?.status === "done" || r?.status === "cached",
+    `${r?.name ?? "the node"} did not succeed`,
+  );
+  return r;
+};
+/** A dep's outputs when they are one path. */
+const depPath = (outputs: Outputs | undefined) => {
+  assert.ok(outputs !== undefined, "the dep has outputs");
+  return soleOutput(outputs);
+};
 
 function buildItems(ids: string[]): Graph<Ports, { item: string } | undefined> {
   const g = new Graph<Ports, { item: string } | undefined>();
@@ -266,9 +283,10 @@ describe("the action key", () => {
     });
     const [one] = await execute(first, ctx);
     const [two] = await execute(second, ctx);
+    assert.ok(one && two, "each graph settles its node");
     expect({
-      one: one!.status,
-      two: [two!.name, two!.status, two!.actionKey === one!.actionKey],
+      one: one.status,
+      two: [two.name, two.status, two.actionKey === one.actionKey],
       read: await fs.readText(outputsOf(two)),
     }).toEqual({ one: "done", two: ["v:b", "cached", true], read: "made by one" });
   });
@@ -299,7 +317,8 @@ describe("the action key", () => {
       const g = new Graph<Ports>();
       task(g, "n", { inputs });
       const [r] = await execute(g, ctx);
-      return [r!.status, await fs.readText(outputsOf(r))];
+      assert.ok(r, "the node settles");
+      return [r.status, await fs.readText(outputsOf(r))];
     };
     expect([
       await run({ opts: { a: 1, b: [1, 2] } }),
@@ -367,12 +386,12 @@ describe("the action key", () => {
         inputs: { cmd: ["npm", "publish", p.outputs.tarball] },
       });
       const results = await execute(g, ctx);
-      const [packed, published] = results as [Result & { outputs: Packed }, Result];
+      const [packed, published] = results;
+      const tarball = namedOutput(succeeded(packed).outputs, "tarball");
       return {
         statuses: statuses(results),
         reads:
-          (await fs.readText(outputsOf(published))) ===
-          JSON.stringify(["npm", "publish", packed.outputs.tarball]),
+          (await fs.readText(outputsOf(published))) === JSON.stringify(["npm", "publish", tarball]),
       };
     };
     expect([await run("1.0"), await run("1.1")]).toEqual([
@@ -403,7 +422,9 @@ describe("refs and outputs in the key", () => {
     const p = pair.addNode(g, { name: names[0] });
     const q = pair.addNode(g, { name: names[1] });
     task(g, "use", { deps: deps(p, q), inputs: { file: ref(p, q) } });
-    return (await execute(g, ctx)).find((r) => r.name === "use")!.actionKey;
+    const use = (await execute(g, ctx)).find((r) => r.name === "use");
+    assert.ok(use, "use settles");
+    return use.actionKey;
   };
 
   test("an output ref keys by the role it points through and its output's name, never by its node's name or by the output name alone", async () => {
@@ -442,7 +463,7 @@ describe("refs and outputs in the key", () => {
         },
       }).addNode(g, {});
       const [r] = await execute(g, ctx);
-      return (r as Result & { contentHash: string }).contentHash;
+      return succeeded(r).contentHash;
     };
     const base = await hashOf(1, { main: ["x.txt", "A"], extra: ["y.txt", "B"] });
     expect({
@@ -507,13 +528,13 @@ describe("the CAS", () => {
       });
       return g;
     };
-    const m = (await execute(build(), ctx)).find((r) => r.name === "m") as Result & {
-      contentHash: string;
-    };
+    const m = succeeded((await execute(build(), ctx)).find((r) => r.name === "m"));
     const second = await execute(build(), ctx);
     const dir = `/cas/${m.actionKey}`;
+    const [outputDir] = seen;
+    assert.ok(outputDir, "the action saw its output dir");
     expect({
-      outputDir: seen[0]!.replace(/[0-9a-f-]{36}$/, "<uuid>"),
+      outputDir: outputDir.replace(/[0-9a-f-]{36}$/, "<uuid>"),
       outputs: outputsOf(m),
       second: statuses(second),
       files: [...fs.files.keys()].sort(),
@@ -579,7 +600,7 @@ describe("the CAS", () => {
     const run = async (force: boolean) => {
       const g = new Graph<Ports>();
       task(g, "m", { run: () => content });
-      return (await execute(g, ctx, { force }))[0] as Result & { contentHash: string };
+      return succeeded((await execute(g, ctx, { force }))[0]);
     };
     const first = await run(false);
     const dir = `/cas/${first.actionKey}`;
@@ -629,17 +650,19 @@ describe("the CAS", () => {
     const by = (rs: Result[]) => Object.fromEntries(rs.map((r) => [r.name, r]));
     const first = by(await execute(build(["v1", "v2"]), ctx));
     const both = (node: string) => [first[`v1:${node}`], first[`v2:${node}`]].map(outputsOf);
-    const entry = await cache.get(first["v1:clean_description"]!.actionKey);
+    const cleaned = first["v1:clean_description"];
+    assert.ok(cleaned, "v1:clean_description settles");
+    const entry = await cache.get(cleaned.actionKey);
     const together = {
       statuses: Object.values(first).map((r) => r.status),
       chapters: new Set(both("chapters")).size,
       cleaned: await Promise.all(both("clean_description").map((p) => fs.exists(p))),
-      entry: both("clean_description").includes(entry?.outputs as string),
+      entry: both("clean_description").includes(depPath(entry?.outputs)),
       uploaded: await Promise.all(both("upload").map((p) => fs.exists(p))),
     };
     const next = by(await execute(build(["v1"]), ctx, { force: true }));
     const dirsOf = async (node: string) => {
-      const r = next[`v1:${node}`] as Result & { contentHash: string };
+      const r = succeeded(next[`v1:${node}`]);
       const dirs = (await fs.readdir(`/cas/${r.actionKey}`)).sort();
       return dirs.map((d) => (d === `out-${r.contentHash}` ? "out-<its own>" : d));
     };
@@ -668,7 +691,8 @@ describe("the CAS", () => {
       const g = new Graph<Ports>();
       task(g, "a");
       const [r] = await execute(g, { ...ctx, casBaseDir });
-      return [r!.status, outputsOf(r).startsWith(`/cas/${r!.actionKey}/out-`)];
+      assert.ok(r, "the node settles");
+      return [r.status, outputsOf(r).startsWith(`/cas/${r.actionKey}/out-`)];
     };
     expect([await run("/cas/"), await run("/cas")]).toEqual([
       ["done", true],
@@ -688,7 +712,8 @@ describe("the CAS", () => {
     const g = new Graph<Ports>();
     task(g, "a");
     const [r] = await execute(g, { ...ctx, cache: unreachable });
-    expect([r!.status, (await memory.get(r!.actionKey))?.outputs === outputsOf(r)]).toEqual([
+    assert.ok(r, "the node settles");
+    expect([r.status, (await memory.get(r.actionKey))?.outputs === outputsOf(r)]).toEqual([
       "done",
       true,
     ]);
@@ -711,7 +736,7 @@ describe("the CAS", () => {
       }).addNode(g, { inputs: { id: "joined" } });
       task(g, "reader", {
         deps: { joined },
-        run: (c) => fs.readText(c.depOutputs["joined"] as string),
+        run: (c) => fs.readText(depPath(c.depOutputs["joined"])),
       });
       defineAction<Ports, BaseParams, string>({
         kind: "absolute",
@@ -769,7 +794,7 @@ describe("the CAS", () => {
               aInDouble.resolve();
               await bTruncated.promise;
             }
-            const n = Number(await c.ports.fs.readText(c.depOutputs["count"] as string));
+            const n = Number(await c.ports.fs.readText(depPath(c.depOutputs["count"])));
             if (run === "A") setTimeout(() => bMayFinish.resolve(), 0);
             return String(n * 2);
           },
@@ -800,7 +825,8 @@ describe("cacheable: false", () => {
     };
     await execute(build(), ctx);
     const second = await execute(build(), ctx);
-    const probe = second.find((r) => r.name === "probe")!;
+    const probe = second.find((r) => r.name === "probe");
+    assert.ok(probe, "probe settles");
     expect({
       second: statuses(second),
       stored: await cache.get(probe.actionKey),
@@ -813,7 +839,7 @@ describe("cacheable: false", () => {
     const run = async () => {
       const g = new Graph<Ports>();
       task(g, "upload", { cacheable: false, run: () => content });
-      return (await execute(g, ctx))[0] as Result & { contentHash: string };
+      return succeeded((await execute(g, ctx))[0]);
     };
     const first = await run();
     const dir = `/cas/${first.actionKey}`;
@@ -869,20 +895,20 @@ describe("events", () => {
       return g;
     };
     await execute(build(false), ctx);
-    const events: unknown[] = [];
-    let slowWhenFastSettled: unknown[] = [];
+    const events: string[][] = [];
+    let slowWhenFastSettled: string[][] = [];
     await execute(build(true), ctx, {
       onEvent: (e: ExecEvent<{ video: string }>) => {
         const detail = e.type === "output" ? e.chunk : e.type === "result" ? e.result.status : "";
         events.push([e.type, e.node, e.meta?.video ?? "", detail]);
         if (e.type === "result" && e.node === "v1:fast") {
-          slowWhenFastSettled = events.filter((ev) => (ev as string[])[1] === "slow");
+          slowWhenFastSettled = events.filter((ev) => ev[1] === "slow");
           releaseSlow.resolve();
         }
       },
     });
     await late.promise;
-    const of = (node: string) => events.filter((e) => (e as string[])[1] === node);
+    const of = (node: string) => events.filter((e) => e[1] === node);
     expect({
       warm: of("v1:warm"),
       fast: of("v1:fast"),
@@ -947,7 +973,8 @@ describe("verify outputs on a cache hit", () => {
       const g = new Graph<Ports>();
       task(g, "a", { run: () => "original" });
       const [r] = await execute(g, ctx);
-      return r!;
+      assert.ok(r, "the node settles");
+      return r;
     };
     const first = await run();
     await fs.remove(outputsOf(first));
@@ -969,10 +996,11 @@ describe("verify outputs on a cache hit", () => {
       const g = new Graph<Ports>();
       task(g, "a", { run: (c) => (seen.push(c.outputDir), "original") });
       const [r] = await execute(g, ctx);
-      return [r!.status, outputsOf(r)];
+      assert.ok(r, "the node settles");
+      return [r.status, outputsOf(r)] as const;
     };
     const [, path] = await run();
-    await fs.writeText(path!, "x");
+    await fs.writeText(path, "x");
     const second = await run();
     const third = await run();
     expect({ second, third, content: await fs.readText(`${seen[1]}/out`) }).toEqual({
@@ -1237,7 +1265,8 @@ describe("cancellation and timeouts", () => {
         run: (c) =>
           new Promise((resolve) =>
             c.signal.addEventListener("abort", () => {
-              reasons.push((c.signal.reason as Error).name);
+              const reason: unknown = c.signal.reason;
+              reasons.push(reason instanceof Error ? reason.name : String(reason));
               resolve(undefined);
             }),
           ),
@@ -1301,7 +1330,9 @@ describe("cancellation and timeouts", () => {
       signal: controller.signal,
       onEvent: (e) => void events.push(e.type === "result" ? e.result.status : e.type),
     });
-    expect({ status: result!.status, keyed: result!.actionKey !== "", events }).toEqual({
+    assert.ok(result, "the node settles");
+    const { status, actionKey } = result;
+    expect({ status, keyed: actionKey !== "", events }).toEqual({
       status: "cancelled",
       keyed: true,
       events: ["dispatch", "start", "cancelled"],
@@ -1322,7 +1353,8 @@ describe("cancellation and timeouts", () => {
     let ran = false;
     task(g, "x", { run: () => ((ran = true), "x") });
     const [result] = await execute(g, { ...ctx, fs: slowMkdir }, { signal: controller.signal });
-    expect({ ran, status: result!.status, files: [...fs.files.keys()] }).toEqual({
+    assert.ok(result, "the node settles");
+    expect({ ran, status: result.status, files: [...fs.files.keys()] }).toEqual({
       ran: false,
       status: "cancelled",
       files: [],

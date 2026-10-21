@@ -1,4 +1,3 @@
-/* eslint-disable @typescript-eslint/no-explicit-any */
 import { addNode, type Graph } from "./graph/graph.ts";
 import { checkInputs } from "./graph/inputs.ts";
 import type {
@@ -28,6 +27,20 @@ export interface ActionSpec<Ports, P extends BaseParams, R extends Outputs, I> {
   timeoutMs?: number;
 }
 
+/**
+ * An action as a graph holds it, its types erased: the engine builds each context from its
+ * node's inputs and its deps' entries, so the action takes the context of no action in particular.
+ */
+export interface ErasedSpec {
+  kind: string;
+  inputs: Record<string, unknown>;
+  action: (context: ActionContext) => Promise<Outputs>;
+  invalidateOn?: Record<string, (outputs: Outputs, ports: unknown) => Promise<string> | string>;
+  cacheable?: boolean;
+  concurrencyGroup?: string;
+  timeoutMs?: number;
+}
+
 /** A kind of work, defined once. `addNode` adds one of its nodes to a graph. */
 export interface Action<Ports, P extends BaseParams, R extends Outputs> {
   addNode<GraphPorts extends Ports, Meta>(
@@ -38,9 +51,9 @@ export interface Action<Ports, P extends BaseParams, R extends Outputs> {
 
 /** Extract output type R from an Action or a factory function that returns one. */
 export type OutputOf<T> =
-  T extends Action<any, any, infer R>
+  T extends Action<infer _Ports, infer _P, infer R>
     ? R
-    : T extends (...args: any[]) => Action<any, any, infer R>
+    : T extends (...args: never[]) => Action<infer _Ports, infer _P, infer R>
       ? R
       : never;
 
@@ -69,6 +82,10 @@ export function defineAction<
     throw new RangeError(
       `${where}: timeoutMs must be a whole number of ms from 1 to ${MAX_TIMEOUT_MS}, got ${t}`,
     );
-  const checked = { ...spec, inputs: checkInputs(spec.inputs, where) };
-  return { addNode: (graph, params) => addNode<R>(graph, checked, params as object) };
+  // eslint-disable-next-line @typescript-eslint/consistent-type-assertions -- a graph holds actions of many types as data, which erases each context's inputs, dep outputs and ports
+  const checked = { ...spec, inputs: checkInputs(spec.inputs, where) } as unknown as ErasedSpec;
+  return {
+    addNode: <Meta>(graph: Graph<Ports, Meta>, params: NodeParams<P, Meta>) =>
+      addNode<R, Meta>(graph, checked, params),
+  };
 }

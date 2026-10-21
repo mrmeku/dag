@@ -1,6 +1,7 @@
-import { execute, Graph, MemCache, settled } from "@mrmeku/dagraph";
+import { execute, Graph, MemCache, settled, soleOutput } from "@mrmeku/dagraph";
 import assert from "node:assert/strict";
 import { describe, test } from "node:test";
+import { errorMessage } from "./kernel/format.ts";
 import type { Ports, Sh } from "./ports.ts";
 import { nullActionsArtifact } from "./ports/actions-artifact.ts";
 import { createMemoryActionsCache } from "./ports/actions-cache.ts";
@@ -20,6 +21,15 @@ import {
 
 const CAS = "/cas";
 const newGraph = () => new Graph<Ports>();
+
+/** The output directory a run step hands its command. */
+const outDirOf = (opts: Parameters<Sh["run"]>[1]): string => {
+  const out = opts?.env?.["DAGACTIONS_OUT"];
+  assert.ok(out, "DAGACTIONS_OUT");
+  return out;
+};
+const parsed = async (fs: Ports["fs"], path: string): Promise<unknown> =>
+  JSON.parse(await fs.readText(path));
 /** Executes `graph` under `ports`, on a cache of its own unless given one. */
 const executeUnder = (
   graph: Graph<Ports>,
@@ -52,9 +62,10 @@ describe("runAll + gate", () => {
 
     const results = await executeUnder(graph, p);
     const byName = new Map(results.map((r) => [r.name, r]));
-    const goodResult = byName.get("good")!;
-    const badResult = byName.get("bad")!;
-    const gateResult = byName.get("gate")!;
+    const goodResult = byName.get("good");
+    const badResult = byName.get("bad");
+    const gateResult = byName.get("gate");
+    assert.ok(goodResult && badResult && gateResult, "good, bad and gate");
     const goodKey = goodResult.actionKey;
 
     const out = goodResult.status === "done" && `${CAS}/${goodKey}/out-${goodResult.contentHash}`;
@@ -64,7 +75,7 @@ describe("runAll + gate", () => {
         good: goodResult.status === "done" && {
           outputs: goodResult.outputs,
           log: await p.fs.readText(`${CAS}.logs/${goodKey}.log`),
-          result: JSON.parse(await p.fs.readText(`${out}/result.json`)),
+          result: await parsed(p.fs, `${out}/result.json`),
         },
         bad: badResult.status === "failed" && badResult.error.message,
         gate: gateResult.status === "failed" && gateResult.error.message,
@@ -101,7 +112,11 @@ describe("restoreCache + saveCache", () => {
       deps: { pnpm },
       cacheable: false,
     });
-    saveCache(graph, { name: "save:pnpm", cache: pnpm, deps: { install: settled(install) } });
+    saveCache(graph, {
+      name: "save:pnpm",
+      cache: pnpm,
+      deps: { install: settled({ name: install.name }) },
+    });
     saveCache(graph, { name: "save:cas", cache: cas, deps: { install } });
     const save = service.saveCache;
     service.saveCache = async (paths, key) => {
@@ -112,12 +127,16 @@ describe("restoreCache + saveCache", () => {
 
     const results = await executeUnder(graph, p);
     const byName = new Map(results.map((r) => [r.name, r]));
-    const json = async (name: string) => {
-      const r = byName.get(name)!;
-      return r.status === "done" ? JSON.parse(await fs.readText(r.outputs as string)) : r.status;
+    const json = async (name: string): Promise<unknown> => {
+      const r = byName.get(name);
+      assert.ok(r, name);
+      return r.status === "done" ? parsed(fs, soleOutput(r.outputs)) : r.status;
     };
-    const log = async (name: string) =>
-      fs.readText(`${CAS}.logs/${byName.get(name)!.actionKey}.log`);
+    const log = async (name: string) => {
+      const r = byName.get(name);
+      assert.ok(r, name);
+      return fs.readText(`${CAS}.logs/${r.actionKey}.log`);
+    };
 
     assert.deepEqual(
       {
@@ -185,7 +204,7 @@ describe("uploadArtifact", () => {
     } = createTestPorts({
       sh: {
         run: async (cmd, opts) => {
-          const out = opts!.env!["DAGACTIONS_OUT"]!;
+          const out = outDirOf(opts);
           if (cmd[0] === "pack") await fs.writeText(`${out}/pkg.tgz`, "bytes");
           if (cmd[0] === "bundle") await fs.writeText(`${out}/main.js`, "js");
           return cmd[0] === "bad"
@@ -228,13 +247,13 @@ describe("uploadArtifact", () => {
       name: "upload:report",
       artifact: "report",
       path: [bad.outputs.report],
-      deps: { bad: settled(bad) },
+      deps: { bad: settled({ name: bad.name }) },
     });
     uploadArtifact(graph, {
       name: "upload:required",
       artifact: "required",
       path: [bad.outputs.report],
-      deps: { bad: settled(bad) },
+      deps: { bad: settled({ name: bad.name }) },
       ifNoFilesFound: "error",
     });
     // Ports are the execution's: the upload with no service runs in an execution of its own.
@@ -263,15 +282,19 @@ describe("uploadArtifact", () => {
     // The offline graph's pack is a cache hit of the first's, which keeps its own result here.
     const byName = new Map([...offlineResults, ...results].map((r) => [r.name, r]));
     const out = (name: string) => {
-      const r = byName.get(name)!;
+      const r = byName.get(name);
+      assert.ok(r, name);
       return r.status === "done" && `${CAS}/${r.actionKey}/out-${r.contentHash}`;
     };
-    const json = async (name: string) => {
-      const r = byName.get(name)!;
+    const json = async (name: string): Promise<unknown> => {
+      const r = byName.get(name);
+      assert.ok(r, name);
       return r.status === "done"
-        ? JSON.parse(await fs.readText(r.outputs as string))
+        ? parsed(fs, soleOutput(r.outputs))
         : r.status === "failed" && r.error.message;
     };
+    const tarballUpload = byName.get("upload:tarball");
+    assert.ok(tarballUpload, "upload:tarball");
     const names = [
       "upload:tarball",
       "upload:again",
@@ -283,8 +306,10 @@ describe("uploadArtifact", () => {
     ];
     assert.deepEqual(
       {
-        outputs: Object.fromEntries(await Promise.all(names.map(async (n) => [n, await json(n)]))),
-        log: await fs.readText(logPath(CAS, byName.get("upload:tarball")!.actionKey)),
+        outputs: Object.fromEntries(
+          await Promise.all(names.map(async (n): Promise<[string, unknown]> => [n, await json(n)])),
+        ),
+        log: await fs.readText(logPath(CAS, tarballUpload.actionKey)),
         warnings: rec.annotations,
         uploads: [...service.uploads],
         uncached: [...graph.describe(), ...offline.describe()]
@@ -331,8 +356,7 @@ describe("declared outputs", () => {
       sh: {
         run: async (cmd, opts) => {
           seen.push({ cmd, env: opts?.env });
-          if (cmd[0] === "pack")
-            await fs.writeText(`${opts!.env!["DAGACTIONS_OUT"]}/pkg.tgz`, "bytes");
+          if (cmd[0] === "pack") await fs.writeText(`${outDirOf(opts)}/pkg.tgz`, "bytes");
           return { code: 0, stdout: "", stderr: "", output: "", ok: true };
         },
       },
@@ -351,13 +375,16 @@ describe("declared outputs", () => {
     });
     const results = await executeUnder(graph, p);
     const byName = new Map(results.map((r) => [r.name, r]));
-    const packResult = byName.get("pack")!;
-    const forgotResult = byName.get("forgot")!;
+    const packResult = byName.get("pack");
+    const forgotResult = byName.get("forgot");
+    const publishResult = byName.get("publish");
+    assert.ok(packResult && forgotResult && publishResult, "pack, forgot and publish");
     const packOut =
       packResult.status === "done" &&
       `${CAS}/${packResult.actionKey}/out-${packResult.contentHash}`;
     const tarball = `${packOut}/pkg.tgz`;
-    const publish = seen.find((s) => s.cmd[0] === "publish")!;
+    const publish = seen.find((s) => s.cmd[0] === "publish");
+    assert.ok(publish, "publish command");
     assert.deepEqual(
       {
         packOutputs: packResult.status === "done" && packResult.outputs,
@@ -373,7 +400,7 @@ describe("declared outputs", () => {
         publishCmd: ["publish", tarball],
         publishEnv: {
           RESULT: `${packOut}/result.json`,
-          DAGACTIONS_OUT: `${CAS}/${byName.get("publish")!.actionKey}/tmp-<uuid>`,
+          DAGACTIONS_OUT: `${CAS}/${publishResult.actionKey}/tmp-<uuid>`,
         },
         forgot: "declared output tarball missing: pkg.tgz",
       },
@@ -392,7 +419,7 @@ describe("refs in template strings", () => {
       sh: {
         run: async (cmd, opts) => {
           seen.push({ cmd, map: opts?.env?.MAP });
-          const out = opts!.env!["DAGACTIONS_OUT"]!;
+          const out = outDirOf(opts);
           if (cmd[0] === "build") {
             await fs.writeText(`${out}/main.js`, "js");
             await fs.writeText(`${out}/main.js.map`, "map");
@@ -409,24 +436,24 @@ describe("refs in template strings", () => {
       name: "size",
       cmd: ["size", `--file=${built.outputs.bundle}`, bad.outputs.result],
       env: { MAP: `${built.outputs.bundle}.map` },
-      deps: { built, bad: settled(bad) },
+      deps: { built, bad: settled({ name: bad.name }) },
     });
     run(graph, {
       name: "report",
       cmd: ["report", `--from=${bad.outputs.result}`],
-      deps: { bad: settled(bad) },
+      deps: { bad: settled({ name: bad.name }) },
     });
     uploadArtifact(graph, {
       name: "upload:map",
       artifact: "map",
       path: [`${built.outputs.bundle}.map`, bad.outputs.result],
-      deps: { built, bad: settled(bad) },
+      deps: { built, bad: settled({ name: bad.name }) },
     });
     uploadArtifact(graph, {
       name: "upload:xml",
       artifact: "xml",
       path: [`${bad.outputs.result}.xml`],
-      deps: { bad: settled(bad) },
+      deps: { bad: settled({ name: bad.name }) },
     });
     const refused = [
       () => run(graph, { name: "orphan", cmd: [`--file=${built.outputs.bundle}`] }),
@@ -442,14 +469,19 @@ describe("refs in template strings", () => {
         add();
         return null;
       } catch (e) {
-        return (e as Error).message;
+        return errorMessage(e);
       }
     });
     const results = await executeUnder(graph, p);
     // The same graph under another CAS directory, where every output has another path.
     const elsewhere = await executeUnder(graph, p, "/elsewhere");
-    const keyOf = (rs: typeof results) => rs.find((r) => r.name === "size")!.actionKey;
-    const build = results.find((r) => r.name === "build")!;
+    const keyOf = (rs: typeof results) => {
+      const size = rs.find((r) => r.name === "size");
+      assert.ok(size, "size");
+      return size.actionKey;
+    };
+    const build = results.find((r) => r.name === "build");
+    assert.ok(build, "build");
     const out = build.status === "done" && `${CAS}/${build.actionKey}/out-${build.contentHash}`;
     assert.deepEqual(
       {
@@ -481,8 +513,7 @@ describe("a dep's output in a command", () => {
     const { ports: p, fs } = createTestPorts({
       sh: {
         run: async (cmd, opts) => {
-          if (cmd[0] === "pack")
-            await fs.writeText(`${opts!.env!.DAGACTIONS_OUT}/pkg.tgz`, "bytes");
+          if (cmd[0] === "pack") await fs.writeText(`${outDirOf(opts)}/pkg.tgz`, "bytes");
           return { code: 0, stdout: "", stderr: "", output: "", ok: true };
         },
       },
@@ -522,7 +553,7 @@ describe("refs built by hand", () => {
       sh: {
         run: async (cmd, opts) => {
           seen.push({ cmd, f: opts?.env?.F });
-          if (cmd[0] === "build") await fs.writeText(`${opts!.env!.DAGACTIONS_OUT}/main.js`, "js");
+          if (cmd[0] === "build") await fs.writeText(`${outDirOf(opts)}/main.js`, "js");
           return { code: 0, stdout: "", stderr: "", output: "", ok: true };
         },
       },
@@ -541,11 +572,12 @@ describe("refs built by hand", () => {
         add();
         return null;
       } catch (e) {
-        return (e as Error).message;
+        return errorMessage(e);
       }
     });
     const results = await executeUnder(graph, p);
-    const build = results.find((r) => r.name === "build")!;
+    const build = results.find((r) => r.name === "build");
+    assert.ok(build, "build");
     const out = build.status === "done" && `${CAS}/${build.actionKey}/out-${build.contentHash}`;
     assert.deepEqual(
       { size: seen.find((s) => s.cmd[0] === "size"), uploads: [...service.uploads], refused },
@@ -572,7 +604,7 @@ describe("post", () => {
         if (cmd[1] === "stop") testsResult = opts?.env?.TESTS;
         if (cmd[0] === "bad")
           return { code: 1, stdout: "", stderr: "no\n", output: "no\n", ok: false };
-        if (cmd[1] === "start") await fs.writeText(`${opts!.env!.DAGACTIONS_OUT}/pid`, "42");
+        if (cmd[1] === "start") await fs.writeText(`${outDirOf(opts)}/pid`, "42");
         return { code: 0, stdout: "", stderr: "", output: "", ok: true };
       },
     };
@@ -586,17 +618,18 @@ describe("post", () => {
       main: db,
       cmd: ["db", "stop", db.outputs.pid],
       env: { TESTS: tests.outputs.result },
-      deps: { tests: settled(tests) },
+      deps: { tests: settled({ name: tests.name }) },
     });
     post(graph, { name: "down:broken", main: broken, cmd: ["never"], deps: {} });
 
     const results = await executeUnder(graph, p);
-    const stop = calls.find((c) => c[1] === "stop")!;
+    const stopPid = calls.find((c) => c[1] === "stop")?.[2];
+    assert.ok(stopPid, "the stop command's pid path");
     assert.deepEqual(
       {
         statuses: Object.fromEntries(results.map((r) => [r.name, r.status])),
         calls: calls.map((c) => c.slice(0, 2)),
-        stoppedPid: await fs.readText(stop[2]!),
+        stoppedPid: await fs.readText(stopPid),
         testsResult,
         uncached: graph
           .describe()

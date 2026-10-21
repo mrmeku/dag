@@ -15,12 +15,13 @@ import { after, describe, test } from "node:test";
 import { stripVTControlCharacters } from "node:util";
 
 const CLI = join(import.meta.dirname, "cli.ts");
-const EMPTY = "export default { workflow: async () => {} };\n";
+const IMPORT_DEFINE_WORKFLOW = `import { defineWorkflow } from ${JSON.stringify(join(import.meta.dirname, "workflow.ts"))};`;
 /** A workflow file whose graph `body` builds, with `w`. */
 const workflowOf = (body: string) =>
-  `import { defineWorkflow } from ${JSON.stringify(join(import.meta.dirname, "workflow.ts"))};
+  `${IMPORT_DEFINE_WORKFLOW}
 export default defineWorkflow({ build: (w) => { ${body} } });
 `;
+const EMPTY = workflowOf("");
 // The CLI tells a terminal from a pipe by `isTTY` alone, which this sets before it looks.
 const AS_IF_A_TERMINAL = ["--import", "data:text/javascript,process.stdout.isTTY = true"];
 
@@ -70,14 +71,15 @@ function cli(
   const child = spawn(
     process.execPath,
     [...(tty ? AS_IF_A_TERMINAL : []), CLI, command, "ci.ts", ...args],
-    { cwd: dir, env: { PATH: process.env.PATH!, GIT_DIR: join(dir, "no-git"), ...env } },
+    { cwd: dir, env: { PATH: process.env.PATH, GIT_DIR: join(dir, "no-git"), ...env } },
   );
   children.add(child);
   let stdout = "";
   const waiting = [...interrupts];
   child.stdout.on("data", (chunk: Buffer) => {
     stdout += chunk.toString();
-    if (waiting.length > 0 && stdout.includes(waiting[0]!)) {
+    const next = waiting[0];
+    if (next !== undefined && stdout.includes(next)) {
       waiting.shift();
       child.kill("SIGINT");
     }
@@ -114,7 +116,7 @@ describe("dagactions run", () => {
     const firstLines = await Promise.all(
       Object.entries(cases).map(async ([name, invocation]) => {
         const { stdout } = await cli(EMPTY, invocation).exited;
-        return [name, stripVTControlCharacters(stdout[0]!)];
+        return [name, stripVTControlCharacters(stdout[0] ?? "")];
       }),
     );
     assert.deepEqual(Object.fromEntries(firstLines), {
@@ -211,7 +213,7 @@ describe("dagactions run", () => {
   test("a second ctrl-c while the workflow builds its graph", LIMIT, async () => {
     const lastRun = JSON.stringify({ durations: { a: 1200 } });
     const run = cli(
-      'export default { workflow: async () => { console.log("building"); await new Promise((r) => setTimeout(r, 60_000)); } };\n',
+      `${IMPORT_DEFINE_WORKFLOW}\nexport default defineWorkflow({ build: async () => { console.log("building"); await new Promise((r) => setTimeout(r, 60_000)); } });\n`,
       {
         args: ["--output-style", "failures"],
         files: { ".dagactions/cas/last-run.json": lastRun },

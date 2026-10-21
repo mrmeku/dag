@@ -32,8 +32,19 @@ interface ActionInput {
   default?: string;
 }
 
+const isActionInput = (v: unknown): v is ActionInput =>
+  typeof v === "object" &&
+  v !== null &&
+  "description" in v &&
+  typeof v.description === "string" &&
+  (!("required" in v) || typeof v.required === "boolean") &&
+  (!("default" in v) || typeof v.default === "string");
+
+const isActionInputs = (v: unknown): v is Record<string, ActionInput> =>
+  typeof v === "object" && v !== null && Object.values(v).every(isActionInput);
+
 const code = (text: string) => `\`${text}\``;
-const sentence = (text: string) => `${text[0]!.toUpperCase()}${text.slice(1)}.`;
+const sentence = (text: string) => `${text.charAt(0).toUpperCase()}${text.slice(1)}.`;
 const table = (header: string[], rows: string[][]) =>
   [header, header.map(() => "-"), ...rows].map((cells) => `| ${cells.join(" | ")} |`);
 
@@ -78,9 +89,10 @@ function cliLines(): string[] {
 }
 
 function actionLines(): string[] {
-  const { inputs } = parse(readFileSync(ACTION_YML_PATH, "utf8")) as {
-    inputs: Record<string, ActionInput>;
-  };
+  const action: unknown = parse(readFileSync(ACTION_YML_PATH, "utf8"));
+  const inputs =
+    typeof action === "object" && action !== null && "inputs" in action && action.inputs;
+  if (!isActionInputs(inputs)) throw new Error(`${ACTION_YML_PATH}: inputs are not action inputs`);
   return table(
     ["Input", "Default", "Meaning"],
     Object.entries(inputs).map(([name, input]) => [
@@ -92,29 +104,30 @@ function actionLines(): string[] {
 }
 
 function fileLines(): string[] {
+  const files: [string, string][] = [
+    [
+      `${DEFAULT_CAS_DIR}/`,
+      "The outputs of each step, by cache key. Cache this directory between runs.",
+    ],
+    [
+      logPath(DEFAULT_CAS_DIR, "<key>"),
+      "The log of each step, next to the CAS and not in it. Never cache it.",
+    ],
+    [
+      `${DEFAULT_CAS_DIR}/${LAST_RUN_FILE}`,
+      "The time of each step in the last run. The footer and the step summary compare with it.",
+    ],
+    [
+      `${DEFAULT_HISTORY_DIR}/`,
+      "The history of each run: each step that finished, with the run's lock. `dagactions post`, the action's `post` entry and the next run read them.",
+    ],
+    [`${DEFAULT_LOG_DIR}/`, "Local runs only: the log of each step, while it runs."],
+    [DEFAULT_FAILURES_REPORT_PATH, "Local runs only: the report of the failures."],
+    [DEFAULT_SUMMARY_PATH, "Local runs only: the step summary that GitHub would show."],
+  ];
   return table(
     ["Path", "Content"],
-    [
-      [
-        `${DEFAULT_CAS_DIR}/`,
-        "The outputs of each step, by cache key. Cache this directory between runs.",
-      ],
-      [
-        logPath(DEFAULT_CAS_DIR, "<key>"),
-        "The log of each step, next to the CAS and not in it. Never cache it.",
-      ],
-      [
-        `${DEFAULT_CAS_DIR}/${LAST_RUN_FILE}`,
-        "The time of each step in the last run. The footer and the step summary compare with it.",
-      ],
-      [
-        `${DEFAULT_HISTORY_DIR}/`,
-        "The history of each run: each step that finished, with the run's lock. `dagactions post`, the action's `post` entry and the next run read them.",
-      ],
-      [`${DEFAULT_LOG_DIR}/`, "Local runs only: the log of each step, while it runs."],
-      [DEFAULT_FAILURES_REPORT_PATH, "Local runs only: the report of the failures."],
-      [DEFAULT_SUMMARY_PATH, "Local runs only: the step summary that GitHub would show."],
-    ].map(([path, content]) => [code(path!), content!]),
+    files.map(([path, content]) => [code(path), content]),
   );
 }
 

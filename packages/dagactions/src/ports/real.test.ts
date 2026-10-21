@@ -1,6 +1,5 @@
 import assert from "node:assert/strict";
-import { spawn } from "node:child_process";
-import { once } from "node:events";
+import { spawn, type ChildProcess } from "node:child_process";
 import { existsSync, mkdtempSync, readdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -13,6 +12,13 @@ const IGNORES_SIGINT = [
   "-e",
   "process.on('SIGINT', () => {}); require('fs').writeFileSync(process.argv[1], ''); setInterval(() => {}, 1000)",
 ];
+
+/** How `child` exits, as `once(child, "exit")` gives it: its code and the signal that ended it. */
+const exitOf = (child: ChildProcess) =>
+  new Promise<[number | null, NodeJS.Signals | null]>((resolve, reject) => {
+    child.once("exit", (code, signal) => resolve([code, signal]));
+    child.once("error", reject);
+  });
 
 const until = async (ready: () => boolean) => {
   while (!ready()) await new Promise((r) => setTimeout(r, 20));
@@ -190,7 +196,7 @@ describe("abortOnSignals", () => {
     `;
     try {
       const parent = spawn("node", ["--input-type=module", "-e", script], { stdio: "ignore" });
-      const exited = once(parent, "exit");
+      const exited = exitOf(parent);
       await until(() => existsSync(ready));
       parent.kill("SIGINT");
       await new Promise((r) => setTimeout(r, 200));
@@ -224,7 +230,7 @@ describe("abortOnSignals", () => {
       const child = spawn("node", ["--input-type=module", "-e", script], {
         stdio: ["ignore", "pipe", "pipe"],
       });
-      const exited = once(child, "exit");
+      const exited = exitOf(child);
       await until(() => existsSync(ready));
       child.stdout.destroy();
       child.stderr.destroy();

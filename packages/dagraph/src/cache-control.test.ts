@@ -1,8 +1,9 @@
 import { describe, expect, test } from "bun:test";
+import assert from "node:assert/strict";
 
 import { MemCache } from "./cache.ts";
 import { defineAction } from "./define-action.ts";
-import { execute } from "./execute.ts";
+import { execute, type ExecuteOptions } from "./execute.ts";
 import { Graph, type ActionContext, type NodeRef } from "./graph/index.ts";
 import { orchestrate } from "./orchestrate.ts";
 import { createMemoryDagFs, type MemoryDagFs } from "./ports/memory-fs.ts";
@@ -22,7 +23,23 @@ async function emit(c: ActionContext<Ports>, kind: string, content: string) {
   await c.ports.fs.writeText(path, content);
   return path;
 }
-const read = (ports: Ports, path: string) => ports.fs.files.get(path) as string;
+const read = (ports: Ports, path: string) => {
+  const text = ports.fs.files.get(path);
+  assert.ok(typeof text === "string", `${path} holds no text`);
+  return text;
+};
+/** The video id a source file holds. */
+const idOf = (text: string): string => {
+  const source: unknown = JSON.parse(text);
+  assert.ok(
+    typeof source === "object" &&
+      source !== null &&
+      "id" in source &&
+      typeof source.id === "string",
+    "a source file holds its video's id",
+  );
+  return source.id;
+};
 
 type Dep = { deps: { source: NodeRef<string> } };
 const source = defineAction<Ports, { inputs: { video: string } }, string>({
@@ -34,9 +51,9 @@ const transcript = (version: number) =>
     kind: "transcript",
     inputs: { version },
     // A re-download at another bitrate is the same speech: key only on the video's id.
-    invalidateOn: { source: (path, ports) => JSON.parse(read(ports, path)).id },
+    invalidateOn: { source: (path, ports) => idOf(read(ports, path)) },
     action: async (c) =>
-      emit(c, "transcript", `words(${JSON.parse(read(c.ports, c.depOutputs.source)).id})`),
+      emit(c, "transcript", `words(${idOf(read(c.ports, c.depOutputs.source))})`),
   });
 const packaged = defineAction<Ports, Dep, string>({
   kind: "packaged",
@@ -143,13 +160,15 @@ describe("cache control", () => {
 
   test("execute refuses v0.3.0's per-node forms, naming where a choice per node lives", async () => {
     const { ports, ctx } = setup();
-    const refused = (options: object) =>
-      execute(buildGraph(), ctx, options as never).then(
+    const refused = (options: ExecuteOptions) =>
+      execute(buildGraph(), ctx, options).then(
         () => "accepted",
         (e: Error) => e.message,
       );
     expect({
+      // @ts-expect-error: force is true or false
       predicate: await refused({ force: (n: { kind: string }) => n.kind === "source" }),
+      // @ts-expect-error: execute takes no cacheOnly
       cacheOnly: await refused({ cacheOnly: true }),
       ran: ports.ran,
     }).toEqual({

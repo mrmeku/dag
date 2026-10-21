@@ -18,8 +18,10 @@ describe("GitHub renderer", () => {
         run: async (cmd, opts) => {
           if (cmd[0] === "lint") return exited(1, "src/a.ts: error\n");
           started();
+          const signal = opts?.signal;
+          if (!signal) throw new Error(`${cmd.join(" ")} ran without a signal`);
           return new Promise((resolve) =>
-            opts!.signal!.addEventListener("abort", () => resolve(exited(-1, "compiling\n"))),
+            signal.addEventListener("abort", () => resolve(exited(-1, "compiling\n"))),
           );
         },
       },

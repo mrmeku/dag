@@ -24,10 +24,10 @@ const { createGithubCi } = await import("./github.ts");
 const stdoutOf = (f: () => void): string[] => {
   let out = "";
   const write = process.stdout.write;
-  process.stdout.write = ((chunk: string | Uint8Array) => {
+  process.stdout.write = (chunk: string | Uint8Array) => {
     out += String(chunk);
     return true;
-  }) as typeof process.stdout.write;
+  };
   try {
     f();
   } finally {
@@ -39,8 +39,8 @@ const stdoutOf = (f: () => void): string[] => {
 const RUN_LOG = "[run log](https://github.com/acme/app/actions/runs/42)";
 
 type Call = { method: string; url: string; body: unknown };
-const recording = (calls: Call[], status: number): typeof fetch =>
-  (async (url, init) => {
+const recording = (calls: Call[], status: number): typeof fetch => {
+  const record = async (...[url, init]: Parameters<typeof fetch>) => {
     calls.push({
       method: init?.method ?? "GET",
       url: String(url),
@@ -50,7 +50,9 @@ const recording = (calls: Call[], status: number): typeof fetch =>
       status,
       headers: { "content-type": "application/json" },
     });
-  }) as typeof fetch;
+  };
+  return Object.assign(record, { preconnect: () => {} });
+};
 
 describe("github adapter", () => {
   test("the context is the toolkit's; check runs target the PR head sha, update by id, link to the run, and create directly when never started", async () => {
@@ -172,8 +174,18 @@ describe("github adapter", () => {
     const ci = createGithubCi({ token: "t", fetch: recording(calls, 201) });
     const long = `${"x".repeat(70_000)}END`;
     await ci.check({ name: "n", status: "completed", conclusion: "failure", summary: long });
-    const { summary } = (calls[0]!.body as { output: { summary: string } }).output;
-    const [kept, link] = summary.split("\n\n");
-    assert.deepEqual([kept!.length, kept!.endsWith("END"), link], [65_000, true, RUN_LOG]);
+    const body = calls[0]?.body;
+    const summary =
+      typeof body === "object" &&
+      body !== null &&
+      "output" in body &&
+      typeof body.output === "object" &&
+      body.output !== null &&
+      "summary" in body.output &&
+      typeof body.output.summary === "string"
+        ? body.output.summary
+        : "";
+    const [kept = "", link] = summary.split("\n\n");
+    assert.deepEqual([kept.length, kept.endsWith("END"), link], [65_000, true, RUN_LOG]);
   });
 });

@@ -93,8 +93,6 @@ async function publish(
   return { outputs: moved, dir: published };
 }
 
-type Fingerprint = (outputs: Outputs, ports: unknown) => Promise<string> | string;
-
 /** The node's action key, from its inputs by name and its deps by role. */
 async function actionKeyOf(
   { spec, roles, inputs }: GraphNode,
@@ -118,7 +116,7 @@ async function actionKeyOf(
   const keyedDeps: Record<string, KeyedDep> = {};
   for (const [role, dep] of Object.entries(roles)) {
     const entry = entryOf(dep);
-    const fingerprint = (spec.invalidateOn as Record<string, Fingerprint> | undefined)?.[role];
+    const fingerprint = spec.invalidateOn?.[role];
     keyedDeps[role] = !entry
       ? ["missing"]
       : fingerprint
@@ -146,16 +144,16 @@ export async function processNode<Ports, Meta>(
         `graph, a closure of it, or any graph that declares the node the same way. A key is ` +
         `local to its node, so each gives it the same key.`,
     );
-  const { cache, fs, casBaseDir, ports } = executionContext as ExecutionContext;
+  const { cache, fs, casBaseDir, ports }: ExecutionContext = executionContext;
   const { node, spec, roles } = found;
-  const meta = node.meta === undefined ? {} : { meta: node.meta as Meta };
+  const meta = node.meta === undefined ? {} : { meta: node.meta };
   const entryOf = (dep: string) => (Object.hasOwn(depEntries, dep) ? depEntries[dep] : undefined);
   const missing = requiredDeps(node).find((dep) => !entryOf(dep));
   if (missing !== undefined) return { name, actionKey: "", status: "dep-failed", dep: missing };
 
   let actionKey: string;
   try {
-    const memo = inputHashMemos.get(executionContext) ?? new Map();
+    const memo = inputHashMemos.get(executionContext) ?? new Map<string, Promise<string>>();
     actionKey = await actionKeyOf(found, entryOf, ports, fs.hashFile, memo);
   } catch (e) {
     return { name, actionKey: "", status: "failed", error: errorOf(e), elapsed: 0 };
@@ -284,7 +282,7 @@ export async function processNode<Ports, Meta>(
  */
 function actionSignal(timeoutMs: number | undefined, cancel: AbortSignal | undefined) {
   const controller = new AbortController();
-  const onCancel = () => controller.abort(cancel!.reason);
+  const onCancel = () => controller.abort(cancel?.reason);
   cancel?.addEventListener("abort", onCancel, { once: true });
   if (cancel?.aborted) onCancel();
   const timer =

@@ -35,9 +35,11 @@ function terminal(columns: number, rows: number) {
     screen: async () => {
       await new Promise<void>((done) => term.write("", done));
       const buffer = term.buffer.active;
-      const lines = Array.from({ length: buffer.length }, (_, i) =>
-        buffer.getLine(i)!.translateToString(true),
-      );
+      const lines = Array.from({ length: buffer.length }, (_, i) => {
+        const line = buffer.getLine(i);
+        assert.ok(line, `line ${i}`);
+        return line.translateToString(true);
+      });
       const window = lines.slice(buffer.baseY);
       while (window.at(-1) === "") window.pop();
       return { scrollback: lines.slice(0, buffer.baseY), window };
@@ -53,10 +55,12 @@ function heldSh(held: string[]) {
   >();
   const sh: Sh = {
     run: async (cmd, opts) => {
-      if (!held.includes(cmd[0]!)) return { code: 0, stdout: "", stderr: "", output: "", ok: true };
+      const [name] = cmd;
+      if (name === undefined || !held.includes(name))
+        return { code: 0, stdout: "", stderr: "", output: "", ok: true };
       return new Promise((resolve) => {
         let output = "";
-        running.set(cmd[0]!, {
+        running.set(name, {
           print: (chunk) => {
             output += chunk;
             opts?.onOutput?.(chunk);
@@ -66,7 +70,12 @@ function heldSh(held: string[]) {
       });
     },
   };
-  return { sh, command: (name: string) => running.get(name)! };
+  const command = (name: string) => {
+    const held = running.get(name);
+    assert.ok(held, `running command ${name}`);
+    return held;
+  };
+  return { sh, command };
 }
 
 /**

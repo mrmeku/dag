@@ -13,6 +13,7 @@ import {
 } from "./summary.ts";
 
 const CAS = "/cas";
+const parsed = async (text: Promise<string>): Promise<unknown> => JSON.parse(await text);
 const node = (name: string, kind: string, deps: string[] = [], settledDeps?: string[]): Node => ({
   name,
   kind,
@@ -27,7 +28,7 @@ const NODES = [
   node("d", "gate", ["c"], ["c"]),
 ];
 
-const RESULTS: Result[] = [
+const RESULTS: [Result, Result, Result, Result] = [
   { name: "a", actionKey: "k1", status: "done", outputs: "x", contentHash: "h", elapsed: 400 },
   { name: "b", actionKey: "k2", status: "cached", outputs: "y", contentHash: "h" },
   {
@@ -39,7 +40,7 @@ const RESULTS: Result[] = [
   },
   { name: "d", actionKey: "", status: "dep-failed", dep: "c" },
 ];
-const [A, B, C, D] = RESULTS as [Result, Result, Result, Result];
+const [A, B, C, D] = RESULTS;
 const settled = (result: Result): ExecEvent => ({ type: "result", node: result.name, result });
 const EVENTS: ExecEvent[] = [
   { type: "dispatch", node: "a" },
@@ -135,7 +136,7 @@ describe("reporter", () => {
         annotations: rec.annotations,
         checks: rec.checks,
         failed,
-        lastRun: JSON.parse(await fs.readText("/cas/last-run.json")),
+        lastRun: await parsed(fs.readText("/cas/last-run.json")),
       },
       {
         log: [

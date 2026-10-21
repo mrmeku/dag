@@ -6,10 +6,16 @@ import { DEFAULT_EXCLUDES } from "../config.ts";
 // terminal does not. Off GitHub nothing reads those commands, so they are dropped at the sink.
 if (!process.env["GITHUB_ACTIONS"]) {
   const write = process.stdout.write.bind(process.stdout);
-  process.stdout.write = ((chunk: string | Uint8Array, ...rest: unknown[]) =>
+  process.stdout.write = (
+    chunk: string | Uint8Array,
+    encoding?: BufferEncoding | ((err?: Error | null) => void),
+    cb?: (err?: Error | null) => void,
+  ) =>
     typeof chunk === "string" && chunk.startsWith("::debug::")
       ? true
-      : (write as (...a: unknown[]) => boolean)(chunk, ...rest)) as typeof process.stdout.write;
+      : typeof encoding === "function"
+        ? write(chunk, encoding)
+        : write(chunk, encoding, cb);
 }
 
 const withExcludes = (patterns: string[]) =>

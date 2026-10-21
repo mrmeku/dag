@@ -1,6 +1,30 @@
 /** What an action returns: a path, a list of paths, or a record of either, all under its outputDir. */
 export type Outputs = string | string[] | Record<string, string | string[]>;
 
+const isPaths = (value: unknown): value is string | string[] =>
+  typeof value === "string" || (Array.isArray(value) && value.every((v) => typeof v === "string"));
+
+/** Whether a value read back, such as a cache entry's, is outputs. */
+export const isOutputs = (value: unknown): value is Outputs =>
+  isPaths(value) ||
+  (typeof value === "object" &&
+    value !== null &&
+    !Array.isArray(value) &&
+    Object.values(value).every(isPaths));
+
+/** A node's outputs when they are one path, as its result holds them; refused otherwise. */
+export function soleOutput(outputs: Outputs): string {
+  if (typeof outputs !== "string") throw new Error("the node's outputs are not one path");
+  return outputs;
+}
+
+/** The path a node's record of outputs holds as `name`; refused when it holds none. */
+export function namedOutput(outputs: Outputs, name: string): string {
+  const path = typeof outputs === "object" && !Array.isArray(outputs) ? outputs[name] : undefined;
+  if (typeof path !== "string") throw new Error(`the node's outputs hold no path "${name}"`);
+  return path;
+}
+
 export const NODE_REF: unique symbol = Symbol.for("@mrmeku/dagraph/NodeRef");
 export const OUTPUT_REF: unique symbol = Symbol.for("@mrmeku/dagraph/OutputRef");
 export const FILE_INPUT: unique symbol = Symbol.for("@mrmeku/dagraph/file");
@@ -42,28 +66,28 @@ export interface FileInput {
   readonly [FILE_INPUT]: string;
 }
 
-function outputRefsOf(node: string): object {
-  return new Proxy(
+function outputRefsOf<T extends Outputs, Missing extends undefined>(
+  node: string,
+): OutputRefs<T, Missing> {
+  const outputs = new Proxy(
     {},
     {
       get: (_, output) =>
         typeof output === "string" ? { [OUTPUT_REF]: true, node, output } : undefined,
     },
   );
+  // eslint-disable-next-line @typescript-eslint/consistent-type-assertions -- the Proxy answers every name; T's keys exist only in the types
+  return { outputs } as OutputRefs<T, Missing>;
 }
 
 export function nodeRef<T extends Outputs>(name: string): NodeRef<T> {
-  return { [NODE_REF]: true, name, outputs: outputRefsOf(name) } as unknown as NodeRef<T>;
+  return Object.assign({ [NODE_REF]: true, name }, outputRefsOf<T, never>(name));
 }
 
 /** Mark a dep its node runs without: when it does not succeed, its role is `undefined`. */
 export function settled<T extends Outputs>(ref: NodeRef<T>): SettledRef<T> {
-  return {
-    [NODE_REF]: true,
-    name: ref.name,
-    settled: true,
-    outputs: outputRefsOf(ref.name),
-  } as unknown as SettledRef<T>;
+  const own = { [NODE_REF]: true, name: ref.name, settled: true } as const;
+  return Object.assign(own, outputRefsOf<T, undefined>(ref.name));
 }
 
 /** A file input, read by the action as its path. */

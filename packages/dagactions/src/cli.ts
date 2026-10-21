@@ -17,7 +17,7 @@ import { createLocalCi } from "./ports/local.ts";
 import { abortOnSignals, createSh, systemClock } from "./ports/real.ts";
 import { runJob, runPost, type RunOptions } from "./runner.ts";
 import { peer, pickActionsArtifact, pickActionsCache } from "./services.ts";
-import type { WorkflowDef } from "./workflow.ts";
+import { workflowDefOf } from "./workflow.ts";
 
 export const program = new Command("dagactions").description(
   "Run a CI workflow as a dagraph DAG: on GitHub Actions when GITHUB_ACTIONS=true (workflow commands, step summary, check runs), otherwise locally (terminal output, summary file).",
@@ -62,7 +62,7 @@ async function runOptionsFor(
   file: string,
   opts: CommonOptions,
 ): Promise<RunOptions & { workflowFile: string }> {
-  const def = ((await import(resolve(file))) as { default: WorkflowDef }).default;
+  const def = workflowDefOf(await import(resolve(file)), file);
   const sh = createSh();
   const fs = createNodeDagFs();
   // The GitHub adapter loads Octokit; a local run never needs it.

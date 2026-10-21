@@ -18,7 +18,7 @@ import { nullActionsCache } from "../ports/actions-cache.ts";
 import { createGithubCi } from "../ports/github.ts";
 import { createSh, systemClock } from "../ports/real.ts";
 import type { RunOptions } from "../runner.ts";
-import type { WorkflowDef } from "../workflow.ts";
+import { workflowDefOf } from "../workflow.ts";
 
 /** Notices for the services this process cannot reach; the main entry's alone, so once a job. */
 export function noticeUnavailableServices(): void {
@@ -41,8 +41,7 @@ export async function actionOptions(bundleUrl: string): Promise<RunOptions> {
         : next(specifier, context),
   });
   const file = core.getInput("workflow", { required: true });
-  const def = ((await import(pathToFileURL(resolve(file)).href)) as { default: WorkflowDef })
-    .default;
+  const def = workflowDefOf(await import(pathToFileURL(resolve(file)).href), file);
   const ci = createGithubCi({ token: process.env["GITHUB_TOKEN"] });
   const only = core.getInput("only").split(",").filter(Boolean);
   return {

@@ -19,12 +19,18 @@ export interface CommandCause {
   code: number;
 }
 
+const isCommandCause = (cause: unknown): cause is CommandCause =>
+  typeof cause === "object" &&
+  cause !== null &&
+  "argv" in cause &&
+  Array.isArray(cause.argv) &&
+  cause.argv.every((arg) => typeof arg === "string") &&
+  "cwd" in cause &&
+  typeof cause.cwd === "string" &&
+  "code" in cause &&
+  typeof cause.code === "number";
+
 /** The command a run step's failure names; another step's may carry any cause, or none. */
 export function commandOf(error: { cause?: unknown }): CommandCause | undefined {
-  const cause = error.cause as Partial<CommandCause> | undefined;
-  return Array.isArray(cause?.argv) &&
-    typeof cause.cwd === "string" &&
-    typeof cause.code === "number"
-    ? (cause as CommandCause)
-    : undefined;
+  return isCommandCause(error.cause) ? error.cause : undefined;
 }

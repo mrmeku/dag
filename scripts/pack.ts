@@ -41,17 +41,31 @@ const [pkg, version, outDir] = process.argv.slice(2);
 if (!pkg || !version || !outDir) throw new Error("usage: pack.ts <package> <version> <out dir>");
 const dir = `packages/${pkg}`;
 
-const run = (cmd: string[], cwd = ".") => {
-  const r = spawnSync(cmd[0]!, cmd.slice(1), { cwd, stdio: ["ignore", "pipe", "inherit"] });
-  if (r.status !== 0) throw new Error(`${cmd.join(" ")} exited ${r.status}`);
+const run = ([command, ...args]: [string, ...string[]], cwd = ".") => {
+  const r = spawnSync(command, args, { cwd, stdio: ["ignore", "pipe", "inherit"] });
+  if (r.status !== 0) throw new Error(`${[command, ...args].join(" ")} exited ${r.status}`);
   return r.stdout.toString();
 };
+const toJsRecord = (v: object): Record<string, unknown> =>
+  Object.fromEntries(Object.entries(v).map(([k, x]) => [k, toJs(x)]));
 const toJs = (v: unknown): unknown =>
   typeof v === "string"
     ? v.replace(/\.ts$/, ".js")
     : v && typeof v === "object"
-      ? Object.fromEntries(Object.entries(v).map(([k, x]) => [k, toJs(x)]))
+      ? toJsRecord(v)
       : v;
+
+const isRecord = (v: unknown): v is Record<string, unknown> =>
+  typeof v === "object" && v !== null && !Array.isArray(v);
+const isStrings = (v: unknown): v is Record<string, string> =>
+  isRecord(v) && Object.values(v).every((x) => typeof x === "string");
+
+/** A field of package.json that holds strings by name, refused when it holds anything else. */
+function strings(value: unknown, field: string): Record<string, string> {
+  if (!isStrings(value))
+    throw new Error(`${dir}/package.json: ${field} is not a record of strings`);
+  return value;
+}
 
 /** Where `name` is installed, looked up from `from` as Node does. */
 const installed = (name: string, from: string): string | undefined => {
@@ -108,25 +122,23 @@ async function bundleTypes(
 const stage = mkdtempSync(join(tmpdir(), "pack-"));
 try {
   run(["bunx", "tsgo", "-p", "tsconfig.build.json", "--outDir", stage]);
-  const manifest = JSON.parse(readFileSync(join(dir, "package.json"), "utf8")) as Record<
-    string,
-    unknown
-  >;
+  const manifest: unknown = JSON.parse(readFileSync(join(dir, "package.json"), "utf8"));
+  if (!isRecord(manifest)) throw new Error(`${dir}/package.json holds no object`);
   const { private: _private, scripts: _scripts, ...rest } = manifest;
   const dependencies = Object.fromEntries(
-    Object.entries((manifest.dependencies as Record<string, string>) ?? {}).map(([name, range]) => [
+    Object.entries(strings(manifest["dependencies"] ?? {}, "dependencies")).map(([name, range]) => [
       name,
       range.startsWith("workspace:") ? version : range,
     ]),
   );
   const inline = INLINE_TYPES[pkg];
-  const exports = manifest.exports as Record<string, string>;
-  if (inline) await bundleTypes(join(stage, pkg), exports, inline, dependencies);
+  const exports = inline && strings(manifest["exports"], "exports");
+  if (exports) await bundleTypes(join(stage, pkg), exports, inline, dependencies);
   const staged = {
-    ...(toJs(rest) as object),
+    ...toJsRecord(rest),
     version,
     dependencies,
-    ...(inline
+    ...(exports
       ? {
           types: "./types/index.d.ts",
           exports: Object.fromEntries(

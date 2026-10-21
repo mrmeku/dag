@@ -8,7 +8,15 @@ export {
 } from "./cache.ts";
 export { defineAction, type Action, type NodeRefOf, type OutputOf } from "./define-action.ts";
 export { execute, type ExecuteOptions } from "./execute.ts";
-export { Graph, closure, file, settled } from "./graph/index.ts";
+export {
+  Graph,
+  closure,
+  file,
+  isOutputs,
+  namedOutput,
+  settled,
+  soleOutput,
+} from "./graph/index.ts";
 export type {
   ActionContext,
   BaseParams,
@@ -36,4 +44,3 @@ export {
   type ThrottledSchedulerOptions,
 } from "./schedulers.ts";
 export { tally, type ExecEvent, type Result, type Tally } from "./types.ts";
-export { jsonParse } from "./utils.ts";

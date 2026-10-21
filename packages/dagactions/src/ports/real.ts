@@ -21,7 +21,7 @@ const groupAlive = (pid: number) => {
     process.kill(-pid, 0);
     return true;
   } catch (e) {
-    return (e as NodeJS.ErrnoException).code === "EPERM";
+    return e instanceof Error && "code" in e && e.code === "EPERM";
   }
 };
 

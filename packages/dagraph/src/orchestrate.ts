@@ -25,9 +25,9 @@ export type RunNode<Meta = unknown> = (
  * or grants an acquiring one its slot; it resolves once the node settles or, waiting for a slot,
  * gives its place back. `workAvailable` resolves when that may have changed what `take` returns.
  */
-export interface SchedulerContext {
-  take(filter?: (ready: Ready) => boolean): Ready | null;
-  run(ready: Ready): Promise<void>;
+export interface SchedulerContext<Meta = unknown> {
+  take(filter?: (ready: Ready<Meta>) => boolean): Ready<Meta> | null;
+  run(ready: Ready<Meta>): Promise<void>;
   hasWork(): boolean;
   workAvailable(): Promise<void>;
 }
@@ -36,7 +36,7 @@ export interface SchedulerContext {
  * The policy that admits ready nodes. It takes them in orchestration's order and only filters
  * it: it may hold a node back, but never reorders them.
  */
-export type Scheduler = (ctx: SchedulerContext) => Promise<void>;
+export type Scheduler = <Meta>(ctx: SchedulerContext<Meta>) => Promise<void>;
 
 /**
  * The scheduling half of `execute`, for an executor that processes nodes elsewhere. It works on
@@ -59,7 +59,7 @@ export async function orchestrate<Meta>(
   });
   if (unmet.length > 0)
     throw new Error(`orchestrate: nodes depend on nodes it was not given: ${unmet.join("; ")}`);
-  const state = new ExecState(all);
+  const state = new ExecState<Meta>(all);
   let processing = 0;
   let resumeLoop: () => void = () => {};
   const wake = () => resumeLoop();
@@ -73,8 +73,8 @@ export async function orchestrate<Meta>(
   /** The grant each miss waiting for its slot awaits. */
   const slots = new Map<string, { resolve: () => void; reject: (reason: unknown) => void }>();
 
-  const meta = (node: Node) => (node.meta === undefined ? {} : { meta: node.meta as Meta });
-  const settle = (node: Node, result: Result) => {
+  const meta = (node: Node<Meta>) => (node.meta === undefined ? {} : { meta: node.meta });
+  const settle = (node: Node<Meta>, result: Result) => {
     state.settle(node, result);
     onEvent?.({ type: "result", node: node.name, ...meta(node), result });
     releasePlace(node.name);
@@ -84,14 +84,14 @@ export async function orchestrate<Meta>(
   // Once cancelled, every node that becomes ready settles cancelled instead of running, and every
   // miss waiting for its slot stops waiting, so the loop drains as running nodes settle.
   const drainCancelled = () => {
-    let next: Ready | null;
+    let next: Ready<Meta> | null;
     while ((next = state.take())) {
-      if (next.acquiring) slots.get(next.node.name)?.reject(signal!.reason);
+      if (next.acquiring) slots.get(next.node.name)?.reject(signal?.reason);
       else settle(next.node, { name: next.node.name, actionKey: "", status: "cancelled" });
     }
   };
 
-  const acquireFor = (node: Node) => {
+  const acquireFor = (node: Node<Meta>) => {
     let gate: Promise<void> | undefined;
     const waitForSlot = () => {
       if (signal?.aborted) return Promise.reject(signal.reason);
@@ -106,7 +106,7 @@ export async function orchestrate<Meta>(
     return () => (gate ??= waitForSlot());
   };
 
-  const ctx: SchedulerContext = {
+  const ctx: SchedulerContext<Meta> = {
     take(filter) {
       if (signal?.aborted) {
         drainCancelled();
@@ -131,7 +131,7 @@ export async function orchestrate<Meta>(
       }
       onEvent?.({ type: "dispatch", node: node.name, ...meta(node) });
       processing++;
-      void run(node as Node<Meta>, state.depEntries(node), acquireFor(node))
+      void run(node, state.depEntries(node), acquireFor(node))
         .catch((e): Result => {
           if (signal?.aborted) return { name: node.name, actionKey: "", status: "cancelled" };
           const { cause: _, ...error } = errorOf(e);
