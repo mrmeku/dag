@@ -62,7 +62,8 @@ Before the engine uses a cache entry, it hashes the entry's files again. If a fi
 
 Each attempt of a node writes its outputs to an empty directory of its own, `<casBaseDir>/<action key>/tmp-<uuid>`. When the action succeeds, the engine renames it to `<casBaseDir>/<action key>/out-<content hash>` and rewrites the returned paths to match. Nothing writes that directory again, so two executions that share a CAS never change a file the other reads. At worst, both do the work and the later entry wins.
 
-- The engine compares paths in their normal form, so a path made with `path.join` matches. A returned path that is not under the output directory fails the node.
+- The action sees the output directory as an absolute path. A returned path under it can be absolute or relative to the working directory. The engine compares paths in their normal form, so a path made with `path.join` matches. A returned path that is not under the output directory fails the node.
+- The entry and the result hold each path in the form of `casBaseDir`. Thus under a relative `casBaseDir`, they hold relative paths, and a CAS directory restored under another working directory still hits. A key built from a handle's absolute `path`, in a fingerprint or in an output's content, would make it miss.
 - When an attempt publishes, the engine removes the key's published directories that existed before the attempt's action ran, and keeps its own. Thus attempts of one key that run at the same time both keep their directories, and the key's next attempt removes all the earlier ones. No attempt removes the files of an attempt that runs beside it.
 - An attempt that does not succeed has its directory removed. An attempt that is killed outright leaves its `tmp-<uuid>` directory.
 
@@ -98,14 +99,18 @@ const summarize = defineAction<Ports, { deps: { fetch: NodeRef<{ meta: string }>
   kind: "summarize",
   inputs: { version: "summarize-v1" },
   invalidateOn: {
-    fetch: async (outputs, ports) => (await ports.readJson(outputs.meta)).description,
+    fetch: async (outputs) => (await outputs.meta.json(isMeta)).description,
   },
-  action: async ({ depOutputs, ports, outputDir }) =>
-    summarizeDescription(ports, depOutputs.fetch.meta, outputDir),
+  action: async ({ depOutputs, ports, outputDir }) => {
+    const { description } = await depOutputs.fetch.meta.json(isMeta);
+    const out = `${outputDir}/summary.txt`;
+    await ports.writeFile(out, await ports.summarize(description));
+    return out;
+  },
 });
 ```
 
-While the description does not change, `summarize` comes from the cache, also when other fields of `meta` change. A fingerprint runs where the node is processed, with the execution's ports, and only for a dependency that succeeded.
+The fingerprint holds what the action reads: the description. While it does not change, `summarize` comes from the cache, also when other fields of `meta` change. A fingerprint runs where the node is processed, with the execution's ports, and only for a dependency that succeeded.
 
 A fingerprint that includes all that the action reads is as correct as the content hash. A fingerprint that leaves out something on purpose is a trade-off. For example, a transcript can be keyed on the identity and length of a video, but not on its encoding. Make that trade-off in `invalidateOn`, where the action declares it.
 

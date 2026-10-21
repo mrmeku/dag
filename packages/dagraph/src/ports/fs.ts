@@ -4,6 +4,7 @@
  * which admits no I/O modules (lint refuses them elsewhere, eslint.config.ts).
  */
 import { mkdir, readdir, rename, rm } from "node:fs/promises";
+import { resolve } from "node:path";
 import type { DagFs } from "../cache.ts";
 
 /** Streams large files through the native hasher instead of reading them whole. */
@@ -29,5 +30,6 @@ export function createBunDagFs(): DagFs {
         if (e.code === "ENOENT") return [];
         throw e;
       }),
+    resolve,
   };
 }

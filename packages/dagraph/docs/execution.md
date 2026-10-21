@@ -22,20 +22,20 @@ One call of `execute`, or of [`orchestrate`](executors.md), over one graph is an
 
 `ExecutionContext<Ports>` has these fields:
 
-| Field        | Meaning                                                                                                               |
-| ------------ | --------------------------------------------------------------------------------------------------------------------- |
-| `ports`      | The actions' tools. The engine gives them to each action and each `invalidateOn` fingerprint, and never looks inside. |
-| `cache`      | The cache. See [Caching](caching.md#caches).                                                                          |
-| `fs`         | The `DagFs` through which the engine does all its own I/O: hashing files, making, moving and removing directories.    |
-| `casBaseDir` | The directory for the outputs of each node. See [Caching](caching.md#where-the-files-go).                             |
+| Field        | Meaning                                                                                                                                                                                                                                                                   |
+| ------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `ports`      | The actions' tools. The engine gives them to each action and each `invalidateOn` fingerprint, and never looks inside.                                                                                                                                                     |
+| `cache`      | The cache. See [Caching](caching.md#caches).                                                                                                                                                                                                                              |
+| `fs`         | The `DagFs` through which the engine does all its own I/O: hashing files, making, moving and removing directories, and reading [file handles](graphs.md#file-handles). Its `resolve` gives each path that an action sees: the absolute path in the Node and Bun adapters. |
+| `casBaseDir` | The directory for the outputs of each node. See [Caching](caching.md#where-the-files-go).                                                                                                                                                                                 |
 
 `execute` refuses, by type, ports that do not satisfy the graph's. A graph whose actions need no ports takes no `ports`. To run the same graph with stub, mock or real tools, change `ports`.
 
-| `DagFs`               | Import from               | Use                                               |
-| --------------------- | ------------------------- | ------------------------------------------------- |
-| `createNodeDagFs()`   | `@mrmeku/dagraph/fs/node` | Node.                                             |
-| `createBunDagFs()`    | `@mrmeku/dagraph/fs`      | Bun. It streams large files through Bun's hasher. |
-| `createMemoryDagFs()` | `@mrmeku/dagraph`         | Tests. It holds files in a `Map`.                 |
+| `DagFs`               | Import from               | Use                                                                          |
+| --------------------- | ------------------------- | ---------------------------------------------------------------------------- |
+| `createNodeDagFs()`   | `@mrmeku/dagraph/fs/node` | Node.                                                                        |
+| `createBunDagFs()`    | `@mrmeku/dagraph/fs`      | Bun. It streams large files through Bun's hasher.                            |
+| `createMemoryDagFs()` | `@mrmeku/dagraph`         | Tests. It holds files in a `Map`, and its `resolve` returns a path as given. |
 
 The file system adapters are subpath exports, not part of the package index. Thus the index imports no I/O module. See [Executors](executors.md#sandboxes).
 
@@ -163,7 +163,7 @@ const transcribe = defineAction<Ports, TranscribeParams, string>({
   inputs: { version: "whisper-v1" },
   timeoutMs: 15 * 60_000,
   action: async ({ depOutputs, ports, outputDir, signal }) =>
-    ports.whisper.transcribe(depOutputs.download.audio, outputDir, { signal }),
+    ports.whisper.transcribe(depOutputs.download.audio.path, outputDir, { signal }),
 });
 ```
 

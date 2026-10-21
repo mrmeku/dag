@@ -23,11 +23,6 @@ async function emit(c: ActionContext<Ports>, kind: string, content: string) {
   await c.ports.fs.writeText(path, content);
   return path;
 }
-const read = (ports: Ports, path: string) => {
-  const text = ports.fs.files.get(path);
-  assert.ok(typeof text === "string", `${path} holds no text`);
-  return text;
-};
 /** The video id a source file holds. */
 const idOf = (text: string): string => {
   const source: unknown = JSON.parse(text);
@@ -51,13 +46,12 @@ const transcript = (version: number) =>
     kind: "transcript",
     inputs: { version },
     // A re-download at another bitrate is the same speech: key only on the video's id.
-    invalidateOn: { source: (path, ports) => idOf(read(ports, path)) },
-    action: async (c) =>
-      emit(c, "transcript", `words(${idOf(read(c.ports, c.depOutputs.source))})`),
+    invalidateOn: { source: async (source) => idOf(await source.text()) },
+    action: async (c) => emit(c, "transcript", `words(${idOf(await c.depOutputs.source.text())})`),
   });
 const packaged = defineAction<Ports, Dep, string>({
   kind: "packaged",
-  action: async (c) => emit(c, "packaged", `pkg(${read(c.ports, c.depOutputs.source)})`),
+  action: async (c) => emit(c, "packaged", `pkg(${await c.depOutputs.source.text()})`),
 });
 const entry = defineAction<
   Ports,
@@ -69,7 +63,7 @@ const entry = defineAction<
     emit(
       c,
       "entry",
-      `${read(c.ports, c.depOutputs.transcript)}+${read(c.ports, c.depOutputs.packaged)}`,
+      `${await c.depOutputs.transcript.text()}+${await c.depOutputs.packaged.text()}`,
     ),
 });
 const uploaded = defineAction<Ports, { deps: { entry: NodeRef<string> } }, string>({

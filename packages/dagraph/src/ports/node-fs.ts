@@ -6,7 +6,7 @@
 import { createHash } from "node:crypto";
 import { createReadStream } from "node:fs";
 import { access, mkdir, readdir, readFile, rename, rm, writeFile } from "node:fs/promises";
-import { dirname } from "node:path";
+import { dirname, resolve } from "node:path";
 import type { DagFs } from "../cache.ts";
 
 /** Streams large files through the hasher instead of reading them whole. */
@@ -40,5 +40,6 @@ export function createNodeDagFs(): DagFs {
         if (e.code === "ENOENT") return [];
         throw e;
       }),
+    resolve,
   };
 }

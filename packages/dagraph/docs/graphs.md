@@ -40,7 +40,7 @@ const resize = defineAction<
   inputs: { version: "resize-v1" },
   action: async ({ inputs, depOutputs, ports, outputDir }) => {
     const out = `${outputDir}/resized.jpg`;
-    await ports.images.resize(depOutputs.source, out, inputs.width);
+    await ports.images.resize(depOutputs.source.path, out, inputs.width);
     return out;
   },
 });
@@ -53,21 +53,118 @@ const resize = defineAction<
 
 The action function gets one argument, the action context. Each part of it is keyed, a tool, or this attempt's own:
 
-| Field        | Content                                                                                                     |
-| ------------ | ----------------------------------------------------------------------------------------------------------- |
-| `inputs`     | Each input, by name: a file as its path, a value as written, with each [output ref](#output-refs) resolved. |
-| `depOutputs` | The outputs of each dependency, by the role that `deps` gives it, with their types.                         |
-| `ports`      | The tools from the execution context. See [Execution](execution.md#the-execution-context).                  |
-| `outputDir`  | A new, empty directory that only this attempt writes.                                                       |
-| `signal`     | An `AbortSignal` that fires on the node's timeout or the execution's cancel.                                |
-| `output`     | A function for the text that the action prints, in chunks as printed. It adds no line ending.               |
+| Field        | Content                                                                                                                           |
+| ------------ | --------------------------------------------------------------------------------------------------------------------------------- |
+| `inputs`     | Each input, by name: a file as a [file handle](#file-handles), a value as written, with each [output ref](#output-refs) resolved. |
+| `depOutputs` | The outputs of each dependency, by the role that `deps` gives it, as file handles in the shape of the outputs.                    |
+| `ports`      | The tools from the execution context. See [Execution](execution.md#the-execution-context).                                        |
+| `outputDir`  | The absolute path of a new, empty directory that only this attempt writes.                                                        |
+| `signal`     | An `AbortSignal` that fires on the node's timeout or the execution's cancel.                                                      |
+| `output`     | A function for the text that the action prints, in chunks as printed. It adds no line ending.                                     |
 
 The action does not get the node's name or its `meta`. A value that decides the output reaches the action only as an input.
 
-The function writes its files to `outputDir` and returns their paths: a path, a list of paths, or a record of paths and lists of paths. These are the node's outputs.
+The function writes its files to `outputDir` and returns their paths: a path, a list of paths, or a record of paths and lists of paths. These are the node's outputs. A path can be absolute, as `outputDir` is, or relative to the working directory. The engine stores each one in the form of `casBaseDir`. See [Caching](caching.md#where-the-files-go).
 
 > [!IMPORTANT]
 > Write outputs only to `outputDir`. A returned path that is not under `outputDir` fails the node. The engine moves the directory after the action succeeds, so no output can hold its own absolute path or the path of another output. A file that names another output names it relative to itself.
+
+### File handles
+
+An action reads each file through a `FileHandle`: a file input, an output of a dependency, or an output that an output ref names. An [output ref](#output-refs) names an output before its node runs. A handle is the file itself, inside an action. Where the file is, the engine decides.
+
+| Member     | Content                                                                                                      |
+| ---------- | ------------------------------------------------------------------------------------------------------------ |
+| `path`     | The file's absolute path while the action runs. Give it to a command or a library that takes a path.         |
+| `text()`   | The file's contents.                                                                                         |
+| `json(is)` | The file's contents as JSON, checked by the type guard `is`. A file that `is` refuses throws, with its path. |
+
+The handles have the shape of the outputs. `Handles<T>` gives their type for an output type `T`:
+
+| The dependency returns      | Its role in `depOutputs` holds           |
+| --------------------------- | ---------------------------------------- |
+| A path                      | a `FileHandle`                           |
+| A list of paths             | a list of `FileHandle`                   |
+| A record of paths and lists | a record of handles and lists of handles |
+
+The role of a settled dependency that did not succeed holds `undefined`. An `invalidateOn` fingerprint gets the same handles as the action.
+
+In this graph, `entry` reads JSON from one output of `source`, gives the path of the other to `stat`, and reads the text of `caption`, a settled dependency that fails:
+
+```typescript
+import { stat, writeFile } from "node:fs/promises";
+import {
+  defineAction,
+  execute,
+  Graph,
+  MemCache,
+  settled,
+  type NodeRef,
+  type SettledRef,
+} from "@mrmeku/dagraph";
+import { createNodeDagFs } from "@mrmeku/dagraph/fs/node";
+
+const ports = { stat, writeFile };
+type Ports = typeof ports;
+type Fetched = { meta: string; image: string };
+
+const isMeta = (value: unknown): value is { title: string } =>
+  typeof value === "object" &&
+  value !== null &&
+  "title" in value &&
+  typeof value.title === "string";
+
+const source = defineAction<Ports, { inputs: { title: string } }, Fetched>({
+  kind: "source",
+  inputs: { version: "source-v1" },
+  action: async ({ inputs, ports, outputDir }) => {
+    const fetched = { meta: `${outputDir}/meta.json`, image: `${outputDir}/image.jpg` };
+    await ports.writeFile(fetched.meta, JSON.stringify({ title: inputs.title }));
+    await ports.writeFile(fetched.image, "not really a jpeg");
+    return fetched;
+  },
+});
+
+const caption = defineAction<Ports, { inputs: { title: string } }, string>({
+  kind: "caption",
+  inputs: { version: "caption-v1" },
+  action: async () => {
+    throw new Error("no caption yet");
+  },
+});
+
+type EntryParams = { deps: { source: NodeRef<Fetched>; caption: SettledRef<string> } };
+
+const entry = defineAction<Ports, EntryParams, string>({
+  kind: "entry",
+  inputs: { version: "entry-v1" },
+  action: async ({ depOutputs, ports, outputDir }) => {
+    const { title } = await depOutputs.source.meta.json(isMeta);
+    const { size } = await ports.stat(depOutputs.source.image.path);
+    const text = (await depOutputs.caption?.text()) ?? "no caption";
+    const out = `${outputDir}/entry.txt`;
+    await ports.writeFile(out, `${title}: ${size} bytes, ${text}\n`);
+    return out;
+  },
+});
+
+const graph = new Graph<Ports>();
+const fetched = source.addNode(graph, { inputs: { title: "Dawn" } });
+const captioned = caption.addNode(graph, { inputs: { title: "Dawn" } });
+entry.addNode(graph, { deps: { source: fetched, caption: settled(captioned) } });
+
+const fs = createNodeDagFs();
+const context = { ports, cache: new MemCache(), fs, casBaseDir: ".dagraph" };
+for (const result of await execute(graph, context)) console.log(result.name, result.status);
+```
+
+It prints `caption failed`, `source done` and `entry done`, and `entry.txt` holds `Dawn: 17 bytes, no caption`.
+
+These rules apply:
+
+- A handle is not a string. TypeScript refuses it in a template string, with `+`, and where a string goes. `String(handle)` and `JSON.stringify(handle)` compile, but they throw. To put a file in a string, use its path: `` `--input=${source.path}` ``.
+- To tell a handle from a list or a record of handles, use `isFileHandle`. Never use `typeof`: the type of a handle is a symbol's, but the handle is an object.
+- A handle's `path` changes with the machine and the working directory. Never key on it: build no `invalidateOn` fingerprint and no output's content from it. Otherwise a CAS restored elsewhere misses.
 
 ## Nodes
 
@@ -144,10 +241,10 @@ The node waits for a settled dependency to settle, as `Promise.allSettled` waits
 
 An input is something outside the graph that decides a node's output, under a name that the action reads it by. Each input is one of these:
 
-| Input   | Example                              | The action reads     | The key holds                        |
-| ------- | ------------------------------------ | -------------------- | ------------------------------------ |
-| A file  | `file("bun.lock")`                   | its path, as given   | its path and the hash of its content |
-| A value | `2`, `"en"`, `{ languages: ["en"] }` | the value as written | the value as JSON, with sorted keys  |
+| Input   | Example                              | The action reads                | The key holds                        |
+| ------- | ------------------------------------ | ------------------------------- | ------------------------------------ |
+| A file  | `file("bun.lock")`                   | a [handle](#file-handles) on it | its path and the hash of its content |
+| A value | `2`, `"en"`, `{ languages: ["en"] }` | the value as written            | the value as JSON, with sorted keys  |
 
 An action declares inputs for all its nodes, and a node adds its own:
 
@@ -170,7 +267,7 @@ If a node reads something that it does not declare, a change to it does not run 
 
 A node whose outputs are a record has a ref to each output: `pack.outputs.tarball` is an `OutputRef<T>`, where `T` is the type of that output. A settled reference has them too: `settled(pack).outputs.tarball` resolves to `T | undefined`.
 
-A ref can be in a value input: the whole value, an item of an array or a property. The action reads it as the dependency's published path or paths. A ref to a settled dependency that did not succeed reads as `undefined`.
+A ref can be in a value input: the whole value, an item of an array or a property. The action reads it as a [handle](#file-handles) on the dependency's published file, or a list of handles for a list output. A ref to a settled dependency that did not succeed reads as `undefined`.
 
 ```typescript
 const pack = packAction.addNode(graph, {});

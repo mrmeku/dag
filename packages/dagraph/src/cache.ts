@@ -29,6 +29,8 @@ export interface DagFs {
   remove(path: string): Promise<void>;
   /** The names of the entries in a directory; none when the directory does not exist. */
   readdir(dir: string): Promise<string[]>;
+  /** The absolute form of `path`, as an action sees it. */
+  resolve(path: string): string;
 }
 
 /** Content-addressed cache used by the executor to skip unchanged nodes. */

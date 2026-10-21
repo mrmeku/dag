@@ -1,10 +1,12 @@
 import type { UploadArtifactOptions, UploadArtifactResponse } from "@actions/artifact";
 import {
   file,
+  isFileHandle,
   settled,
   type BaseParams,
   type FileInput,
   type Graph,
+  type Handles,
   type NodeRef,
   type Outputs,
   type SettledRef,
@@ -27,7 +29,7 @@ export const hashFiles = async (patterns: string[]): Promise<string> =>
   (await import("./ports/glob.ts")).hashFiles(patterns);
 
 type Deps = Record<string, NodeRef | SettledRef | undefined>;
-type DepOutputs = Record<string, Outputs | undefined>;
+type DepOutputs = Record<string, Handles<Outputs> | undefined>;
 
 /** The graph a workflow adds its steps to; its nodes' `meta` is the team's. */
 type StepGraph = Graph<Ports>;
@@ -246,9 +248,10 @@ function fillPaths(text: string, deps: Deps, depOutputs: DepOutputs): string | u
       missing = true;
       return "";
     }
-    const path = typeof out === "object" && !Array.isArray(out) ? out[output] : undefined;
-    if (path === undefined) throw new Error(`${node} has no output ${output}`);
-    return [path].flat().join(":");
+    // A handle's type is a symbol's: only its own mark tells it from a record of handles.
+    const file = isFileHandle(out) || Array.isArray(out) ? undefined : out[output];
+    if (file === undefined) throw new Error(`${node} has no output ${output}`);
+    return (Array.isArray(file) ? file : [file]).map((f) => f.path).join(":");
   });
   return missing ? undefined : filled;
 }
@@ -294,9 +297,10 @@ export interface RunSpec<G extends string = never, O extends string = never> {
   /**
    * Fingerprints for deps the command reads only part of, keyed by role: the engine's
    * `invalidateOn`. A constant fingerprint orders the node after a dep it reads nothing from, such
-   * as a cache restore: `deps: { cas }, invalidateOn: { cas: () => "" }`.
+   * as a cache restore: `deps: { cas }, invalidateOn: { cas: () => "" }`. Build one from the files'
+   * contents, never from a handle's `path`, which changes with the machine.
    */
-  invalidateOn?: Record<string, (outputs: Outputs) => string | Promise<string>>;
+  invalidateOn?: Record<string, (outputs: Handles<Outputs>) => string | Promise<string>>;
 }
 
 /**
@@ -545,7 +549,7 @@ export function saveCache(
     inputs: { version: "save-cache:v2" },
     cacheable: false,
     action: async ({ depOutputs, ports: p, outputDir }) => {
-      const matched: unknown = JSON.parse(await p.fs.readText(depOutputs.cache));
+      const matched: unknown = JSON.parse(await depOutputs.cache.text());
       const out = `${outputDir}/save.json`;
       // The post pass reruns a save the cancel landed on in a new output dir. A copy of what it
       // returned, beside the log where every attempt of the key finds it, keeps it from saving twice.

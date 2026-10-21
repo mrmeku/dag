@@ -34,7 +34,7 @@ None of these is something that a node could be.
 ## What the engine does not know
 
 - **Processes, shells and terminals.** A node is a function. That at most one node holds the terminal is a concurrency group with a limit of 1.
-- **Repositories.** A path goes to `DagFs` as given. The engine knows no root.
+- **Repositories.** A path goes to `DagFs` as given, and `DagFs.resolve` makes it absolute for the action. The engine knows no root.
 - **The environment.** An input is a file or a value. Reading an environment variable into a value is the caller's work.
 - **GitHub, Temporal or any other platform.** Retries, task queues, run histories and summaries belong to executors.
 - **Secrets.** The engine keys on what it is given. Keeping a secret out of a key is the caller's work.

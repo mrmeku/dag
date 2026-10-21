@@ -41,7 +41,7 @@ dagraph runs on Node 22 or later, and on Bun.
 Two jobs. `count` counts the words in `notes.txt`. `report` writes them up. `report` needs what `count` made, so that's the edge.
 
 ```typescript
-import { readFile, writeFile } from "node:fs/promises";
+import { writeFile } from "node:fs/promises";
 import {
   defineAction,
   execute,
@@ -53,14 +53,14 @@ import {
 } from "@mrmeku/dagraph";
 import { createNodeDagFs } from "@mrmeku/dagraph/fs/node";
 
-const ports = { readFile, writeFile };
+const ports = { writeFile };
 type Ports = typeof ports;
 
 const count = defineAction<Ports, { inputs: { notes: FileInput } }, string>({
   kind: "count",
   inputs: { version: "count-v1" },
   action: async ({ inputs, ports, outputDir }) => {
-    const text = await ports.readFile(inputs.notes, "utf8");
+    const text = await inputs.notes.text();
     const out = `${outputDir}/count.txt`;
     await ports.writeFile(out, String(text.split(/\s+/).filter(Boolean).length));
     return out;
@@ -71,7 +71,7 @@ const report = defineAction<Ports, { deps: { count: NodeRef<string> } }, string>
   kind: "report",
   inputs: { version: "report-v1" },
   action: async ({ depOutputs, ports, outputDir }) => {
-    const words = await ports.readFile(depOutputs.count, "utf8");
+    const words = await depOutputs.count.text();
     const out = `${outputDir}/report.md`;
     await ports.writeFile(out, `# Report\n\n${words} words\n`);
     return out;

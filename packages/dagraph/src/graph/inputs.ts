@@ -76,20 +76,25 @@ export function canonical(value: unknown, refKey: (ref: OutputRef) => string): s
   return JSON.stringify(value);
 }
 
-/** A value as the action reads it: each output ref replaced by its dep's published paths. */
-export function resolveValue(value: unknown, depEntries: Record<string, CacheEntry>): unknown {
+/** A value as the action reads it: each output ref replaced by its dep's published files' handles. */
+export function resolveValue(
+  value: unknown,
+  depEntries: Record<string, CacheEntry>,
+  handle: (path: string) => unknown,
+): unknown {
   if (isOutputRef(value)) {
     const entry = depEntries[value.node];
     if (entry === undefined) return undefined;
     const outputs = entry.outputs;
-    if (typeof outputs !== "object" || Array.isArray(outputs) || !(value.output in outputs))
-      throw new Error(`"${value.node}" has no output "${value.output}"`);
-    return outputs[value.output];
+    const paths =
+      typeof outputs === "object" && !Array.isArray(outputs) ? outputs[value.output] : undefined;
+    if (paths === undefined) throw new Error(`"${value.node}" has no output "${value.output}"`);
+    return Array.isArray(paths) ? paths.map(handle) : handle(paths);
   }
-  if (Array.isArray(value)) return value.map((v) => resolveValue(v, depEntries));
+  if (Array.isArray(value)) return value.map((v) => resolveValue(v, depEntries, handle));
   if (typeof value === "object" && value !== null)
     return Object.fromEntries(
-      Object.entries(value).map(([k, v]) => [k, resolveValue(v, depEntries)]),
+      Object.entries(value).map(([k, v]) => [k, resolveValue(v, depEntries, handle)]),
     );
   return value;
 }

@@ -10,6 +10,15 @@ export function collectPaths(outputs: Outputs): string[] {
   return Object.values(outputs).flatMap((v) => (Array.isArray(v) ? v : [v]));
 }
 
+/** The same outputs with each path passed through `f`: a path, a list, or a record of either. */
+export function mapPaths<T>(outputs: Outputs, f: (path: string) => T) {
+  if (typeof outputs === "string") return f(outputs);
+  if (Array.isArray(outputs)) return outputs.map(f);
+  return Object.fromEntries(
+    Object.entries(outputs).map(([role, v]) => [role, Array.isArray(v) ? v.map(f) : f(v)]),
+  );
+}
+
 export type HashFileFn = (path: string) => Promise<string>;
 
 /** SHA256 hex of in-memory content; the one hash every DagFs implementation should agree with. */

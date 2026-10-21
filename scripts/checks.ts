@@ -5,7 +5,7 @@
  * edit re-runs nothing and an engine edit re-runs only the nodes that import it.
  */
 import type { Steps } from "@mrmeku/dagactions";
-import type { NodeRef, Outputs } from "@mrmeku/dagraph";
+import type { NodeRef } from "@mrmeku/dagraph";
 
 const TOOLCHAIN = ["package.json", "bun.lock", "tsconfig.json"];
 const ENGINE = "packages/dagraph/src/**";
@@ -17,7 +17,7 @@ const REFERENCE_SOURCES = [
 ];
 
 export async function addChecks(w: Steps<"test">, after: NodeRef): Promise<NodeRef<string>> {
-  const afterRestore = { deps: { after }, invalidateOn: { after: (_: Outputs) => "" } };
+  const afterRestore = { deps: { after }, invalidateOn: { after: () => "" } };
   const [all, engine, runner] = await Promise.all([
     w.glob("packages/*/src/**", "scripts/**", "eslint.config.ts", ...TOOLCHAIN),
     w.glob(ENGINE, ...TOOLCHAIN),

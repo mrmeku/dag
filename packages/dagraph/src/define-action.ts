@@ -29,13 +29,16 @@ export interface ActionSpec<Ports, P extends BaseParams, R extends Outputs, I> {
 
 /**
  * An action as a graph holds it, its types erased: the engine builds each context from its
- * node's inputs and its deps' entries, so the action takes the context of no action in particular.
+ * node's inputs and its deps' entries, so the action takes the context of no action in particular,
+ * and its fingerprints the handles of no output in particular.
  */
 export interface ErasedSpec {
   kind: string;
   inputs: Record<string, unknown>;
-  action: (context: ActionContext) => Promise<Outputs>;
-  invalidateOn?: Record<string, (outputs: Outputs, ports: unknown) => Promise<string> | string>;
+  action: (
+    context: Omit<ActionContext, "depOutputs"> & { depOutputs: Record<string, unknown> },
+  ) => Promise<Outputs>;
+  invalidateOn?: Record<string, (outputs: unknown, ports: unknown) => Promise<string> | string>;
   cacheable?: boolean;
   concurrencyGroup?: string;
   timeoutMs?: number;
@@ -82,7 +85,7 @@ export function defineAction<
     throw new RangeError(
       `${where}: timeoutMs must be a whole number of ms from 1 to ${MAX_TIMEOUT_MS}, got ${t}`,
     );
-  // eslint-disable-next-line @typescript-eslint/consistent-type-assertions -- a graph holds actions of many types as data, which erases each context's inputs, dep outputs and ports
+  // eslint-disable-next-line @typescript-eslint/consistent-type-assertions -- a graph holds actions of many types as data, which erases each context's inputs, dep outputs and ports, and the brand of their file handles
   const checked = { ...spec, inputs: checkInputs(spec.inputs, where) } as unknown as ErasedSpec;
   return {
     addNode: <Meta>(graph: Graph<Ports, Meta>, params: NodeParams<P, Meta>) =>

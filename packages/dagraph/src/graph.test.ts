@@ -47,7 +47,7 @@ const entry = defineAction<
   cacheable: false,
   action: async (c) => {
     const path = `${c.outputDir}/entry.json`;
-    await c.ports.fs.writeText(path, JSON.stringify(c.depOutputs));
+    await c.ports.fs.writeText(path, "{}");
     return path;
   },
 });

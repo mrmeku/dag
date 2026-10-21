@@ -28,11 +28,12 @@ export function namedOutput(outputs: Outputs, name: string): string {
 export const NODE_REF: unique symbol = Symbol.for("@mrmeku/dagraph/NodeRef");
 export const OUTPUT_REF: unique symbol = Symbol.for("@mrmeku/dagraph/OutputRef");
 export const FILE_INPUT: unique symbol = Symbol.for("@mrmeku/dagraph/file");
+export const FILE_HANDLE: unique symbol = Symbol.for("@mrmeku/dagraph/FileHandle");
 
 /**
  * A ref to one output of a node whose outputs are a record: `pack.outputs.tarball`. In a value
- * input it resolves to that output's published path or paths, and keys as the role it points
- * through and the output's name.
+ * input it resolves to a handle on that output's published file, or a list of handles, and keys
+ * as the role it points through and the output's name.
  */
 export interface OutputRef<
   T extends string | string[] | undefined = string | string[] | undefined,
@@ -66,6 +67,47 @@ export interface FileInput {
   readonly [FILE_INPUT]: string;
 }
 
+// TypeScript refuses a symbol in a template string, with +, or where a string goes.
+type StandsWhole = { toString: never; valueOf: never } & symbol;
+
+/**
+ * A file an action reads: a `file()` input, or an output of a dep. Where it lives is the engine's.
+ *
+ * - Hand a tool its path: `ports.images.resize(depOutputs.source.path, out)`.
+ * - Read it with `text()`, or with `json(isMeta)`, where `isMeta` is a type guard.
+ * - It stands whole: TypeScript refuses it in a template string or with `+`, and `String` and
+ *   `JSON.stringify` throw. A string takes its `path`: `` `--input=${source.path}` ``.
+ * - Tell a handle apart with `isFileHandle`, never with `typeof`: its type is a symbol's, but it
+ *   is an object.
+ */
+export type FileHandle = {
+  readonly [FILE_HANDLE]: true;
+  /**
+   * Its absolute path while the action runs, for a command or a library that takes a path. It
+   * differs by machine and working directory, so never key on it: build no fingerprint and no
+   * output's content from it.
+   */
+  readonly path: string;
+  /** Its contents. */
+  text(): Promise<string>;
+  /** Its contents as JSON, checked by `is`; a file `is` refuses throws, naming the file. */
+  json<T>(is: (value: unknown) => value is T): Promise<T>;
+} & StandsWhole;
+
+/**
+ * Outputs as an action reads them: each path a `FileHandle`, a list or a record as such, and a
+ * failed settled dep's `undefined` as is.
+ */
+export type Handles<T> = T extends string
+  ? FileHandle
+  : T extends string[]
+    ? FileHandle[]
+    : T extends Record<string, string | string[]>
+      ? { [K in keyof T]: Handles<T[K]> }
+      : T extends undefined
+        ? undefined
+        : never;
+
 function outputRefsOf<T extends Outputs, Missing extends undefined>(
   node: string,
 ): OutputRefs<T, Missing> {
@@ -90,7 +132,7 @@ export function settled<T extends Outputs>(ref: NodeRef<T>): SettledRef<T> {
   return Object.assign(own, outputRefsOf<T, undefined>(ref.name));
 }
 
-/** A file input, read by the action as its path. */
+/** A file input, read by the action as a handle on the file. */
 export function file(path: string): FileInput {
   return { [FILE_INPUT]: path };
 }
@@ -100,6 +142,8 @@ const branded = (value: unknown, brand: symbol) =>
 export const isNodeRef = (value: unknown) => branded(value, NODE_REF);
 export const isOutputRef = (value: unknown): value is OutputRef => branded(value, OUTPUT_REF);
 export const isFileInput = (value: unknown): value is FileInput => branded(value, FILE_INPUT);
+/** Whether a value is a handle: a list or a record of handles is not. */
+export const isFileHandle = (value: unknown): value is FileHandle => branded(value, FILE_HANDLE);
 
 /** What a node may declare: deps by role and inputs by name. An action's `P` narrows both. */
 export interface BaseParams {
@@ -107,22 +151,22 @@ export interface BaseParams {
   inputs?: object;
 }
 
-/** Each dep's outputs by role, as the action reads them: a `settled` dep's are `T | undefined`. */
+/** Each dep's outputs by role, as handles: a `settled` dep's are `Handles<T> | undefined`. */
 export type DepOutputsOf<P> = P extends { deps?: infer D }
   ? {
       [K in keyof NonNullable<D>]: NonNullable<D>[K] extends NodeRef<infer T>
-        ? T
+        ? Handles<T>
         : NonNullable<D>[K] extends NodeRef<infer T> | SettledRef<infer T> | undefined
-          ? T | undefined
+          ? Handles<T> | undefined
           : unknown;
     }
   : never;
 
-/** An input as the action reads it: a file as its path, an output ref as that output's paths. */
+/** An input as the action reads it: a file as a handle, an output ref as that output's handles. */
 export type Resolved<V> = V extends FileInput
-  ? string
+  ? FileHandle
   : V extends OutputRef<infer T>
-    ? T
+    ? Handles<T>
     : V extends readonly (infer U)[]
       ? Resolved<U>[]
       : V extends object
@@ -132,10 +176,10 @@ export type Resolved<V> = V extends FileInput
 type NodeInputsOf<P> = P extends { inputs?: infer I } ? NonNullable<I> : unknown;
 
 /**
- * Everything one call of an action gets. What is keyed: `inputs` and `depOutputs`. Its tools:
- * `ports`. What the attempt gives: `outputDir`, a new, empty directory only this attempt writes;
- * `signal`, which fires on the node's timeout or the execution's cancel; and `output`, for what
- * the action prints, in chunks as printed.
+ * Everything one call of an action gets. What is keyed: `inputs` and `depOutputs`, each file in
+ * them a `FileHandle`. Its tools: `ports`. What the attempt gives: `outputDir`, the absolute path
+ * of a new, empty directory only this attempt writes; `signal`, which fires on the node's timeout
+ * or the execution's cancel; and `output`, for what the action prints, in chunks as printed.
  */
 export interface ActionContext<
   Ports = unknown,
@@ -152,7 +196,8 @@ export interface ActionContext<
 
 /**
  * For a dep its nodes read only in part, that part as a fingerprint by role. The string's hash
- * stands in for the dep's content hash in the key.
+ * stands in for the dep's content hash in the key. Build it from the files' contents, never from a
+ * handle's `path`, which differs by machine and working directory.
  */
 export type InvalidateOn<Ports, P extends BaseParams> = {
   [K in keyof DepOutputsOf<P>]?: (

@@ -1,8 +1,8 @@
 import { describe, expect, test } from "bun:test";
 import assert from "node:assert/strict";
-import { mkdtemp, rm } from "node:fs/promises";
+import { cp, mkdir, mkdtemp, realpath, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { dirname, join, relative, resolve } from "node:path";
+import { dirname, join, relative } from "node:path";
 
 import { FsCache, MemCache, TieredCache, type Cache, type DagFs } from "./cache.ts";
 import { defineAction } from "./define-action.ts";
@@ -10,11 +10,15 @@ import { execute } from "./execute.ts";
 import {
   file,
   Graph,
+  isFileHandle,
   namedOutput,
   settled,
   soleOutput,
   type ActionContext,
   type BaseParams,
+  type FileHandle,
+  type FileInput,
+  type Handles,
   type NodeRef,
   type OutputRef,
   type Outputs,
@@ -25,6 +29,7 @@ import { createMemoryDagFs, type MemoryDagFs } from "./ports/memory-fs.ts";
 import { createNodeDagFs } from "./ports/node-fs.ts";
 import { throttledScheduler } from "./schedulers.ts";
 import { tally, type ExecEvent, type Result } from "./types.ts";
+import { errorMessage } from "./utils.ts";
 
 interface Ports {
   fs: DagFs;
@@ -78,6 +83,11 @@ const succeeded = (r: Result | undefined) => {
 const depPath = (outputs: Outputs | undefined) => {
   assert.ok(outputs !== undefined, "the dep has outputs");
   return soleOutput(outputs);
+};
+/** The text of a dep's outputs when they are one file. */
+const depText = (outputs: Handles<Outputs> | undefined) => {
+  assert.ok(isFileHandle(outputs), "the dep's outputs are one file");
+  return outputs.text();
 };
 
 function buildItems(ids: string[]): Graph<Ports, { item: string } | undefined> {
@@ -333,7 +343,7 @@ describe("the action key", () => {
     ]);
   });
 
-  test("a file input keys on its path and content, reads as its path, and is hashed once per execution", async () => {
+  test("a file input keys on its path and content, reads as a handle on the file, and is hashed once per execution", async () => {
     const { ctx, fs } = setup();
     const hashed: string[] = [];
     const counting = {
@@ -341,29 +351,35 @@ describe("the action key", () => {
       fs: { ...fs, hashFile: (p: string) => (hashed.push(p), fs.hashFile(p)) },
     };
     await fs.writeText("/src/a.ts", "a1");
-    const run = async (src: unknown) => {
+    const reader = defineAction<Ports, { inputs: { id: string; src: FileInput } }, string>({
+      kind: "reader",
+      action: async (c) => write(c, "out", `${c.inputs.src.path}: ${await c.inputs.src.text()}`),
+    });
+    const run = async (add: (g: Graph<Ports>, name: string) => void) => {
       const g = new Graph<Ports>();
-      for (const name of ["one", "two", "three"]) task(g, name, { inputs: { src } });
+      for (const name of ["one", "two", "three"]) add(g, name);
       const results = await execute(g, counting);
       return [statuses(results), await fs.readText(outputsOf(results[0]))];
     };
-    const first = await run(file("/src/a.ts"));
+    const asFile = (g: Graph<Ports>, name: string) =>
+      reader.addNode(g, { name, inputs: { id: name, src: file("/src/a.ts") } });
+    const first = await run(asFile);
     const firstHashed = hashed.filter((p) => p === "/src/a.ts").length;
-    const same = await run(file("/src/a.ts"));
+    const same = await run(asFile);
     await fs.writeText("/src/a.ts", "a2");
-    const edited = await run(file("/src/a.ts"));
-    const asValue = await run("/src/a.ts");
+    const edited = await run(asFile);
+    const asValue = await run((g, name) => task(g, name, { inputs: { src: "/src/a.ts" } }));
     const ran = { one: "done", two: "done", three: "done" } as const;
     expect({ first, firstHashed, same, edited, asValue }).toEqual({
-      first: [ran, '{"id":"one","src":"/src/a.ts"}'],
+      first: [ran, "/src/a.ts: a1"],
       firstHashed: 1,
-      same: [{ one: "cached", two: "cached", three: "cached" }, '{"id":"one","src":"/src/a.ts"}'],
-      edited: [ran, '{"id":"one","src":"/src/a.ts"}'],
+      same: [{ one: "cached", two: "cached", three: "cached" }, "/src/a.ts: a1"],
+      edited: [ran, "/src/a.ts: a2"],
       asValue: [ran, '{"id":"one","src":"/src/a.ts"}'],
     });
   });
 
-  test("an output ref reads as the dep's published path and keys by role and output name, so an invalidateOn fingerprint still holds", async () => {
+  test("an output ref reads as a handle on the dep's published file and keys by role and output name, so an invalidateOn fingerprint still holds", async () => {
     const { ctx, fs } = setup();
     type Packed = { tarball: string; notes: string };
     const pack = defineAction<Ports, { inputs: { version: string } }, Packed>({
@@ -373,10 +389,17 @@ describe("the action key", () => {
         notes: await write(c, "notes.md", "notes"),
       }),
     });
-    const publish = defineAction<Ports, { deps: { pack: NodeRef<Packed> } }, string>({
+    const publish = defineAction<
+      Ports,
+      { deps: { pack: NodeRef<Packed> }; inputs: { cmd: (string | OutputRef<string>)[] } },
+      string
+    >({
       kind: "publish",
-      invalidateOn: { pack: (outputs, ports) => ports.fs.readText(outputs.notes) },
-      action: async (c) => write(c, "cmd.json", JSON.stringify(c.inputs["cmd"])),
+      invalidateOn: { pack: (outputs) => outputs.notes.text() },
+      action: async (c) => {
+        const argv = c.inputs.cmd.map((arg) => (typeof arg === "string" ? arg : arg.path));
+        return write(c, "cmd.json", JSON.stringify(argv));
+      },
     });
     const run = async (version: string) => {
       const g = new Graph<Ports>();
@@ -504,6 +527,151 @@ describe("refs and outputs in the key", () => {
       src: "done",
       fingerprinted: ["failed", "", "cannot fingerprint"],
     });
+  });
+});
+
+describe("file handles", () => {
+  test("an action reads each dep's outputs as handles in their shape, a file, a list or a record of either, and isFileHandle tells a handle from the others", async () => {
+    const { ctx } = setup();
+    type Notes = { notes: string; parts: string[] };
+    const g = new Graph<Ports>();
+    const one = task(g, "one", { run: () => "one" });
+    const list = defineAction<Ports, BaseParams, string[]>({
+      kind: "list",
+      action: async (c) => [await write(c, "a", "A"), await write(c, "b", "B")],
+    }).addNode(g, {});
+    const record = defineAction<Ports, BaseParams, Notes>({
+      kind: "record",
+      action: async (c) => ({
+        notes: await write(c, "notes", "N"),
+        parts: [await write(c, "p1", "P1"), await write(c, "p2", "P2")],
+      }),
+    }).addNode(g, {});
+    const read = async (h: FileHandle) => [h.path, await h.text()];
+    defineAction<
+      Ports,
+      {
+        deps: {
+          one: NodeRef<string>;
+          list: NodeRef<string[]>;
+          record: NodeRef<Notes>;
+        };
+      },
+      string
+    >({
+      kind: "reads",
+      action: async ({ depOutputs: d, ...c }) =>
+        write(
+          c,
+          "read.json",
+          JSON.stringify({
+            one: await read(d.one),
+            list: await Promise.all(d.list.map(read)),
+            record: {
+              notes: await read(d.record.notes),
+              parts: await Promise.all(d.record.parts.map(read)),
+            },
+            isFileHandle: [d.one, d.list, d.record].map(isFileHandle),
+          }),
+        ),
+    }).addNode(g, { deps: { one, list, record } });
+    const results = await execute(g, ctx);
+    const by = Object.fromEntries(results.map((r) => [r.name, r]));
+    const listed = succeeded(by["list"]).outputs;
+    const recorded = succeeded(by["record"]).outputs;
+    assert.ok(Array.isArray(listed) && typeof recorded === "object" && !Array.isArray(recorded));
+    const parts = recorded["parts"];
+    assert.ok(Array.isArray(parts));
+    expect(JSON.parse(await ctx.fs.readText(outputsOf(by["reads"])))).toEqual({
+      one: [outputsOf(by["one"]), "one"],
+      list: [
+        [listed[0], "A"],
+        [listed[1], "B"],
+      ],
+      record: {
+        notes: [namedOutput(recorded, "notes"), "N"],
+        parts: [
+          [parts[0], "P1"],
+          [parts[1], "P2"],
+        ],
+      },
+      isFileHandle: [true, false, false],
+    });
+  });
+
+  test("json(is) gives the value its guard accepts; a file it refuses, or one that holds no JSON, throws naming the file", async () => {
+    const { ctx } = setup();
+    const isCount = (v: unknown): v is { count: number } =>
+      typeof v === "object" && v !== null && "count" in v && typeof v.count === "number";
+    const isWords = (v: unknown): v is string[] =>
+      Array.isArray(v) && v.every((w) => typeof w === "string");
+    const g = new Graph<Ports>();
+    const data = defineAction<Ports, BaseParams, { counted: string; prose: string }>({
+      kind: "data",
+      action: async (c) => ({
+        counted: await write(c, "counted.json", '{"count":3}'),
+        prose: await write(c, "prose.txt", "three words here"),
+      }),
+    }).addNode(g, {});
+    const refusal = (read: Promise<unknown>) =>
+      read.then(
+        () => "",
+        (e: unknown) => errorMessage(e),
+      );
+    defineAction<Ports, { deps: { data: NodeRef<{ counted: string; prose: string }> } }, string>({
+      kind: "parses",
+      action: async (c) => {
+        const { counted, prose } = c.depOutputs.data;
+        return write(
+          c,
+          "parsed.json",
+          JSON.stringify({
+            value: await counted.json(isCount),
+            refused: await refusal(counted.json(isWords)),
+            notJson: await refusal(prose.json(isWords)),
+          }),
+        );
+      },
+    }).addNode(g, { deps: { data } });
+    const [made, parsed] = await execute(g, ctx);
+    const outputs = succeeded(made).outputs;
+    expect(JSON.parse(await ctx.fs.readText(outputsOf(parsed)))).toEqual({
+      value: { count: 3 },
+      refused: `${namedOutput(outputs, "counted")} holds JSON that isWords refuses`,
+      notJson: `${namedOutput(outputs, "prose")} holds no JSON`,
+    });
+  });
+
+  test("a handle stands whole: TypeScript refuses it in a template string or with +, and String, JSON.stringify and join throw", async () => {
+    const { ctx } = setup();
+    const thrown: string[] = [];
+    const g = new Graph<Ports>();
+    const src = task(g, "src");
+    defineAction<Ports, { deps: { src: NodeRef<string> } }, string>({
+      kind: "converts",
+      action: async (c) => {
+        const h = c.depOutputs.src;
+        const conversions = [
+          // @ts-expect-error -- TS2731, as for a symbol
+          () => `${h}`,
+          // @ts-expect-error -- TS2469, as for a symbol
+          () => h + "",
+          () => String(h),
+          () => JSON.stringify(h),
+          () => [h].join(),
+        ];
+        for (const convert of conversions)
+          try {
+            convert();
+          } catch (e) {
+            thrown.push(errorMessage(e));
+          }
+        return write(c, "out", "x");
+      },
+    }).addNode(g, { deps: { src } });
+    const [made] = await execute(g, ctx);
+    const refusal = `The handle of ${outputsOf(made)} is not a string. Pass its path, or read it with text() or json().`;
+    expect(thrown).toEqual([refusal, refusal, refusal, refusal, refusal]);
   });
 });
 
@@ -719,46 +887,76 @@ describe("the CAS", () => {
     ]);
   });
 
-  test("under a relative casBaseDir, an output built with path.join follows its dir when it moves, and one resolved to an absolute path fails the node", async () => {
+  test("under a relative casBaseDir, the action sees absolute paths, the manifest and the result hold relative ones in either form it returned, and the CAS restored under another working directory still hits", async () => {
     const fs = createNodeDagFs();
-    const tmp = await mkdtemp(join(tmpdir(), "dagraph-"));
-    const casBaseDir = `./${relative(process.cwd(), tmp)}/cas`;
+    const tmp = await realpath(await mkdtemp(join(tmpdir(), "dagraph-")));
+    const home = process.cwd();
+    const casBaseDir = "cas";
     const c = { ports: { fs }, cache: new FsCache(casBaseDir, fs), fs, casBaseDir };
+    type Written = { joined: string; relative: string };
+    const seen: { outputDir?: string; handle?: string } = {};
     const build = () => {
       const g = new Graph<Ports>();
-      const joined = defineAction<Ports, BaseParams, string>({
-        kind: "joined",
+      const written = defineAction<Ports, BaseParams, Written>({
+        kind: "written",
         action: async (c) => {
-          const path = join(c.outputDir, "srt");
-          await c.ports.fs.writeText(path, "subtitles");
-          return path;
+          seen.outputDir = c.outputDir;
+          const joined = join(c.outputDir, "srt");
+          const relativePath = relative(process.cwd(), join(c.outputDir, "b"));
+          await c.ports.fs.writeText(joined, "subtitles");
+          await c.ports.fs.writeText(relativePath, "b");
+          return { joined, relative: relativePath };
         },
-      }).addNode(g, { inputs: { id: "joined" } });
-      task(g, "reader", {
-        deps: { joined },
-        run: (c) => fs.readText(depPath(c.depOutputs["joined"])),
-      });
-      defineAction<Ports, BaseParams, string>({
-        kind: "absolute",
+      }).addNode(g, {});
+      defineAction<Ports, { deps: { written: NodeRef<Written> } }, string>({
+        kind: "reader",
         action: async (c) => {
-          const path = resolve(c.outputDir, "a");
-          await c.ports.fs.writeText(path, "a");
-          return path;
+          seen.handle = c.depOutputs.written.joined.path;
+          return write(c, "out", await c.depOutputs.written.joined.text());
         },
-      }).addNode(g, { inputs: { id: "absolute" } });
+      }).addNode(g, { deps: { written } });
       return g;
     };
-    const status = (rs: Result[]) =>
-      Object.fromEntries(
-        rs.map((r) => [r.name, r.status === "failed" ? r.error.message.split(":")[0] : r.status]),
+    const runIn = async (dir: string) => {
+      await mkdir(dir, { recursive: true });
+      process.chdir(dir);
+      try {
+        return await execute(build(), c);
+      } finally {
+        process.chdir(home);
+      }
+    };
+    try {
+      const first = await runIn(`${tmp}/first`);
+      const w = succeeded(first.find((r) => r.name === "written"));
+      const keyDir = join(casBaseDir, w.actionKey);
+      const manifest: unknown = JSON.parse(
+        await fs.readText(`${tmp}/first/${keyDir}/manifest.json`),
       );
-    const first = status(await execute(build(), c));
-    const second = status(await execute(build(), c));
-    await rm(tmp, { recursive: true, force: true });
-    expect({ first, second }).toEqual({
-      first: { joined: "done", reader: "done", absolute: "output not under the output dir" },
-      second: { joined: "cached", reader: "cached", absolute: "output not under the output dir" },
-    });
+      // Only the copy is left, so an entry that named the first tree's files would miss.
+      await cp(`${tmp}/first`, `${tmp}/restored`, { recursive: true });
+      await rm(`${tmp}/first`, { recursive: true });
+      const restored = await runIn(`${tmp}/restored`);
+      const dir = `${keyDir}/out-${w.contentHash}`;
+      const outputs = { joined: `${dir}/srt`, relative: `${dir}/b` };
+      expect({
+        first: statuses(first),
+        restored: statuses(restored),
+        outputDir: seen.outputDir?.replace(/[0-9a-f-]{36}$/, "<uuid>"),
+        handle: seen.handle,
+        manifest,
+        result: w.outputs,
+      }).toEqual({
+        first: { written: "done", reader: "done" },
+        restored: { written: "cached", reader: "cached" },
+        outputDir: `${tmp}/first/${keyDir}/tmp-<uuid>`,
+        handle: `${tmp}/first/${dir}/srt`,
+        manifest: { outputs, contentHash: w.contentHash },
+        result: outputs,
+      });
+    } finally {
+      await rm(tmp, { recursive: true, force: true });
+    }
   });
 
   const filesystems: [string, () => DagFs][] = [
@@ -794,7 +992,7 @@ describe("the CAS", () => {
               aInDouble.resolve();
               await bTruncated.promise;
             }
-            const n = Number(await c.ports.fs.readText(depPath(c.depOutputs["count"])));
+            const n = Number(await depText(c.depOutputs["count"]));
             if (run === "A") setTimeout(() => bMayFinish.resolve(), 0);
             return String(n * 2);
           },
@@ -1097,12 +1295,19 @@ test("a settled dep: its dependent runs without it, keyed as missing, and runs a
       return { srt: await write(c, "captions.srt", "hello") };
     },
   });
-  const entry = defineAction<Ports, { deps: { captions: SettledRef<{ srt: string }> } }, string>({
+  const entry = defineAction<
+    Ports,
+    {
+      deps: { captions: SettledRef<{ srt: string }> };
+      inputs: { srt: OutputRef<string | undefined> };
+    },
+    string
+  >({
     kind: "entry",
     action: async (c) => {
       received.push([
         c.depOutputs.captions === undefined,
-        c.inputs["srt"] === c.depOutputs.captions?.srt,
+        c.inputs.srt?.path === c.depOutputs.captions?.srt.path,
       ]);
       return write(c, "entry.txt", "entry");
     },
@@ -1144,7 +1349,7 @@ test("a node two roles name is one dep: the dependent runs once with it in both 
   >({
     kind: "both",
     action: async (c) => {
-      runs.push(c.depOutputs.main === c.depOutputs.after);
+      runs.push(c.depOutputs.main.path === c.depOutputs.after?.path);
       return write(c, "both.txt", "both");
     },
   });

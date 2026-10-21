@@ -5,7 +5,8 @@ export type MemoryDagFs = DagFs & { files: Map<string, string | Uint8Array> };
 
 /**
  * In-memory DagFs for tests. `files` is exposed so a test can inspect or seed it directly. A
- * directory is the files under its path, so an empty one does not exist.
+ * directory is the files under its path, so an empty one does not exist. A path is its own
+ * absolute form: `resolve` returns it as given.
  */
 export function createMemoryDagFs(initial?: Record<string, string | Uint8Array>): MemoryDagFs {
   const files = new Map<string, string | Uint8Array>(initial ? Object.entries(initial) : []);
@@ -50,5 +51,6 @@ export function createMemoryDagFs(initial?: Record<string, string | Uint8Array>)
         ...new Set(under(parent).map((p) => p.slice(parent.length + 1).replace(/\/.*/s, ""))),
       ];
     },
+    resolve: (path) => path,
   };
 }

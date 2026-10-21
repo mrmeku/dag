@@ -6,11 +6,13 @@ import {
   hashBytes,
   hashInput,
   hashOutputFiles,
+  mapPaths,
   verifyOutputs,
   type InputHashMemo,
   type KeyedDep,
   type KeyedInput,
 } from "./content-addressing.ts";
+import { fileHandle } from "./file-handle.ts";
 import { graphNodes, type Graph, type GraphNode } from "./graph/graph.ts";
 import { canonical, resolveValue } from "./graph/inputs.ts";
 import { FILE_INPUT, isFileInput, requiredDeps, type Outputs } from "./graph/types.ts";
@@ -55,15 +57,6 @@ export const NOT_CACHED = "not cached";
  */
 export const inputHashMemos = new WeakMap<object, InputHashMemo>();
 
-/** The same outputs with each path passed through `f`. */
-function mapPaths(outputs: Outputs, f: (path: string) => string): Outputs {
-  if (typeof outputs === "string") return f(outputs);
-  if (Array.isArray(outputs)) return outputs.map(f);
-  return Object.fromEntries(
-    Object.entries(outputs).map(([role, v]) => [role, Array.isArray(v) ? v.map(f) : f(v)]),
-  );
-}
-
 /** Removes an attempt's directory, best effort: whether it is gone never changes a result. */
 const discard = (fs: DagFs, dir: string) => fs.remove(dir).catch(() => {});
 
@@ -99,6 +92,7 @@ async function actionKeyOf(
   entryOf: (dep: string) => CacheEntry | undefined,
   ports: unknown,
   hashFile: (path: string) => Promise<string>,
+  handle: (path: string) => unknown,
   memo: InputHashMemo,
 ): Promise<string> {
   const rolesOf = (dep: string) =>
@@ -120,7 +114,7 @@ async function actionKeyOf(
     keyedDeps[role] = !entry
       ? ["missing"]
       : fingerprint
-        ? ["fingerprint", hashBytes(await fingerprint(entry.outputs, ports))]
+        ? ["fingerprint", hashBytes(await fingerprint(mapPaths(entry.outputs, handle), ports))]
         : ["content", entry.contentHash];
   }
   return computeActionKey(keyedInputs, keyedDeps);
@@ -148,13 +142,14 @@ export async function processNode<Ports, Meta>(
   const { node, spec, roles } = found;
   const meta = node.meta === undefined ? {} : { meta: node.meta };
   const entryOf = (dep: string) => (Object.hasOwn(depEntries, dep) ? depEntries[dep] : undefined);
+  const handle = (path: string) => fileHandle(fs, path);
   const missing = requiredDeps(node).find((dep) => !entryOf(dep));
   if (missing !== undefined) return { name, actionKey: "", status: "dep-failed", dep: missing };
 
   let actionKey: string;
   try {
     const memo = inputHashMemos.get(executionContext) ?? new Map<string, Promise<string>>();
-    actionKey = await actionKeyOf(found, entryOf, ports, fs.hashFile, memo);
+    actionKey = await actionKeyOf(found, entryOf, ports, fs.hashFile, handle, memo);
   } catch (e) {
     return { name, actionKey: "", status: "failed", error: errorOf(e), elapsed: 0 };
   }
@@ -187,6 +182,7 @@ export async function processNode<Ports, Meta>(
   }
   if (cancel?.aborted) return cancelled;
   const staging = `${keyDir}/tmp-${crypto.randomUUID()}`;
+  const outputDir = fs.resolve(staging);
   const dropped = async (result: Result) => {
     await discard(fs, staging);
     return result;
@@ -222,16 +218,16 @@ export async function processNode<Ports, Meta>(
     const inputs = Object.fromEntries(
       Object.entries(found.inputs).map(([k, v]) => [
         k,
-        isFileInput(v) ? v[FILE_INPUT] : resolveValue(v, depEntries),
+        isFileInput(v) ? handle(v[FILE_INPUT]) : resolveValue(v, depEntries, handle),
       ]),
     );
     const depOutputs = Object.fromEntries(
       Object.entries(roles).flatMap(([role, dep]) => {
         const entry = entryOf(dep);
-        return entry ? [[role, entry.outputs]] : [];
+        return entry ? [[role, mapPaths(entry.outputs, handle)]] : [];
       }),
     );
-    const context = { inputs, depOutputs, ports, outputDir: staging, signal, output };
+    const context = { inputs, depOutputs, ports, outputDir, signal, output };
     settled = { outputs: await spec.action(context) };
   } catch (error) {
     settled = { error };
@@ -250,10 +246,17 @@ export async function processNode<Ports, Meta>(
       return await dropped(failed({ ...errorOf(thrown, message), name: "TimeoutError" }));
     }
     if ("error" in settled) return await dropped(failed(errorOf(thrown)));
-    const returned = settled.outputs;
-    const outside = collectPaths(returned).find((p) => !normalize(p).startsWith(`${staging}/`));
+    // A returned path, absolute or not, is stored under the staging dir as casBaseDir gives it.
+    const under = `${normalize(outputDir)}/`;
+    const outside = collectPaths(settled.outputs).find(
+      (p) => !normalize(fs.resolve(p)).startsWith(under),
+    );
     if (outside !== undefined)
-      throw new Error(`output not under the output dir: ${outside} is not under ${staging}`);
+      throw new Error(`output not under the output dir: ${outside} is not under ${outputDir}`);
+    const returned = mapPaths(
+      settled.outputs,
+      (p) => `${staging}/${normalize(fs.resolve(p)).slice(under.length)}`,
+    );
     const contentHash = await hashOutputFiles(returned, fs.hashFile, keyDir);
     const { outputs, dir } = await publish(fs, keyDir, staging, returned, contentHash);
     if (node.cacheable !== false) await cache.put(actionKey, { outputs, contentHash });

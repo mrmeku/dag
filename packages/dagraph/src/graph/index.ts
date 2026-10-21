@@ -1,6 +1,7 @@
 export { Graph, addNode, closure, graphNodes, type GraphNode } from "./graph.ts";
 export {
   file,
+  isFileHandle,
   isFileInput,
   isOutputs,
   namedOutput,
@@ -12,7 +13,9 @@ export type {
   ActionContext,
   BaseParams,
   DepOutputsOf,
+  FileHandle,
   FileInput,
+  Handles,
   InvalidateOn,
   Node,
   NodeParams,
