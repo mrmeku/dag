@@ -2,7 +2,7 @@
 
 A graph is a set of nodes and the dependencies between them. You make it in three steps:
 
-1. Define each kind of work once, with `defineAction`.
+1. Define each kind of work once, with `defineAction`, bound to your ports by `actionsFor<Ports>()`.
 2. Add one node for each job, with the action's `addNode`. Give each node the references to the nodes that it needs.
 3. Give the graph to `execute`. See [Execution](execution.md).
 
@@ -15,6 +15,8 @@ An action is a kind of work. `defineAction` takes these fields:
 | Field              | Meaning                                                                                                                        |
 | ------------------ | ------------------------------------------------------------------------------------------------------------------------------ |
 | `kind`             | What kind of work it is, as Bazel's mnemonic. A label for display and routing. It is not part of the key.                      |
+| `deps`             | Optional. The [dependencies](#dependencies) that each node gives, by role, and what each one returns.                          |
+| `nodeInputs`       | Optional. The [inputs](#inputs) that each node gives when it is added, by name and type: `nodeInputs<{ width: number }>`.      |
 | `inputs`           | Optional. The [inputs](#inputs) that every node of the action has, such as a version that names the action's logic.            |
 | `action`           | `(actionContext) => Promise<outputs>`, the function that does the work. See [The action context](#the-action-context).         |
 | `invalidateOn`     | Optional. Fingerprints for dependencies that the nodes read only in part. See [Caching](caching.md#read-part-of-a-dependency). |
@@ -24,19 +26,19 @@ An action is a kind of work. `defineAction` takes these fields:
 
 The last three fields tell how a node runs, not what it makes. None of them is part of the key.
 
-`defineAction` has three type parameters: the ports type `Ports`, the parameters type `P`, and the output type `R`. `P` gives the nodes' dependencies and the inputs that each node must add. A fourth, optional type parameter gives the type of the action's own `inputs`.
+Each type of an action comes from its fields: its dependencies from `deps`, its inputs from `nodeInputs` and `inputs`, and its outputs from what `action` returns. A field that names only a type takes a generic function uncalled, as `nodeInputs<{ width: number }>`: the engine reads the type and never calls it. Called, as `nodeInputs<{ width: number }>()`, it means the same. The one type that no field gives is the ports. Bind them once, with `actionsFor<Ports>()`, and use the function that it returns for each action. TypeScript cannot infer some type parameters of a call while you write the others, so the ports come in a call of their own. An action that needs no ports can use `defineAction` from the package.
 
 ```typescript
 interface Ports {
   images: ImageTool;
 }
 
-const resize = defineAction<
-  Ports,
-  { deps: { source: NodeRef<string> }; inputs: { width: number } },
-  string
->({
+const defineActionWithPorts = actionsFor<Ports>();
+
+const resize = defineActionWithPorts({
   kind: "resize",
+  deps: { source: fetch },
+  nodeInputs: nodeInputs<{ width: number }>,
   inputs: { version: "resize-v1" },
   action: async ({ inputs, depOutputs, ports, outputDir }) => {
     const out = `${outputDir}/resized.jpg`;
@@ -87,26 +89,18 @@ The handles have the shape of the outputs. `Handles<T>` gives their type for an 
 | A list of paths             | a list of `FileHandle`                   |
 | A record of paths and lists | a record of handles and lists of handles |
 
-The role of a settled dependency that did not succeed holds `undefined`. An `invalidateOn` fingerprint gets the same handles as the action.
+The role of a settled dependency that did not succeed holds `undefined`, and so does a `maybe` role that the node left out. An `invalidateOn` fingerprint gets the same handles as the action.
 
 In this graph, `entry` reads JSON from one output of `source`, gives the path of the other to `stat`, and reads the text of `caption`, a settled dependency that fails:
 
 ```typescript
 import { stat, writeFile } from "node:fs/promises";
-import {
-  defineAction,
-  execute,
-  Graph,
-  MemCache,
-  settled,
-  type NodeRef,
-  type SettledRef,
-} from "@mrmeku/dagraph";
+import { actionsFor, execute, Graph, MemCache, nodeInputs, settled } from "@mrmeku/dagraph";
 import { createNodeDagFs } from "@mrmeku/dagraph/fs/node";
 
 const ports = { stat, writeFile };
 type Ports = typeof ports;
-type Fetched = { meta: string; image: string };
+const defineActionWithPorts = actionsFor<Ports>();
 
 const isMeta = (value: unknown): value is { title: string } =>
   typeof value === "object" &&
@@ -114,8 +108,9 @@ const isMeta = (value: unknown): value is { title: string } =>
   "title" in value &&
   typeof value.title === "string";
 
-const source = defineAction<Ports, { inputs: { title: string } }, Fetched>({
+const source = defineActionWithPorts({
   kind: "source",
+  nodeInputs: nodeInputs<{ title: string }>,
   inputs: { version: "source-v1" },
   action: async ({ inputs, ports, outputDir }) => {
     const fetched = { meta: `${outputDir}/meta.json`, image: `${outputDir}/image.jpg` };
@@ -125,18 +120,18 @@ const source = defineAction<Ports, { inputs: { title: string } }, Fetched>({
   },
 });
 
-const caption = defineAction<Ports, { inputs: { title: string } }, string>({
+const caption = defineActionWithPorts({
   kind: "caption",
+  nodeInputs: nodeInputs<{ title: string }>,
   inputs: { version: "caption-v1" },
-  action: async () => {
+  action: async (): Promise<string> => {
     throw new Error("no caption yet");
   },
 });
 
-type EntryParams = { deps: { source: NodeRef<Fetched>; caption: SettledRef<string> } };
-
-const entry = defineAction<Ports, EntryParams, string>({
+const entry = defineActionWithPorts({
   kind: "entry",
+  deps: { source, caption: settled(caption) },
   inputs: { version: "entry-v1" },
   action: async ({ depOutputs, ports, outputDir }) => {
     const { title } = await depOutputs.source.meta.json(isMeta);
@@ -173,7 +168,7 @@ These rules apply:
 | Field    | Meaning                                                                                                             |
 | -------- | ------------------------------------------------------------------------------------------------------------------- |
 | `name`   | The node's address. The default is the action's `kind`.                                                             |
-| `deps`   | Its dependencies, by role. See [Dependencies](#dependencies).                                                       |
+| `deps`   | Its dependencies, in the roles that its action declares. See [Dependencies](#dependencies).                         |
 | `inputs` | Its own inputs, added to the action's: a record, or a function of its deps that returns one. See [Inputs](#inputs). |
 | `meta`   | Data about the node for the code that reads the graph. See [Metadata](#metadata).                                   |
 
@@ -209,24 +204,48 @@ Read `meta` instead of parsing names: a node's image is `node.meta.image`, not t
 
 ## Dependencies
 
-`deps` maps a role to a `NodeRef`. The role is the key of the dependency's outputs in `depOutputs`:
+An action declares its dependencies in `deps`, by role. Each node gives a `NodeRef` in each role. The role is the key of the dependency's outputs in `depOutputs`. A role holds one of these:
+
+| Role                              | The node gives                                        | `depOutputs` holds          |
+| --------------------------------- | ----------------------------------------------------- | --------------------------- |
+| An action: `{ fetch }`            | A node of an action that returns what `fetch` returns | its handles                 |
+| `dep<T>`                          | A node of any action that returns `T`                 | its handles                 |
+| `settled(fetch)`, or `settled<T>` | `settled(ref)`, a node that it runs without           | its handles, or `undefined` |
+| `maybe(fetch)`, or `maybe<T>`     | A node, `undefined`, or nothing                       | its handles, or `undefined` |
+
+Name the action when one action fills the role, and call `settled` and `maybe` around it. When more than one action can fill the role, name its outputs instead: `dep<T>`, `settled<T>` or `maybe<T>`, uncalled, since each names only a type. Use these for a transcript from `transcribe` or from `captions`, or when a function makes the action, as a factory of actions does.
 
 ```typescript
-type ResizeParams = { deps: { source: NodeRef<string> }; inputs: { width: number } };
+const entry = defineActionWithPorts({
+  kind: "entry",
+  deps: { source: fetch, transcript: settled<{ srt: string }>, summary: maybe(summarize) },
+  action: async ({ depOutputs }) => {
+    // ...
+  },
+});
 ```
 
-`NodeRef<T>` carries the output type of the node. If you give a reference of a different type, the program does not compile.
+`NodeRef<T>` carries the output type of the node. If you give a node whose outputs are not what the role declares, the program does not compile. These do not compile either: a missing dependency, a role that the action does not declare in a `deps` literal, and a misspelt output in `depOutputs` or in a fingerprint.
 
-The key holds each dependency by its role, never by its node's name. Thus renaming a node changes no key, and swapping two dependencies between roles does.
+> [!IMPORTANT]
+> TypeScript refuses an extra property only in an object literal. A `deps` record that a variable holds can carry a role that the action does not declare, and that role joins the key. Write `deps` in the `addNode` call.
+
+The key holds each dependency by its role, never by its node's name. Thus renaming a node changes no key, and swapping two dependencies between roles does. `deps` in the action declares types and roles only. The dependencies, and the key, come from the node's `deps`.
 
 Two roles can refer to the same node. The node is then one dependency.
 
+An action that takes a dependency in any role, such as a step that its caller wires, declares `deps` as a record of type `DepSpecs`, whose roles are each a `Dep`, a `SettledDep` or `undefined`, or an uncalled marker: `const anyRole: DepSpecs = {}`, then `deps: anyRole`. Each node then gives the roles that it names, and its `inputs` function gets the refs of those roles.
+
 ### Settled dependencies
 
-A settled dependency is a dependency that the node can run without. Wrap its reference in `settled()`, and declare its role as `SettledRef<T>`:
+A settled dependency is a dependency that the node can run without. Declare its role with `settled` in the action, `settled(captions)` or `settled<T>`, and wrap the node's reference in `settled()`:
 
 ```typescript
-type EntryParams = { deps: { captions: SettledRef<string> } };
+const entry = defineActionWithPorts({
+  kind: "entry",
+  deps: { captions: settled(captions) },
+  action,
+});
 entry.addNode(graph, { deps: { captions: settled(captionsRef) } });
 ```
 
@@ -246,15 +265,22 @@ An input is something outside the graph that decides a node's output, under a na
 | A file  | `file("bun.lock")`                   | a [handle](#file-handles) on it | its path and the hash of its content |
 | A value | `2`, `"en"`, `{ languages: ["en"] }` | the value as written            | the value as JSON, with sorted keys  |
 
-An action declares inputs for all its nodes, and a node adds its own:
+An action declares inputs for all its nodes in `inputs`, and the inputs that each node gives in `nodeInputs`. A node adds its own:
 
 ```typescript
+const lint = defineActionWithPorts({
+  kind: "lint",
+  nodeInputs: nodeInputs<{ eslint: FileInput; lock: FileInput }>,
+  inputs: { version: "lint-v1" },
+  action,
+});
 lint.addNode(graph, { inputs: { eslint: file("eslint.config.ts"), lock: file("bun.lock") } });
 ```
 
 These rules apply:
 
-- A node cannot declare an input again that its action declares.
+- A node gives each input that `nodeInputs` declares, of its type. A missing one does not compile.
+- A node cannot declare an input again that its action declares. This does not compile. A record built at run time, as by `Object.fromEntries`, names no input in its type, so `addNode` refuses the repeat when the node is added.
 - A node can add inputs that its action never reads. They change its key all the same.
 - A value is JSON: a string, a finite number, a boolean, `null`, or an array or a plain record of these. Its type is `InputValue`. A value that is not JSON does not compile; the table below gives the right form. A property that is `undefined` is dropped.
 - `file()` is a whole input. It cannot be a part of a value.
@@ -295,7 +321,7 @@ These rules apply:
 
 - A ref names only a dependency that `deps` declares. A role that `deps` does not declare does not compile: `Property 'mirror' does not exist`.
 - A ref goes only in what the function call that got it returns. A ref kept from the function of another node does not compile.
-- A `SettledOutputRef` never fills an input that `P` declares as an `OutputRef`, because it can be missing.
+- A `SettledOutputRef` never fills an input that `nodeInputs` declares as an `OutputRef`, because it can be missing.
 - The refs of a dependency cannot be listed, for example by a spread, because the names of its outputs exist only in the types. Name each output, as `pack.tarball`. A list of them throws when the node is added.
 - In the key, a ref is the role it points through and the output's name. It never adds the path, so the key is the same wherever the files are. It never adds the dependency's content again, because the dependency's role holds it already. Thus an [`invalidateOn`](caching.md#read-part-of-a-dependency) fingerprint holds however the output reaches the action.
 
@@ -305,10 +331,10 @@ Refs in values are for commands, whose command line is a value. An action that r
 
 The engine throws an error when a declaration is wrong:
 
-| Where          | Refused                                                                                                                                                                                                                                       |
-| -------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `defineAction` | `config` (use `inputs`), `normalize` (use `invalidateOn`), a `timeoutMs` that is not a whole number from 1 to 2³¹−1, a value input that holds `NaN`, `Infinity` or an object that is not plain.                                               |
-| `addNode`      | A field other than `name`, `deps`, `inputs` and `meta`; a duplicate name; an unknown dependency; an input that the action declares; a value input that holds `NaN`, `Infinity` or an object that is not plain; a list of a dependency's refs. |
+| Where          | Refused                                                                                                                                                                                                                                                                      |
+| -------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `defineAction` | `config` (use `inputs`), `normalize` (use `invalidateOn`), a `timeoutMs` that is not a whole number from 1 to 2³¹−1, a value input that holds `NaN`, `Infinity` or an object that is not plain.                                                                              |
+| `addNode`      | A field other than `name`, `deps`, `inputs` and `meta`; a duplicate name; an unknown dependency; an input that the action declares, in a record built at run time; a value input that holds `NaN`, `Infinity` or an object that is not plain; a list of a dependency's refs. |
 
 ## Inspect a graph
 

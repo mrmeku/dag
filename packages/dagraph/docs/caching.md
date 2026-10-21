@@ -26,8 +26,9 @@ The keys form a Merkle tree. A change to an input changes the key of the node, a
 The function is not part of the key. If you change what an action does, for example a filter or a prompt, change a value input that stands for its logic:
 
 ```typescript
-const transcode = defineAction<Ports, Params, string>({
+const transcode = defineActionWithPorts({
   kind: "transcode",
+  deps: { source: fetch },
   inputs: { version: "transcode-v2", bitrate: "128k" },
   action: async ({ inputs, depOutputs, ports, outputDir }) => {
     // ...
@@ -95,8 +96,9 @@ The engine still calculates the node's key and hashes its outputs. Thus its depe
 The action key includes the full content hash of each dependency. If the nodes of an action read only part of a dependency's outputs, give a fingerprint of that part with `invalidateOn`, by role. The engine hashes the fingerprint into the key, in place of the content hash:
 
 ```typescript
-const summarize = defineAction<Ports, { deps: { fetch: NodeRef<{ meta: string }> } }, string>({
+const summarize = defineActionWithPorts({
   kind: "summarize",
+  deps: { fetch },
   inputs: { version: "summarize-v1" },
   invalidateOn: {
     fetch: async (outputs) => (await outputs.meta.json(isMeta)).description,

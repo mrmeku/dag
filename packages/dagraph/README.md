@@ -43,21 +43,23 @@ Two jobs. `count` counts the words in `notes.txt`. `report` writes them up. `rep
 ```typescript
 import { writeFile } from "node:fs/promises";
 import {
-  defineAction,
+  actionsFor,
   execute,
   file,
   FsCache,
   Graph,
+  nodeInputs,
   type FileInput,
-  type NodeRef,
 } from "@mrmeku/dagraph";
 import { createNodeDagFs } from "@mrmeku/dagraph/fs/node";
 
 const ports = { writeFile };
 type Ports = typeof ports;
+const defineActionWithPorts = actionsFor<Ports>();
 
-const count = defineAction<Ports, { inputs: { notes: FileInput } }, string>({
+const count = defineActionWithPorts({
   kind: "count",
+  nodeInputs: nodeInputs<{ notes: FileInput }>,
   inputs: { version: "count-v1" },
   action: async ({ inputs, ports, outputDir }) => {
     const text = await inputs.notes.text();
@@ -67,8 +69,9 @@ const count = defineAction<Ports, { inputs: { notes: FileInput } }, string>({
   },
 });
 
-const report = defineAction<Ports, { deps: { count: NodeRef<string> } }, string>({
+const report = defineActionWithPorts({
   kind: "report",
+  deps: { count },
   inputs: { version: "report-v1" },
   action: async ({ depOutputs, ports, outputDir }) => {
     const words = await depOutputs.count.text();
@@ -111,7 +114,7 @@ report cached
 
 ## Features
 
-- **Typed dependencies.** `NodeRef<T>` carries the output type of a job. Wire the wrong job into a slot and the compiler tells you before anything runs. [Graphs](https://github.com/mrmeku/dag/blob/main/packages/dagraph/docs/graphs.md)
+- **Typed dependencies.** A job says which jobs it reads from, and its types come from what it says and what it returns. Wire the wrong job into a slot, or forget one, and the compiler tells you before anything runs. [Graphs](https://github.com/mrmeku/dag/blob/main/packages/dagraph/docs/graphs.md)
 - **Named inputs.** A job declares what decides its output from outside the graph: a `file()`, or any JSON value, each under a name. Hand it a `Map` or a `Date`, and the compiler hands it back. [Graphs](https://github.com/mrmeku/dag/blob/main/packages/dagraph/docs/graphs.md#inputs)
 - **A content-addressed cache.** A job runs again only when its inputs or its dependencies' outputs change. Its name is its address, never its key. Before it trusts a cached answer, da graph hashes the files again. [Caching](https://github.com/mrmeku/dag/blob/main/packages/dagraph/docs/caching.md)
 - **Early cutoff.** A job that runs again and makes the same files does not send its dependents back to work.
@@ -126,15 +129,15 @@ report cached
 
 Every job in da graph is a node. A node reads its inputs and its dependencies' files, writes files out, and gets a key that says exactly what it read.
 
-| Term       | Meaning                                                                                                       |
-| ---------- | ------------------------------------------------------------------------------------------------------------- |
-| Action     | A kind of work, defined once with `defineAction`: its `kind`, its inputs and the function that does the work. |
-| Node       | One job in the graph: an action added with `addNode`. Its name, by default its `kind`, is its address.        |
-| Dependency | A node whose outputs another node reads, under a role. Put its `NodeRef` in `deps`.                           |
-| Input      | Something outside the graph that decides a node's output: a `file()` or a JSON value, under a name.           |
-| Output     | The file paths that a node's action returns, written to its own output directory.                             |
-| Action key | A hash of the node's inputs by name and its dependencies' content by role. Nothing else.                      |
-| CAS        | The content-addressed store: each node's outputs under `<casBaseDir>/<action key>/out-<content hash>`.        |
+| Term       | Meaning                                                                                                                 |
+| ---------- | ----------------------------------------------------------------------------------------------------------------------- |
+| Action     | A kind of work, defined once with `defineAction`: its `kind`, its deps and inputs, and the function that does the work. |
+| Node       | One job in the graph: an action added with `addNode`. Its name, by default its `kind`, is its address.                  |
+| Dependency | A node whose outputs another node reads, under a role. Put its `NodeRef` in `deps`.                                     |
+| Input      | Something outside the graph that decides a node's output: a `file()` or a JSON value, under a name.                     |
+| Output     | The file paths that a node's action returns, written to its own output directory.                                       |
+| Action key | A hash of the node's inputs by name and its dependencies' content by role. Nothing else.                                |
+| CAS        | The content-addressed store: each node's outputs under `<casBaseDir>/<action key>/out-<content hash>`.                  |
 
 Before a node runs, da graph calculates its action key. If the cache has an entry for the key and the files still hash the same, the node does not run.
 

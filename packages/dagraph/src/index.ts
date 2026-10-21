@@ -6,22 +6,32 @@ export {
   type CacheEntry,
   type DagFs,
 } from "./cache.ts";
-export { defineAction, type Action, type NodeRefOf, type OutputOf } from "./define-action.ts";
+export {
+  actionsFor,
+  defineAction,
+  type Action,
+  type ActionSpec,
+  type NodeRefOf,
+  type OutputOf,
+} from "./define-action.ts";
 export { execute, type ExecuteOptions } from "./execute.ts";
 export {
   Graph,
   closure,
+  dep,
   file,
   isFileHandle,
   isOutputs,
+  maybe,
   namedOutput,
+  nodeInputs,
   settled,
   soleOutput,
 } from "./graph/index.ts";
 export type {
   ActionContext,
-  BaseParams,
-  DepOutputsOf,
+  Dep,
+  DepSpecs,
   FileHandle,
   FileInput,
   Handles,
@@ -29,9 +39,11 @@ export type {
   InputValue,
   InvalidateOn,
   Node,
+  NodeInputsSpec,
   NodeRef,
   OutputRef,
   Outputs,
+  SettledDep,
   SettledOutputRef,
   SettledRef,
 } from "./graph/index.ts";

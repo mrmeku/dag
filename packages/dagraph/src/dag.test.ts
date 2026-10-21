@@ -5,17 +5,19 @@ import { tmpdir } from "node:os";
 import { dirname, join, relative } from "node:path";
 
 import { FsCache, MemCache, TieredCache, type Cache, type DagFs } from "./cache.ts";
-import { defineAction } from "./define-action.ts";
+import { actionsFor } from "./define-action.ts";
 import { execute } from "./execute.ts";
 import {
+  dep,
   file,
   Graph,
   isFileHandle,
   namedOutput,
+  nodeInputs,
   settled,
   soleOutput,
   type ActionContext,
-  type BaseParams,
+  type DepSpecs,
   type FileHandle,
   type FileInput,
   type Handles,
@@ -25,7 +27,6 @@ import {
   type OutputRef,
   type Outputs,
   type SettledOutputRef,
-  type SettledRef,
 } from "./graph/index.ts";
 import type { DepRecord } from "./graph/types.ts";
 import { createBunDagFs } from "./ports/fs.ts";
@@ -39,6 +40,10 @@ interface Ports {
   fs: DagFs;
 }
 
+const defineActionWithPorts = actionsFor<Ports>();
+/** Deps in any role, as an action declares a record that its nodes name. */
+const anyRole: DepSpecs = {};
+
 async function write(c: { outputDir: string; ports: Ports }, name: string, content: string) {
   const path = `${c.outputDir}/${name}`;
   await c.ports.fs.writeText(path, content);
@@ -48,7 +53,7 @@ async function write(c: { outputDir: string; ports: Ports }, name: string, conte
 interface TaskOptions<D> {
   deps?: D;
   /** Its own inputs beside `id`: a record, or a function of its deps' refs. */
-  inputs?: NodeInputs<unknown, D>;
+  inputs?: NodeInputs<Record<never, never>, Record<never, never>, D>;
   /** What the node writes, or throws; by default its resolved inputs as JSON. */
   run?: (c: ActionContext<Ports>) => Promise<string | undefined> | string | undefined;
   cacheable?: boolean;
@@ -63,8 +68,9 @@ function task<Meta, D extends DepRecord = Record<never, never>>(
   opts: TaskOptions<D> = {},
 ): NodeRef<string> {
   const { deps, inputs, run, ...howToRun } = opts;
-  return defineAction<Ports, BaseParams, string>({
+  return defineActionWithPorts({
     kind: "task",
+    deps: anyRole,
     ...howToRun,
     action: async (c) => write(c, "out", (await run?.(c)) ?? JSON.stringify(c.inputs)),
   }).addNode(g, {
@@ -292,7 +298,7 @@ describe("the action key", () => {
   test("inputs and deps alone identify an action: not its kind, function or how-to-run fields, nor the node's name or meta", async () => {
     const { ctx, fs } = setup();
     const make = (kind: string, content: string, group?: string) =>
-      defineAction<Ports, BaseParams, string>({
+      defineActionWithPorts({
         kind,
         inputs: { version: 1 },
         ...(group && { concurrencyGroup: group, timeoutMs: 1000 }),
@@ -364,8 +370,9 @@ describe("the action key", () => {
       fs: { ...fs, hashFile: (p: string) => (hashed.push(p), fs.hashFile(p)) },
     };
     await fs.writeText("/src/a.ts", "a1");
-    const reader = defineAction<Ports, { inputs: { id: string; src: FileInput } }, string>({
+    const reader = defineActionWithPorts({
       kind: "reader",
+      nodeInputs: nodeInputs<{ id: string; src: FileInput }>,
       action: async (c) => write(c, "out", `${c.inputs.src.path}: ${await c.inputs.src.text()}`),
     });
     const run = async (add: (g: Graph<Ports>, name: string) => void) => {
@@ -394,20 +401,18 @@ describe("the action key", () => {
 
   test("an output ref reads as a handle on the dep's published file and keys by role and output name, so an invalidateOn fingerprint still holds", async () => {
     const { ctx, fs } = setup();
-    type Packed = { tarball: string; notes: string };
-    const pack = defineAction<Ports, { inputs: { version: string } }, Packed>({
+    const pack = defineActionWithPorts({
       kind: "pack",
+      nodeInputs: nodeInputs<{ version: string }>,
       action: async (c) => ({
         tarball: await write(c, "pkg.tgz", `pkg ${c.inputs.version}`),
         notes: await write(c, "notes.md", "notes"),
       }),
     });
-    const publish = defineAction<
-      Ports,
-      { deps: { pack: NodeRef<Packed> }; inputs: { cmd: (string | OutputRef<string>)[] } },
-      string
-    >({
+    const publish = defineActionWithPorts({
       kind: "publish",
+      deps: { pack },
+      nodeInputs: nodeInputs<{ cmd: (string | OutputRef<string>)[] }>,
       invalidateOn: { pack: (outputs) => outputs.notes.text() },
       action: async (c) => {
         const argv = c.inputs.cmd.map((arg) => (typeof arg === "string" ? arg : arg.path));
@@ -439,7 +444,7 @@ describe("the action key", () => {
 
 describe("refs and outputs in the key", () => {
   type Pair = { main: string; extra: string };
-  const pair = defineAction<Ports, BaseParams, Pair>({
+  const pair = defineActionWithPorts({
     kind: "pair",
     inputs: { version: 1 },
     action: async (c) => ({
@@ -515,7 +520,7 @@ describe("refs and outputs in the key", () => {
     const { ctx } = setup();
     const hashOf = async (version: number, files: Record<string, [string, string]>) => {
       const g = new Graph<Ports>();
-      defineAction<Ports, BaseParams, Record<string, string>>({
+      defineActionWithPorts({
         kind: "producer",
         inputs: { version },
         action: async (c) => {
@@ -544,8 +549,9 @@ describe("refs and outputs in the key", () => {
     const unreadable = task(g, "unreadable", { inputs: { src: file("/missing.ts") } });
     task(g, "after", { deps: { unreadable } });
     const src = task(g, "src");
-    defineAction<Ports, { deps: { src: NodeRef<string> } }, string>({
+    defineActionWithPorts({
       kind: "fingerprinted",
+      deps: { src: dep<string> },
       invalidateOn: {
         src: () => {
           throw new Error("cannot fingerprint");
@@ -576,11 +582,11 @@ describe("file handles", () => {
     type Notes = { notes: string; parts: string[] };
     const g = new Graph<Ports>();
     const one = task(g, "one", { run: () => "one" });
-    const list = defineAction<Ports, BaseParams, string[]>({
+    const list = defineActionWithPorts({
       kind: "list",
       action: async (c) => [await write(c, "a", "A"), await write(c, "b", "B")],
     }).addNode(g, {});
-    const record = defineAction<Ports, BaseParams, Notes>({
+    const record = defineActionWithPorts({
       kind: "record",
       action: async (c) => ({
         notes: await write(c, "notes", "N"),
@@ -588,18 +594,9 @@ describe("file handles", () => {
       }),
     }).addNode(g, {});
     const read = async (h: FileHandle) => [h.path, await h.text()];
-    defineAction<
-      Ports,
-      {
-        deps: {
-          one: NodeRef<string>;
-          list: NodeRef<string[]>;
-          record: NodeRef<Notes>;
-        };
-      },
-      string
-    >({
+    defineActionWithPorts({
       kind: "reads",
+      deps: { one: dep<string>, list: dep<string[]>, record: dep<Notes> },
       action: async ({ depOutputs: d, ...c }) =>
         write(
           c,
@@ -646,7 +643,7 @@ describe("file handles", () => {
     const isWords = (v: unknown): v is string[] =>
       Array.isArray(v) && v.every((w) => typeof w === "string");
     const g = new Graph<Ports>();
-    const data = defineAction<Ports, BaseParams, { counted: string; prose: string }>({
+    const data = defineActionWithPorts({
       kind: "data",
       action: async (c) => ({
         counted: await write(c, "counted.json", '{"count":3}'),
@@ -658,8 +655,9 @@ describe("file handles", () => {
         () => "",
         (e: unknown) => errorMessage(e),
       );
-    defineAction<Ports, { deps: { data: NodeRef<{ counted: string; prose: string }> } }, string>({
+    defineActionWithPorts({
       kind: "parses",
+      deps: { data: dep<{ counted: string; prose: string }> },
       action: async (c) => {
         const { counted, prose } = c.depOutputs.data;
         return write(
@@ -687,8 +685,9 @@ describe("file handles", () => {
     const thrown: string[] = [];
     const g = new Graph<Ports>();
     const src = task(g, "src");
-    defineAction<Ports, { deps: { src: NodeRef<string> } }, string>({
+    defineActionWithPorts({
       kind: "converts",
+      deps: { src: dep<string> },
       action: async (c) => {
         const h = c.depOutputs.src;
         const conversions = [
@@ -721,7 +720,7 @@ describe("the CAS", () => {
     const seen: string[] = [];
     const build = () => {
       const g = new Graph<Ports>();
-      defineAction<Ports, BaseParams, string>({
+      defineActionWithPorts({
         kind: "m",
         action: async (c) => {
           seen.push(c.outputDir);
@@ -758,7 +757,7 @@ describe("the CAS", () => {
     const { ctx } = setup();
     const g = new Graph<Ports>();
     const returning = (name: string, path: (c: ActionContext<Ports>) => Promise<string>) =>
-      defineAction<Ports, BaseParams, string>({ kind: name, action: path }).addNode(g, {
+      defineActionWithPorts({ kind: name, action: path }).addNode(g, {
         inputs: { id: name },
       });
     returning("escapes", (c) => write(c, "../sibling", "x"));
@@ -829,17 +828,17 @@ describe("the CAS", () => {
   test("attempts of one key at once never remove each other's files, and the key's next attempt keeps only its own", async () => {
     const { ctx, fs, cache } = setup((fs) => new FsCache("/cas", fs));
     let calls = 0;
-    const chapters = defineAction<Ports, BaseParams, string>({
+    const chapters = defineActionWithPorts({
       kind: "chapters",
       inputs: { version: "chapters-v1" },
       action: async (c) => write(c, "chapters.json", "[]"),
     });
-    const clean = defineAction<Ports, BaseParams, string>({
+    const clean = defineActionWithPorts({
       kind: "clean_description",
       inputs: { version: "clean-v1", prompt: "clean" },
       action: async (c) => write(c, "description.txt", `call ${++calls}`),
     });
-    const upload = defineAction<Ports, BaseParams, string>({
+    const upload = defineActionWithPorts({
       kind: "upload",
       cacheable: false,
       inputs: { version: "upload-v1" },
@@ -937,7 +936,7 @@ describe("the CAS", () => {
     const seen: { outputDir?: string; handle?: string } = {};
     const build = () => {
       const g = new Graph<Ports>();
-      const written = defineAction<Ports, BaseParams, Written>({
+      const written = defineActionWithPorts({
         kind: "written",
         action: async (c) => {
           seen.outputDir = c.outputDir;
@@ -948,8 +947,9 @@ describe("the CAS", () => {
           return { joined, relative: relativePath };
         },
       }).addNode(g, {});
-      defineAction<Ports, { deps: { written: NodeRef<Written> } }, string>({
+      defineActionWithPorts({
         kind: "reader",
+        deps: { written: dep<Written> },
         action: async (c) => {
           seen.handle = c.depOutputs.written.joined.path;
           return write(c, "out", await c.depOutputs.written.joined.text());
@@ -1328,22 +1328,17 @@ test("a settled dep: its dependent runs without it, keyed as missing, and runs a
   const { ctx } = setup();
   let ready = false;
   const received: unknown[] = [];
-  const captions = defineAction<Ports, BaseParams, { srt: string }>({
+  const captions = defineActionWithPorts({
     kind: "captions",
     action: async (c) => {
       if (!ready) throw new Error("not ready");
       return { srt: await write(c, "captions.srt", "hello") };
     },
   });
-  const entry = defineAction<
-    Ports,
-    {
-      deps: { captions: SettledRef<{ srt: string }> };
-      inputs: { srt: SettledOutputRef<string> };
-    },
-    string
-  >({
+  const entry = defineActionWithPorts({
     kind: "entry",
+    deps: { captions: settled(captions) },
+    nodeInputs: nodeInputs<{ srt: SettledOutputRef<string> }>,
     action: async (c) => {
       received.push([
         c.depOutputs.captions === undefined,
@@ -1382,12 +1377,9 @@ test("a node two roles name is one dep: the dependent runs once with it in both 
   const { ctx } = setup();
   let broken = false;
   const runs: unknown[] = [];
-  const both = defineAction<
-    Ports,
-    { deps: { main: NodeRef<string>; after: SettledRef<string> } },
-    string
-  >({
+  const both = defineActionWithPorts({
     kind: "both",
+    deps: { main: dep<string>, after: settled<string> },
     action: async (c) => {
       runs.push(c.depOutputs.main.path === c.depOutputs.after?.path);
       return write(c, "both.txt", "both");

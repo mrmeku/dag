@@ -1,15 +1,19 @@
 import type { UploadArtifactOptions, UploadArtifactResponse } from "@actions/artifact";
 import {
+  dep,
   file,
   isFileHandle,
+  nodeInputs,
   settled,
-  type BaseParams,
+  type Dep,
+  type DepSpecs,
   type FileInput,
   type Graph,
   type Handles,
   type InputValue,
   type NodeRef,
   type Outputs,
+  type SettledDep,
   type SettledRef,
 } from "@mrmeku/dagraph";
 import { basename, dirname } from "node:path";
@@ -31,6 +35,9 @@ export const hashFiles = async (patterns: string[]): Promise<string> =>
 
 type Deps = Record<string, NodeRef | SettledRef | undefined>;
 type DepOutputs = Record<string, Handles<Outputs> | undefined>;
+
+/** A step's deps as its action declares them: any role, as each workflow names them. */
+const anyRole: DepSpecs = {};
 
 /** The graph a workflow adds its steps to; its nodes' `meta` is the team's. */
 type StepGraph = Graph<Ports>;
@@ -87,11 +94,6 @@ async function writeLog(fs: Ports["fs"], outputDir: string, log: string): Promis
   await fs.rename(written, path);
 }
 /* ------------------------------------------------------------------ run */
-
-interface RunParams extends BaseParams {
-  deps?: Deps;
-  inputs?: Record<string, FileInput>;
-}
 
 /** A run step's value inputs; its files are inputs too, each named by its path. */
 type RunInputs = {
@@ -344,8 +346,11 @@ export function run<O extends string = never>(
     ...(opts.outputs && { outputs: opts.outputs }),
     ...(opts.config !== undefined && { config: opts.config }),
   };
-  const step = defineStep<RunParams, Record<string, string>, RunInputs>({
+  const step = defineStep({
     kind: opts.name,
+    deps: anyRole,
+    // The files the command reads, each a node input by its path.
+    nodeInputs: nodeInputs<Record<string, FileInput>>,
     inputs,
     ...(opts.group && { concurrencyGroup: opts.group }),
     ...(opts.cacheable === false && { cacheable: false }),
@@ -424,9 +429,8 @@ const hasEvery = <K extends string, V>(
 
 /* ------------------------------------------------------------------ requireAll */
 
-interface RequireAllParams extends BaseParams {
-  deps: Record<string, SettledRef>;
-}
+/** The required-check's deps as its action declares them: any role, each settled. */
+const anySettledRole: Record<string, SettledDep> = {};
 
 /**
  * The required-check: a settled dep on every node in `deps`, so it runs even when some fail
@@ -438,8 +442,9 @@ export function requireAll(
   opts: { name?: string; deps: Record<string, NodeRef> },
 ): NodeRef<string> {
   const roles = Object.keys(opts.deps).sort();
-  const step = defineStep<RequireAllParams, string>({
+  const step = defineStep({
     kind: opts.name ?? "require-all",
+    deps: anySettledRole,
     inputs: { version: "require-all:v1" },
     action: async ({ depOutputs, ports, outputDir }) => {
       const present = roles.filter((r) => depOutputs[r] !== undefined);
@@ -507,7 +512,7 @@ export type RestoreCacheRef = NodeRef<string> & { spec: RestoreCacheSpec };
  */
 export function restoreCache(graph: StepGraph, spec: RestoreCacheSpec): RestoreCacheRef {
   const restoreKeys = spec.restoreKeys ?? [];
-  const step = defineStep<BaseParams, string>({
+  const step = defineStep({
     kind: spec.name,
     inputs: { version: "restore-cache:v1", path: spec.path, key: spec.key, restoreKeys },
     cacheable: false,
@@ -528,9 +533,8 @@ export function restoreCache(graph: StepGraph, spec: RestoreCacheSpec): RestoreC
   return { ...step.addNode(graph, {}), spec };
 }
 
-interface SaveCacheParams extends BaseParams {
-  deps: Deps & { cache: NodeRef<string> };
-}
+/** A save's deps as its action declares them: the restore it saves for, and any other role. */
+const cacheAndAnyRole: DepSpecs & { cache: Dep<string> } = { cache: dep<string>() };
 
 /**
  * `actions/cache/save` as the post step of a restore, with the `if: cache-hit != 'true'` every
@@ -545,8 +549,9 @@ export function saveCache(
   opts: { name: string; cache: RestoreCacheRef; deps: Deps & { cache?: never } },
 ): NodeRef<string> {
   const { path, key } = opts.cache.spec;
-  const step = defineStep<SaveCacheParams, string>({
+  const step = defineStep({
     kind: opts.name,
+    deps: cacheAndAnyRole,
     inputs: { version: "save-cache:v2" },
     cacheable: false,
     action: async ({ depOutputs, ports: p, outputDir }) => {
@@ -640,8 +645,9 @@ export function uploadArtifact(graph: StepGraph, spec: UploadArtifactSpec): Node
   const deps = spec.deps ?? {};
   const { keyed } = byRole(spec.name, deps);
   const path = spec.path.map((entry) => keyed(text(entry)));
-  const step = defineStep<{ deps?: Deps }, string>({
+  const step = defineStep({
     kind: spec.name,
+    deps: anyRole,
     inputs: {
       version: "upload-artifact:v2",
       artifact: spec.artifact,

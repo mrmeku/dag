@@ -1,4 +1,4 @@
-import type { BaseParams, ExecEvent, Node, Result } from "@mrmeku/dagraph";
+import type { ExecEvent, Node, Result } from "@mrmeku/dagraph";
 import xterm from "@xterm/headless";
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
@@ -647,7 +647,7 @@ describe("local session, failures style, at the edges", () => {
       },
       clock: { now: () => 0 },
     });
-    const upload = defineStep<BaseParams, string>({
+    const upload = defineStep({
       kind: "upload",
       inputs: { version: 1 },
       action: async () => {

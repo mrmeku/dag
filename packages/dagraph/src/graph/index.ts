@@ -1,18 +1,21 @@
 export { Graph, addNode, closure, graphNodes, type GraphNode } from "./graph.ts";
 export {
+  dep,
   file,
   isFileHandle,
   isFileInput,
   isOutputs,
+  maybe,
   namedOutput,
+  nodeInputs,
   requiredDeps,
   settled,
   soleOutput,
 } from "./types.ts";
 export type {
   ActionContext,
-  BaseParams,
-  DepOutputsOf,
+  Dep,
+  DepSpecs,
   FileHandle,
   FileInput,
   Handles,
@@ -21,10 +24,12 @@ export type {
   InvalidateOn,
   Node,
   NodeInputs,
+  NodeInputsSpec,
   NodeParams,
   NodeRef,
   OutputRef,
   Outputs,
+  SettledDep,
   SettledOutputRef,
   SettledRef,
 } from "./types.ts";

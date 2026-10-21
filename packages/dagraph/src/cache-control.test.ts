@@ -2,9 +2,9 @@ import { describe, expect, test } from "bun:test";
 import assert from "node:assert/strict";
 
 import { MemCache } from "./cache.ts";
-import { defineAction } from "./define-action.ts";
+import { actionsFor } from "./define-action.ts";
 import { execute, type ExecuteOptions } from "./execute.ts";
-import { Graph, type ActionContext, type NodeRef } from "./graph/index.ts";
+import { dep, Graph, nodeInputs, type ActionContext } from "./graph/index.ts";
 import { orchestrate } from "./orchestrate.ts";
 import { createMemoryDagFs, type MemoryDagFs } from "./ports/memory-fs.ts";
 import { NOT_CACHED, processNode } from "./process-node.ts";
@@ -36,29 +36,29 @@ const idOf = (text: string): string => {
   return source.id;
 };
 
-type Dep = { deps: { source: NodeRef<string> } };
-const source = defineAction<Ports, { inputs: { video: string } }, string>({
+const defineActionWithPorts = actionsFor<Ports>();
+const source = defineActionWithPorts({
   kind: "source",
+  nodeInputs: nodeInputs<{ video: string }>,
   action: async (c) => emit(c, "source", JSON.stringify(c.ports.source)),
 });
 const transcript = (version: number) =>
-  defineAction<Ports, Dep, string>({
+  defineActionWithPorts({
     kind: "transcript",
+    deps: { source },
     inputs: { version },
     // A re-download at another bitrate is the same speech: key only on the video's id.
     invalidateOn: { source: async (source) => idOf(await source.text()) },
     action: async (c) => emit(c, "transcript", `words(${idOf(await c.depOutputs.source.text())})`),
   });
-const packaged = defineAction<Ports, Dep, string>({
+const packaged = defineActionWithPorts({
   kind: "packaged",
+  deps: { source },
   action: async (c) => emit(c, "packaged", `pkg(${await c.depOutputs.source.text()})`),
 });
-const entry = defineAction<
-  Ports,
-  { deps: { transcript: NodeRef<string>; packaged: NodeRef<string> } },
-  string
->({
+const entry = defineActionWithPorts({
   kind: "entry",
+  deps: { transcript: dep<string>, packaged },
   action: async (c) =>
     emit(
       c,
@@ -66,8 +66,9 @@ const entry = defineAction<
       `${await c.depOutputs.transcript.text()}+${await c.depOutputs.packaged.text()}`,
     ),
 });
-const uploaded = defineAction<Ports, { deps: { entry: NodeRef<string> } }, string>({
+const uploaded = defineActionWithPorts({
   kind: "uploaded",
+  deps: { entry },
   cacheable: false,
   action: async (c) => emit(c, "uploaded", "id"),
 });

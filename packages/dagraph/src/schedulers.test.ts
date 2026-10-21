@@ -2,8 +2,8 @@ import { describe, expect, test } from "bun:test";
 import assert from "node:assert/strict";
 
 import { MemCache, type DagFs } from "./cache.ts";
-import { defineAction } from "./define-action.ts";
-import { Graph, type BaseParams, type Node } from "./graph/index.ts";
+import { actionsFor } from "./define-action.ts";
+import { Graph, nodeInputs, type Node } from "./graph/index.ts";
 import { orchestrate, type RunNode } from "./orchestrate.ts";
 import { createMemoryDagFs } from "./ports/memory-fs.ts";
 import { processNode } from "./process-node.ts";
@@ -225,8 +225,10 @@ describe("orchestrate", () => {
     const fs = createMemoryDagFs();
     const ctx = { ports: { fs }, cache: new MemCache(), fs, casBaseDir: "/cas" };
     const controller = new AbortController();
-    const heavy = defineAction<{ fs: DagFs }, BaseParams, string>({
+    const defineActionWithPorts = actionsFor<{ fs: DagFs }>();
+    const heavy = defineActionWithPorts({
       kind: "heavy",
+      nodeInputs: nodeInputs<{ id: number }>,
       concurrencyGroup: "heavy",
       action: async (c) => {
         controller.abort();

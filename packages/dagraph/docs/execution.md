@@ -53,8 +53,9 @@ A scheduler admits ready nodes. It takes them in the engine's order and only fil
 A node joins a group with the `concurrencyGroup` of its action:
 
 ```typescript
-const transcribe = defineAction<Ports, Params, string>({
+const transcribe = defineActionWithPorts({
   kind: "transcribe",
+  deps: { download },
   inputs: { version: "whisper-v1" },
   concurrencyGroup: "whisper",
   action: async ({ depOutputs, ports, outputDir }) => {
@@ -128,7 +129,7 @@ A result is plain data, except `error.cause`, which is the value that the action
 A node's events come in that order: `dispatch`, `start`, its `output`, its `result`. A node that a failed dependency holds back has only a `result`. What an action prints after its result is dropped.
 
 ```typescript
-const build = defineAction<Ports, Params, string>({
+const build = defineActionWithPorts({
   kind: "build",
   inputs: { version: "build-v1" },
   action: async ({ output, outputDir }) => {
@@ -158,8 +159,9 @@ An action gets an `AbortSignal` in its action context. The signal fires in two c
 - The node's `timeoutMs` elapses. The time starts when the action starts: waiting, hashing and the cache lookup do not count.
 
 ```typescript
-const transcribe = defineAction<Ports, TranscribeParams, string>({
+const transcribe = defineActionWithPorts({
   kind: "transcribe",
+  deps: { download },
   inputs: { version: "whisper-v1" },
   timeoutMs: 15 * 60_000,
   action: async ({ depOutputs, ports, outputDir, signal }) =>

@@ -28,6 +28,8 @@ export function namedOutput(outputs: Outputs, name: string): string {
 export const OUTPUT_REF: unique symbol = Symbol.for("@mrmeku/dagraph/OutputRef");
 export const FILE_INPUT: unique symbol = Symbol.for("@mrmeku/dagraph/file");
 export const FILE_HANDLE: unique symbol = Symbol.for("@mrmeku/dagraph/FileHandle");
+export const DEP: unique symbol = Symbol.for("@mrmeku/dagraph/Dep");
+export const NODE_INPUTS: unique symbol = Symbol.for("@mrmeku/dagraph/NodeInputs");
 
 /** Handle to a node, returned by `addNode`. `T` is its action's output type. */
 export interface NodeRef<T extends Outputs = Outputs> {
@@ -187,17 +189,99 @@ export function nodeRef<T extends Outputs>(name: string): NodeRef<T> {
   return { name };
 }
 
-/** Mark a dep its node runs without: when it does not succeed, its role is `undefined`. */
-export function settled<T extends Outputs>(ref: NodeRef<T>): SettledRef<T> {
-  return { name: ref.name, settled: true };
+/**
+ * A dep as an action declares it in `deps`, by role: the outputs its node returns. An action is
+ * one, so `deps: { fetch }` takes a node of `fetch`; `dep<T>` is one for a role that more than one
+ * action fills. A node of the action gives the role a `NodeRef<T>`, never a `Dep`.
+ */
+export interface Dep<T extends Outputs = Outputs> {
+  readonly [DEP]: true;
+  readonly settled?: false;
+  readonly _T?: T;
 }
 
-/** The deps a node may declare, by role. */
+/** A dep declared `settled`, which its node runs without: a node gives it a `SettledRef<T>`. */
+export interface SettledDep<T extends Outputs = Outputs> {
+  readonly [DEP]: true;
+  readonly settled: true;
+  readonly _T?: T;
+}
+
+/** A role as an action declares it. One whose type holds `undefined` is `maybe`. */
+type DepSpec = Dep | SettledDep | undefined;
+
+/**
+ * The deps an action declares, by role: each a `DepSpec`, or a function that returns one, as an
+ * uncalled `dep<T>` is. A record of this type takes a dep in any role: `const anyRole: DepSpecs =
+ * {}`, `deps: anyRole`.
+ */
+export type DepSpecs = { readonly [role: string]: DepSpec | (() => DepSpec) };
+
+/** A role as declared, its marker uncalled or called: `settled<T>` and `settled<T>()` are one. */
+type Role<X> = X extends () => infer R ? R : X;
+
+/**
+ * A role that more than one action fills, by the outputs its nodes return. It names only a type,
+ * so it goes uncalled: `deps: { image: dep<string> }`. Where one action fills the role, name that
+ * action: `deps: { fetch }`.
+ */
+export function dep<T extends Outputs>(): Dep<T> {
+  return { [DEP]: true };
+}
+
+/**
+ * Mark a dep its node runs without: when it does not succeed, its role is `undefined`. An action
+ * declares the role with it, around the action that fills it, `deps: { captions:
+ * settled(captions) }`, or uncalled, by the outputs of a role more than one action fills, `deps:
+ * { captions: settled<string> }`. Its node marks the ref it gives, `deps: { captions:
+ * settled(captionsRef) }`: a role declared one way takes no ref of the other.
+ */
+export function settled<T extends Outputs>(ref: NodeRef<T>): SettledRef<T>;
+export function settled<T extends Outputs>(dep: Dep<T>): SettledDep<T>;
+export function settled<T extends Outputs>(): SettledDep<T>;
+export function settled(of?: NodeRef | Dep): SettledRef | SettledDep {
+  return of === undefined || DEP in of
+    ? { [DEP]: true, settled: true }
+    : { name: of.name, settled: true };
+}
+
+/**
+ * Mark a role that a node may leave out: around the action that fills it, `deps: { summary:
+ * maybe(summarize) }`, or uncalled, by its outputs, `deps: { summary: maybe<string> }`. Its
+ * outputs are `undefined` when the node gives no dep, so the action checks before it reads them.
+ */
+export function maybe<T extends Outputs>(dep: SettledDep<T>): SettledDep<T> | undefined;
+export function maybe<T extends Outputs>(dep: Dep<T>): Dep<T> | undefined;
+export function maybe<T extends Outputs>(): Dep<T> | undefined;
+export function maybe(dep?: Dep | SettledDep): Dep | SettledDep | undefined {
+  return dep ?? { [DEP]: true };
+}
+
+/**
+ * The inputs that each node of an action gives when it is added, by name and type, as its
+ * `nodeInputs` declares them. `T` is a record type, never an interface, which has no index
+ * signature.
+ */
+export interface NodeInputsSpec<T extends InputRecord<unknown> = InputRecord<unknown>> {
+  readonly [NODE_INPUTS]: true;
+  readonly _T?: T;
+}
+
+/**
+ * Declare the inputs each node gives, by name and type. It names only a type, so it goes
+ * uncalled: `nodeInputs: nodeInputs<{ url: string; lock: FileInput }>`. The action reads them
+ * beside its own `inputs`.
+ */
+export function nodeInputs<T extends InputRecord<unknown>>(): NodeInputsSpec<T> {
+  return { [NODE_INPUTS]: true };
+}
+
+/** The deps a node may give, by role. */
 export type DepRecord = Record<string, NodeRef | SettledRef | undefined>;
 
 /**
  * The argument of a node's `inputs` function: each dep in `deps`, by role, as refs to its outputs.
- * `D` is the type of `deps` as the node declared them.
+ * `D` is the type of `deps` as the node gives them.
  */
 export function depRefs<D, S>(deps: DepRecord | undefined): DepRefs<D, S> {
   const refs = Object.fromEntries(
@@ -237,22 +321,22 @@ export const isFileInput = (value: unknown): value is FileInput => branded(value
 /** Whether a value is a handle: a list or a record of handles is not. */
 export const isFileHandle = (value: unknown): value is FileHandle => branded(value, FILE_HANDLE);
 
-/** What a node may declare: deps by role and inputs by name. An action's `P` narrows both. */
-export interface BaseParams {
-  deps?: DepRecord;
-  inputs?: InputRecord<unknown>;
-}
+type DepOutputs<X> =
+  X extends SettledDep<infer T>
+    ? Handles<T> | undefined
+    : X extends Dep<infer T>
+      ? Handles<T>
+      : never;
 
-/** Each dep's outputs by role, as handles: a `settled` dep's are `Handles<T> | undefined`. */
-export type DepOutputsOf<P> = P extends { deps?: infer D }
-  ? {
-      [K in keyof NonNullable<D>]: NonNullable<D>[K] extends NodeRef<infer T>
-        ? Handles<T>
-        : NonNullable<D>[K] extends NodeRef<infer T> | SettledRef<infer T> | undefined
-          ? Handles<T> | undefined
-          : unknown;
-    }
-  : never;
+/**
+ * Each dep's outputs by role, as handles, from the deps `D` an action declares. A `settled` or a
+ * `maybe` role's are `Handles<T> | undefined`, so the action checks before it reads them.
+ */
+export type DepOutputsOf<D> = {
+  [K in keyof D]: undefined extends Role<D[K]>
+    ? DepOutputs<NonNullable<Role<D[K]>>> | undefined
+    : DepOutputs<Role<D[K]>>;
+};
 
 /** An input as the action reads it: a file as a handle, an output ref as that output's handles. */
 export type Resolved<V> = V extends FileInput
@@ -267,21 +351,16 @@ export type Resolved<V> = V extends FileInput
           ? { [K in keyof V]: Resolved<V[K]> }
           : V;
 
-type NodeInputsOf<P> = P extends { inputs?: infer I } ? NonNullable<I> : unknown;
-
 /**
  * Everything one call of an action gets. What is keyed: `inputs` and `depOutputs`, each file in
  * them a `FileHandle`. Its tools: `ports`. What the attempt gives: `outputDir`, the absolute path
  * of a new, empty directory only this attempt writes; `signal`, which fires on the node's timeout
- * or the execution's cancel; and `output`, for what the action prints, in chunks as printed.
+ * or the execution's cancel; and `output`, for what the action prints, in chunks as printed. `D`
+ * is the deps the action declares, and `I` its inputs and its nodes' together.
  */
-export interface ActionContext<
-  Ports = unknown,
-  P extends BaseParams = BaseParams,
-  I = Record<string, unknown>,
-> {
-  inputs: Resolved<I & NodeInputsOf<P>>;
-  depOutputs: DepOutputsOf<P>;
+export interface ActionContext<Ports = unknown, D = DepSpecs, I = Record<string, unknown>> {
+  inputs: Resolved<I>;
+  depOutputs: DepOutputsOf<D>;
   ports: Ports;
   outputDir: string;
   signal: AbortSignal;
@@ -293,50 +372,82 @@ export interface ActionContext<
  * stands in for the dep's content hash in the key. Build it from the files' contents, never from a
  * handle's `path`, which differs by machine and working directory.
  */
-export type InvalidateOn<Ports, P extends BaseParams> = {
-  [K in keyof DepOutputsOf<P>]?: (
-    outputs: NonNullable<DepOutputsOf<P>[K]>,
+export type InvalidateOn<Ports, D> = {
+  [K in keyof D]?: (
+    outputs: NonNullable<DepOutputsOf<D>[K]>,
     ports: Ports,
   ) => Promise<string> | string;
 };
 
-/**
- * A node's own inputs, added to its action's: a record, or a function of the deps the node
- * declares that returns one. The function is the one way to put a ref in a value input, and it
- * runs once, when the node is added: `inputs: ({ pack }) => ({ argv: ["publish", pack.tarball] })`.
- * `PI` is what the action's `P` says each node adds, and `D` the node's deps.
- */
-export type NodeInputs<PI, D> =
-  | (PI & InputRecord)
-  | (<S>(deps: DepRefs<D, S>) => PI & InputRecord<S>);
-
-/** Whether `P` takes a dep in any role, as `BaseParams` does, rather than in roles it names. */
-type TakesAnyRole<P> = P extends { deps?: infer PD }
-  ? string extends keyof NonNullable<PD>
-    ? true
-    : false
-  : false;
-
-/** The deps a node's `inputs` function gets the refs of: the roles `P` names, or else the node's `D`. */
-export type NodeDeps<P, D> = P extends { deps?: infer PD }
-  ? TakesAnyRole<P> extends true
-    ? D
-    : NonNullable<PD>
-  : Record<never, never>;
+type RefOf<X> =
+  X extends SettledDep<infer T> ? SettledRef<T> : X extends Dep<infer T> ? NodeRef<T> : never;
+type Flat<T> = { [K in keyof T]: T[K] };
 
 /**
- * What `addNode` takes: a name, deps, inputs and meta, and nothing else. A node's deps are the
- * roles its action's `P` names; `D`, inferred from the node, stands for them only where `P` takes
- * any role.
+ * The deps a node gives, by role, for the deps `D` its action declares: a `NodeRef` in each role,
+ * a `SettledRef` in a `settled` one, and a `maybe` role left out or `undefined`. A ref must carry
+ * the outputs its role declares, so a node of another action does not compile.
  */
-export type NodeParams<P extends BaseParams, Meta, D> = {
+export type NodeDeps<D> = Flat<
+  { [K in keyof D as undefined extends Role<D[K]> ? never : K]: RefOf<Role<D[K]>> } & {
+    [K in keyof D as undefined extends Role<D[K]> ? K : never]?:
+      | RefOf<NonNullable<Role<D[K]>>>
+      | undefined;
+  }
+>;
+
+/**
+ * The action's own inputs, which no node declares again. Where they are a record typed by an index
+ * signature, their names are not in the type, so `addNode` refuses a repeat when the node is added.
+ */
+type NotRedeclared<I> = string extends keyof I ? unknown : { readonly [K in keyof I]?: never };
+
+/**
+ * A node's own inputs: those its action's `nodeInputs` declares, and any but the action's own.
+ * One object type, not an intersection, so a name that `Object` has, as `constructor`, compiles.
+ */
+type OwnInputs<N, I, S> = Flat<N & NotRedeclared<I> & InputRecord<S>>;
+
+/**
+ * A node's own inputs, added to its action's: a record, or a function of the deps the node gives
+ * that returns one. The function is the one way to put a ref in a value input, and it runs once,
+ * when the node is added: `inputs: ({ pack }) => ({ argv: ["publish", pack.tarball] })`. `N` is
+ * what the action's `nodeInputs` declares, `I` the action's own `inputs`, which no node declares
+ * again, and `D` the deps whose refs the function gets.
+ */
+export type NodeInputs<N, I, D> =
+  | OwnInputs<N, I, never>
+  | (<S>(deps: DepRefs<D, S>) => OwnInputs<N, I, S>);
+
+/**
+ * Whether an action's `deps` take a dep in any role, as a record typed `DepSpecs` does, rather than
+ * in the roles they name.
+ */
+type TakesAnyRole<D> = string extends keyof D ? true : false;
+
+/** The deps whose refs a node's `inputs` function gets: the roles `D` names, or else the node's `ND`. */
+type RefDeps<D, ND> = TakesAnyRole<D> extends true ? ND : NodeDeps<D>;
+
+/** A param `K` of type `V`, optional where `Needed`, what the action declares, may be empty. */
+type Param<K extends string, Needed, V> =
+  Record<never, never> extends Needed ? { [P in K]?: V } : { [P in K]: V };
+
+/** A node's deps: none where its action declares no role, else the roles it declares. */
+type DepsParam<D, ND> = [keyof D] extends [never]
+  ? { deps?: Record<string, never> }
+  : Param<"deps", NodeDeps<D>, RefDeps<D, ND>>;
+
+/**
+ * What `addNode` takes: a name, deps, inputs and meta, and nothing else. The deps are the roles
+ * the action's `deps` declare (`D`), and its inputs those its `nodeInputs` declare (`N`), with
+ * none of its own `inputs` (`I`). `ND`, inferred from the node, is its deps where `D` takes any
+ * role.
+ */
+export type NodeParams<D, N, I, Meta, ND = NodeDeps<D>> = {
   name?: string;
   meta?: Meta;
-} & Pick<P, "deps" & keyof P> &
-  (TakesAnyRole<P> extends true ? { deps?: D } : unknown) &
-  (P extends { inputs: infer PI }
-    ? { inputs: NodeInputs<PI, NodeDeps<P, D>> }
-    : { inputs?: NodeInputs<unknown, NodeDeps<P, D>> });
+} & DepsParam<D, ND> &
+  Param<"inputs", N, NodeInputs<N, I, RefDeps<D, ND>>>;
 
 /**
  * A node as data, from `graph.describe()`: no action, inputs or fingerprints, so it can cross
