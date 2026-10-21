@@ -1,6 +1,13 @@
 import type { ErasedSpec } from "../define-action.ts";
-import { checkInputs, outputRefsIn } from "./inputs.ts";
-import { nodeRef, type Node, type NodeRef, type Outputs } from "./types.ts";
+import { checkInputs } from "./inputs.ts";
+import {
+  nodeRef,
+  type DepRecord,
+  type InputRecord,
+  type Node,
+  type NodeRef,
+  type Outputs,
+} from "./types.ts";
 
 /** A node as the graph holds it: its data, its action, its deps by role and its inputs. */
 export interface GraphNode<Meta = unknown> {
@@ -63,15 +70,12 @@ export const graphNodes = <Meta>(
 
 const PARAMS = new Set(["name", "deps", "inputs", "meta"]);
 
+/** Add a node: its `params` as declared, and its own inputs, as given or as its function returns them. */
 export function addNode<R extends Outputs, Meta>(
   graph: Graph<unknown, Meta>,
   spec: ErasedSpec,
-  params: {
-    name?: string;
-    meta?: Meta;
-    deps?: Record<string, { name: string; settled?: boolean } | undefined> | undefined;
-    inputs?: unknown;
-  },
+  params: { name?: string; meta?: Meta; deps?: DepRecord | undefined },
+  inputsOf: () => InputRecord<unknown> | undefined,
 ): NodeRef<R> {
   const state = stateOf(graph);
   const own = params.name ?? spec.kind;
@@ -102,18 +106,11 @@ export function addNode<R extends Outputs, Meta>(
   const required = new Set(roles.filter(([, ref]) => !ref.settled).map(([, ref]) => ref.name));
   const settledDeps = deps.filter((dep) => !required.has(dep));
 
-  const ownInputs = checkInputs(params.inputs, where);
+  const ownInputs = checkInputs(inputsOf, where);
   const redeclared = Object.keys(ownInputs).filter((k) => Object.hasOwn(spec.inputs, k));
   if (redeclared.length > 0)
     throw new Error(`${where}: inputs.${redeclared[0]} is declared by its action "${spec.kind}"`);
   const inputs = { ...spec.inputs, ...ownInputs };
-  for (const [input, value] of Object.entries(inputs))
-    for (const ref of outputRefsIn(value))
-      if (!deps.includes(ref.node))
-        throw new Error(
-          `${where}: inputs.${input} names "${ref.node}".outputs.${ref.output}, but "${ref.node}" ` +
-            `is not in its deps. Naming an output does not make a dep: declare it in deps.`,
-        );
 
   const meta = params.meta === undefined ? state.meta : params.meta;
   const node: Node<Meta> = {

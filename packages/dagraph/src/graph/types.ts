@@ -25,47 +25,122 @@ export function namedOutput(outputs: Outputs, name: string): string {
   return path;
 }
 
-export const NODE_REF: unique symbol = Symbol.for("@mrmeku/dagraph/NodeRef");
 export const OUTPUT_REF: unique symbol = Symbol.for("@mrmeku/dagraph/OutputRef");
 export const FILE_INPUT: unique symbol = Symbol.for("@mrmeku/dagraph/file");
 export const FILE_HANDLE: unique symbol = Symbol.for("@mrmeku/dagraph/FileHandle");
 
-/**
- * A ref to one output of a node whose outputs are a record: `pack.outputs.tarball`. In a value
- * input it resolves to a handle on that output's published file, or a list of handles, and keys
- * as the role it points through and the output's name.
- */
-export interface OutputRef<
-  T extends string | string[] | undefined = string | string[] | undefined,
-> {
-  readonly [OUTPUT_REF]: true;
-  readonly node: string;
-  readonly output: string;
-  readonly _T?: T;
-}
-
-type OutputRefs<T, Missing extends undefined> = [T] extends [Record<string, string | string[]>]
-  ? { readonly outputs: { readonly [K in keyof T]: OutputRef<T[K] | Missing> } }
-  : unknown;
-
 /** Handle to a node, returned by `addNode`. `T` is its action's output type. */
-export type NodeRef<T extends Outputs = Outputs> = {
+export interface NodeRef<T extends Outputs = Outputs> {
   readonly name: string;
   readonly settled?: false;
   readonly _T?: T;
-} & OutputRefs<T, never>;
+}
 
 /** A dep its node runs without when it does not succeed, as `Promise.allSettled` waits. */
-export type SettledRef<T extends Outputs = Outputs> = {
+export interface SettledRef<T extends Outputs = Outputs> {
   readonly name: string;
   readonly settled: true;
   readonly _T?: T;
-} & OutputRefs<T, undefined>;
+}
+
+/**
+ * A ref to one output of a required dep, which a node's `inputs` function receives by the dep's
+ * role: `inputs: ({ pack }) => ({ argv: ["npm", "publish", pack.tarball] })`. In a value input it
+ * resolves to a handle on that output's published file, or a list of handles, and keys as the
+ * role it points through and the output's name. `S` is the scope of the call that received it:
+ * the ref goes only in what that call returns, so another node's ref does not compile.
+ */
+export interface OutputRef<T extends string | string[] = string | string[], S = unknown> {
+  readonly [OUTPUT_REF]: true;
+  readonly node: string;
+  readonly output: string;
+  readonly settled: false;
+  readonly _T?: T;
+  readonly _scope?: S;
+}
+
+/**
+ * A ref to one output of a `settled` dep, which resolves to `undefined` when the dep did not
+ * succeed. It never stands where an `OutputRef` is declared.
+ */
+export interface SettledOutputRef<T extends string | string[] = string | string[], S = unknown> {
+  readonly [OUTPUT_REF]: true;
+  readonly node: string;
+  readonly output: string;
+  readonly settled: true;
+  readonly _T?: T;
+  readonly _scope?: S;
+}
+
+type OutputRefs<T, S, Settled extends boolean> = [T] extends [Record<string, string | string[]>]
+  ? {
+      readonly [K in keyof T]: Settled extends true
+        ? SettledOutputRef<T[K], S>
+        : OutputRef<T[K], S>;
+    }
+  : Record<never, never>;
+
+/**
+ * What a node's `inputs` function receives: each dep it declares, by role, as a ref to each of
+ * the dep's outputs, an `OutputRef` for a required dep and a `SettledOutputRef` for a `settled`
+ * one. A dep whose outputs are not a record has no refs. The refs of a dep cannot be listed, as
+ * by a spread, since its outputs' names exist only in the types: name each one, `pack.tarball`.
+ */
+export type DepRefs<D, S> = { readonly [K in keyof D]: RefsOf<D[K], S> };
+
+type RefsOf<R, S> =
+  R extends SettledRef<infer T>
+    ? OutputRefs<T, S, true>
+    : R extends NodeRef<infer T>
+      ? OutputRefs<T, S, false>
+      : R;
 
 /** A file input: its path, as given, and its content's hash join the key. */
 export interface FileInput {
   readonly [FILE_INPUT]: string;
 }
+
+/**
+ * A value input: a string, a finite number, a boolean, `null`, or an array or a plain record of
+ * these. A node's `inputs` function may also put in it the refs it received, of scope `S`. The key
+ * holds the value as JSON with sorted keys, and each ref as the role it points through and its
+ * output's name. A property that is `undefined` is dropped.
+ *
+ * These do not compile. Each has a right form:
+ *
+ * - A `Map` or a `Set`: `Object.fromEntries(map)`, `[...set]`.
+ * - A `Date`: `date.toISOString()`.
+ * - A `bigint`: `String(n)`.
+ * - A function or a class instance: the data it holds, as a record.
+ * - `undefined` as an array item: `null`, or no item.
+ * - A `file()` in a value: a file is an input of its own, `inputs: { lock: file("bun.lock") }`.
+ * - A node: a dep, declared in `deps`, whose output the `inputs` function names:
+ *   `deps: { pack }, inputs: ({ pack }) => ({ argv: ["npm", "publish", pack.tarball] })`.
+ * - A ref that the function did not receive, such as one kept from another node's function: a
+ *   ref goes only in what the call that received it returns.
+ *
+ * No type sees these, so `defineAction` and `addNode` refuse them by their path, as
+ * `inputs.ratio is NaN`: `NaN`, `Infinity`, and an object that is not plain, such as a class
+ * instance typed as a record.
+ */
+export type InputValue<S = never> =
+  | string
+  | number
+  | boolean
+  | null
+  | readonly InputValue<S>[]
+  | { readonly [key: string]: InputValue<S> | undefined }
+  | OutputRef<string | string[], S>
+  | SettledOutputRef<string | string[], S>;
+
+/**
+ * Inputs by name, as an action and a node declare them: each a `file(path)`, only ever a whole
+ * input, or an `InputValue`. `S` is the scope of the `inputs` function whose refs it holds. The
+ * default, `never`, holds no refs: an action's inputs and a node's record of inputs name no output.
+ */
+export type InputRecord<S = never> = {
+  readonly [name: string]: InputValue<S> | FileInput | undefined;
+};
 
 // TypeScript refuses a symbol in a template string, with +, or where a string goes.
 type StandsWhole = { toString: never; valueOf: never } & symbol;
@@ -108,28 +183,45 @@ export type Handles<T> = T extends string
         ? undefined
         : never;
 
-function outputRefsOf<T extends Outputs, Missing extends undefined>(
-  node: string,
-): OutputRefs<T, Missing> {
-  const outputs = new Proxy(
-    {},
-    {
-      get: (_, output) =>
-        typeof output === "string" ? { [OUTPUT_REF]: true, node, output } : undefined,
-    },
-  );
-  // eslint-disable-next-line @typescript-eslint/consistent-type-assertions -- the Proxy answers every name; T's keys exist only in the types
-  return { outputs } as OutputRefs<T, Missing>;
-}
-
 export function nodeRef<T extends Outputs>(name: string): NodeRef<T> {
-  return Object.assign({ [NODE_REF]: true, name }, outputRefsOf<T, never>(name));
+  return { name };
 }
 
 /** Mark a dep its node runs without: when it does not succeed, its role is `undefined`. */
 export function settled<T extends Outputs>(ref: NodeRef<T>): SettledRef<T> {
-  const own = { [NODE_REF]: true, name: ref.name, settled: true } as const;
-  return Object.assign(own, outputRefsOf<T, undefined>(ref.name));
+  return { name: ref.name, settled: true };
+}
+
+/** The deps a node may declare, by role. */
+export type DepRecord = Record<string, NodeRef | SettledRef | undefined>;
+
+/**
+ * The argument of a node's `inputs` function: each dep in `deps`, by role, as refs to its outputs.
+ * `D` is the type of `deps` as the node declared them.
+ */
+export function depRefs<D, S>(deps: DepRecord | undefined): DepRefs<D, S> {
+  const refs = Object.fromEntries(
+    Object.entries(deps ?? {}).flatMap(([role, dep]) => {
+      if (!dep) return [];
+      const ref = (output: string) => ({
+        [OUTPUT_REF]: true,
+        node: dep.name,
+        output,
+        settled: dep.settled === true,
+      });
+      const get = (_: object, output: string | symbol) =>
+        typeof output === "string" ? ref(output) : undefined;
+      // A spread or a value that holds the record would list no outputs, so it fails instead.
+      const ownKeys = () => {
+        throw new TypeError(
+          `the refs of ${role} cannot be listed: name each output, as ${role}.<output>`,
+        );
+      };
+      return [[role, new Proxy({}, { get, ownKeys })]];
+    }),
+  );
+  // eslint-disable-next-line @typescript-eslint/consistent-type-assertions -- each Proxy answers every name; the deps' types and their output names exist only in the types
+  return refs as DepRefs<D, S>;
 }
 
 /** A file input, read by the action as a handle on the file. */
@@ -139,16 +231,16 @@ export function file(path: string): FileInput {
 
 const branded = (value: unknown, brand: symbol) =>
   typeof value === "object" && value !== null && brand in value;
-export const isNodeRef = (value: unknown) => branded(value, NODE_REF);
-export const isOutputRef = (value: unknown): value is OutputRef => branded(value, OUTPUT_REF);
+export const isOutputRef = (value: unknown): value is OutputRef | SettledOutputRef =>
+  branded(value, OUTPUT_REF);
 export const isFileInput = (value: unknown): value is FileInput => branded(value, FILE_INPUT);
 /** Whether a value is a handle: a list or a record of handles is not. */
 export const isFileHandle = (value: unknown): value is FileHandle => branded(value, FILE_HANDLE);
 
 /** What a node may declare: deps by role and inputs by name. An action's `P` narrows both. */
 export interface BaseParams {
-  deps?: Record<string, NodeRef | SettledRef | undefined>;
-  inputs?: object;
+  deps?: DepRecord;
+  inputs?: InputRecord<unknown>;
 }
 
 /** Each dep's outputs by role, as handles: a `settled` dep's are `Handles<T> | undefined`. */
@@ -165,13 +257,15 @@ export type DepOutputsOf<P> = P extends { deps?: infer D }
 /** An input as the action reads it: a file as a handle, an output ref as that output's handles. */
 export type Resolved<V> = V extends FileInput
   ? FileHandle
-  : V extends OutputRef<infer T>
-    ? Handles<T>
-    : V extends readonly (infer U)[]
-      ? Resolved<U>[]
-      : V extends object
-        ? { [K in keyof V]: Resolved<V[K]> }
-        : V;
+  : V extends SettledOutputRef<infer T, unknown>
+    ? Handles<T> | undefined
+    : V extends OutputRef<infer T, unknown>
+      ? Handles<T>
+      : V extends readonly (infer U)[]
+        ? Resolved<U>[]
+        : V extends object
+          ? { [K in keyof V]: Resolved<V[K]> }
+          : V;
 
 type NodeInputsOf<P> = P extends { inputs?: infer I } ? NonNullable<I> : unknown;
 
@@ -206,14 +300,43 @@ export type InvalidateOn<Ports, P extends BaseParams> = {
   ) => Promise<string> | string;
 };
 
-/** What `addNode` takes: a name, deps, inputs and meta, and nothing else. */
-export type NodeParams<P extends BaseParams, Meta> = {
+/**
+ * A node's own inputs, added to its action's: a record, or a function of the deps the node
+ * declares that returns one. The function is the one way to put a ref in a value input, and it
+ * runs once, when the node is added: `inputs: ({ pack }) => ({ argv: ["publish", pack.tarball] })`.
+ * `PI` is what the action's `P` says each node adds, and `D` the node's deps.
+ */
+export type NodeInputs<PI, D> =
+  | (PI & InputRecord)
+  | (<S>(deps: DepRefs<D, S>) => PI & InputRecord<S>);
+
+/** Whether `P` takes a dep in any role, as `BaseParams` does, rather than in roles it names. */
+type TakesAnyRole<P> = P extends { deps?: infer PD }
+  ? string extends keyof NonNullable<PD>
+    ? true
+    : false
+  : false;
+
+/** The deps a node's `inputs` function gets the refs of: the roles `P` names, or else the node's `D`. */
+export type NodeDeps<P, D> = P extends { deps?: infer PD }
+  ? TakesAnyRole<P> extends true
+    ? D
+    : NonNullable<PD>
+  : Record<never, never>;
+
+/**
+ * What `addNode` takes: a name, deps, inputs and meta, and nothing else. A node's deps are the
+ * roles its action's `P` names; `D`, inferred from the node, stands for them only where `P` takes
+ * any role.
+ */
+export type NodeParams<P extends BaseParams, Meta, D> = {
   name?: string;
   meta?: Meta;
 } & Pick<P, "deps" & keyof P> &
-  (P extends { inputs: infer I }
-    ? { inputs: I & Record<string, unknown> }
-    : { inputs?: Record<string, unknown> });
+  (TakesAnyRole<P> extends true ? { deps?: D } : unknown) &
+  (P extends { inputs: infer PI }
+    ? { inputs: NodeInputs<PI, NodeDeps<P, D>> }
+    : { inputs?: NodeInputs<unknown, NodeDeps<P, D>> });
 
 /**
  * A node as data, from `graph.describe()`: no action, inputs or fingerprints, so it can cross

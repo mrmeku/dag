@@ -25,11 +25,14 @@ export type {
   FileHandle,
   FileInput,
   Handles,
+  InputRecord,
+  InputValue,
   InvalidateOn,
   Node,
   NodeRef,
   OutputRef,
   Outputs,
+  SettledOutputRef,
   SettledRef,
 } from "./graph/index.ts";
 export {

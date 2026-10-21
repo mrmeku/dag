@@ -10,7 +10,9 @@ import {
   Graph,
   settled,
   type BaseParams,
+  type InputValue,
   type NodeRef,
+  type OutputRef,
   type SettledRef,
 } from "./graph/index.ts";
 import { createMemoryDagFs } from "./ports/memory-fs.ts";
@@ -99,13 +101,17 @@ describe("declarations", () => {
     const other = download.addNode(new Graph<Ports, Meta>().subgraph("v2"), {
       inputs: { videoId: "v2" },
     });
+    const value = (v: InputValue) => () => feed.addNode(g, { name: "n", inputs: { v } });
     const versioned = defineAction<Ports, BaseParams, string>({
       kind: "versioned",
       inputs: { version: 1 },
       action: async () => "",
     });
-    const value = (v: unknown) => () => versioned.addNode(g, { name: "n", inputs: { v } });
-    class Prompt {}
+    class Prompt {
+      constructor(readonly text: string) {}
+    }
+    // Its type is a record's, so only the run-time check sees the class.
+    const prompt: { readonly text: string } = new Prompt("clean");
     expect({
       field: refusal(() =>
         // @ts-expect-error: params hold no videoId
@@ -115,25 +121,20 @@ describe("declarations", () => {
       kind: refusal(() => download.addNode(g, { inputs: { videoId: "v" }, kind: "dl" })),
       duplicate: refusal(() => download.addNode(g, { inputs: { videoId: "v3" } })),
       unknownDep: refusal(() => captions.addNode(g, { deps: { download: other } })),
-      refNotADep: refusal(() =>
-        versioned.addNode(g, { name: "cmd", inputs: { argv: ["play", dl.outputs.audio] } }),
-      ),
       redeclared: refusal(() => versioned.addNode(g, { name: "n", inputs: { version: 2 } })),
       inherited: refusal(() =>
         versioned.addNode(g, { name: "c", inputs: { constructor: "x", toString: "y" } }),
       ),
-      // @ts-expect-error: inputs are a record
-      list: refusal(() => versioned.addNode(g, { name: "n", inputs: ["bun.lock"] })),
-      map: refusal(value(new Map())),
       nan: refusal(value({ ratio: Number.NaN })),
       infinity: refusal(value([Infinity])),
-      bigint: refusal(value(1n)),
-      fn: refusal(value({ f: () => 1 })),
-      instance: refusal(value({ prompt: new Prompt() })),
-      date: refusal(value(new Date(0))),
-      hole: refusal(value([1, undefined])),
-      nestedFile: refusal(value({ lock: file("bun.lock") })),
-      node: refusal(value({ dep: dl })),
+      instance: refusal(value({ prompt })),
+      // A dep's refs know no output names, so a list of them would be empty.
+      listed: refusal(() =>
+        feed.addNode(g, { name: "l", deps: { dl }, inputs: ({ dl }) => ({ dl }) }),
+      ),
+      spread: refusal(() =>
+        feed.addNode(g, { name: "s", deps: { dl }, inputs: ({ dl }) => ({ ...dl }) }),
+      ),
     }).toEqual({
       field:
         'node "download": params hold only name, deps, inputs and meta, not videoId. What decides the output reaches the action as an input: inputs: { ... }.',
@@ -141,25 +142,17 @@ describe("declarations", () => {
       duplicate:
         'Duplicate node name "download". Names are unique in a graph: give the node a name of its own, or add it through graph.subgraph(prefix, meta).',
       unknownDep: 'node "captions" depends on unknown node "v2:download" (deps.download)',
-      refNotADep:
-        'node "cmd": inputs.argv names "download".outputs.audio, but "download" is not in its deps. Naming an output does not make a dep: declare it in deps.',
       redeclared: 'node "n": inputs.version is declared by its action "versioned"',
       inherited: "accepted",
-      list: 'node "n": inputs is a list; inputs are a record of named inputs, each file(path) or a JSON value',
-      map: 'node "n": inputs.v is a Map',
       nan: 'node "n": inputs.v.ratio is NaN',
       infinity: 'node "n": inputs.v[0] is Infinity',
-      bigint: 'node "n": inputs.v is a bigint',
-      fn: 'node "n": inputs.v.f is a function',
       instance: 'node "n": inputs.v.prompt is a Prompt',
-      date: 'node "n": inputs.v is a Date',
-      hole: 'node "n": inputs.v[1] is undefined',
-      nestedFile: 'node "n": inputs.v.lock is a file(); a file is a whole input',
-      node: 'node "n": inputs.v.dep is a node; what comes from a node is a dep, declared in deps',
+      listed: 'node "l": the refs of dl cannot be listed: name each output, as dl.<output>',
+      spread: 'node "s": the refs of dl cannot be listed: name each output, as dl.<output>',
     });
   });
 
-  test("defineAction refuses config, normalize, a timeoutMs setTimeout does not honor, and inputs that are not JSON", () => {
+  test("defineAction refuses config, normalize, a timeoutMs setTimeout does not honor, and NaN in its inputs", () => {
     const action = async () => "";
     const timeout = (timeoutMs: number) => () =>
       defineAction<Ports, BaseParams, string>({ kind: "t", timeoutMs, action });
@@ -173,7 +166,7 @@ describe("declarations", () => {
       timeouts: [0, -1, 1.5, Number.NaN, Infinity, 2 ** 31, 1, 2 ** 31 - 1].map((t) =>
         refusal(timeout(t)).replace(/.*got /, "refused "),
       ),
-      inputs: refusal(() => defineAction({ kind: "i", inputs: { limits: new Set() }, action })),
+      inputs: refusal(() => defineAction({ kind: "i", inputs: { ratio: Number.NaN }, action })),
     }).toEqual({
       noKind: "defineAction: kind is required, the kind of work the action does",
       config:
@@ -190,7 +183,7 @@ describe("declarations", () => {
         "accepted",
         "accepted",
       ],
-      inputs: 'action "i": inputs.limits is a Set',
+      inputs: 'action "i": inputs.ratio is NaN',
     });
   });
 });
@@ -308,11 +301,57 @@ describe("graphs", () => {
   });
 });
 
-/** Checked by the typechecker alone, never run: each line is a declaration that must not compile. */
+/** Checked by the typechecker alone, never run: each line after a `@ts-expect-error` must not compile. */
 export function wrongDeclarationsDoNotCompile() {
   const g = new Graph<Ports, Meta>();
   const dl = download.addNode(g, { inputs: { videoId: "v1" } });
   const feedRef = feed.addNode(g, {});
+  const cmd = defineAction<Ports, BaseParams, string>({
+    kind: "cmd",
+    inputs: { version: 1 },
+    action: async () => "",
+  });
+  const plain = defineAction<
+    Ports,
+    { deps: { dl: SettledRef<{ audio: string }> }; inputs: { audio: OutputRef<string> } },
+    string
+  >({ kind: "plain", action: async () => "" });
+  class Point {
+    constructor(readonly x: number) {}
+  }
+  let kept: OutputRef<string> | undefined;
+  cmd.addNode(g, { name: "keeps", deps: { dl }, inputs: ({ dl }) => ((kept = dl.audio), {}) });
+
+  // @ts-expect-error a Map is not JSON: Object.fromEntries(map)
+  cmd.addNode(g, { inputs: { limits: new Map<string, number>() } });
+  // @ts-expect-error a Set is not JSON: [...set]
+  cmd.addNode(g, { inputs: { tags: new Set<string>() } });
+  // @ts-expect-error a Date is not JSON: date.toISOString()
+  cmd.addNode(g, { inputs: { at: new Date(0) } });
+  // @ts-expect-error a bigint is not JSON
+  cmd.addNode(g, { inputs: { size: 1n } });
+  // @ts-expect-error a function is not JSON
+  cmd.addNode(g, { inputs: { f: () => 1 } });
+  // @ts-expect-error a class instance is not JSON: a record of its fields
+  cmd.addNode(g, { inputs: { at: new Point(1) } });
+  // @ts-expect-error undefined is no array item
+  cmd.addNode(g, { inputs: { list: [1, undefined] } });
+  // @ts-expect-error a file() is a whole input, never part of a value
+  cmd.addNode(g, { inputs: { tools: { lock: file("bun.lock") } } });
+  // @ts-expect-error a node is a dep, never a value
+  cmd.addNode(g, { inputs: { tools: { dep: dl } } });
+  // @ts-expect-error inputs are a record, not a list
+  cmd.addNode(g, { inputs: ["bun.lock"] });
+  // @ts-expect-error a role its action does not name
+  captions.addNode(g, { name: "w", deps: { download: dl, mirror: dl } });
+  // @ts-expect-error an action's own inputs are JSON too
+  defineAction({ kind: "limits", inputs: { limits: new Set<string>() }, action: async () => "" });
+  // @ts-expect-error a ref to a dep the node does not declare: its deps hold no mirror
+  cmd.addNode(g, { deps: { dl }, inputs: (_deps: { mirror: unknown }) => ({}) });
+  // @ts-expect-error a ref that another node's function received
+  cmd.addNode(g, { name: "reuses", deps: { dl }, inputs: () => ({ audio: kept }) });
+  // @ts-expect-error a settled dep's ref may be missing, so it is never a plain OutputRef
+  plain.addNode(g, { deps: { dl: settled(dl) }, inputs: ({ dl }) => ({ audio: dl.audio }) });
   // @ts-expect-error a node of `download` must add its videoId input
   download.addNode(g, { name: "x" });
   // @ts-expect-error a string node where a record node is needed

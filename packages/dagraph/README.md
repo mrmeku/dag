@@ -112,7 +112,7 @@ report cached
 ## Features
 
 - **Typed dependencies.** `NodeRef<T>` carries the output type of a job. Wire the wrong job into a slot and the compiler tells you before anything runs. [Graphs](https://github.com/mrmeku/dag/blob/main/packages/dagraph/docs/graphs.md)
-- **Named inputs.** A job declares what decides its output from outside the graph: a `file()`, or any JSON value, each under a name. [Graphs](https://github.com/mrmeku/dag/blob/main/packages/dagraph/docs/graphs.md#inputs)
+- **Named inputs.** A job declares what decides its output from outside the graph: a `file()`, or any JSON value, each under a name. Hand it a `Map` or a `Date`, and the compiler hands it back. [Graphs](https://github.com/mrmeku/dag/blob/main/packages/dagraph/docs/graphs.md#inputs)
 - **A content-addressed cache.** A job runs again only when its inputs or its dependencies' outputs change. Its name is its address, never its key. Before it trusts a cached answer, da graph hashes the files again. [Caching](https://github.com/mrmeku/dag/blob/main/packages/dagraph/docs/caching.md)
 - **Early cutoff.** A job that runs again and makes the same files does not send its dependents back to work.
 - **Settled dependencies.** A job can run without a dependency that failed, and runs again once that dependency comes through. [Graphs](https://github.com/mrmeku/dag/blob/main/packages/dagraph/docs/graphs.md#settled-dependencies)

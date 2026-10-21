@@ -1,19 +1,23 @@
 import { addNode, type Graph } from "./graph/graph.ts";
 import { checkInputs } from "./graph/inputs.ts";
-import type {
-  ActionContext,
-  BaseParams,
-  InvalidateOn,
-  NodeParams,
-  NodeRef,
-  Outputs,
+import {
+  depRefs,
+  type ActionContext,
+  type BaseParams,
+  type DepRecord,
+  type InputRecord,
+  type InvalidateOn,
+  type NodeDeps,
+  type NodeParams,
+  type NodeRef,
+  type Outputs,
 } from "./graph/types.ts";
 
 /** The longest delay setTimeout honors; a longer one fires at once. */
 const MAX_TIMEOUT_MS = 2_147_483_647;
 
 /** What `defineAction` takes. Only `inputs` and the deps' content join a node's key. */
-export interface ActionSpec<Ports, P extends BaseParams, R extends Outputs, I> {
+export interface ActionSpec<Ports, P extends BaseParams, R extends Outputs, I extends InputRecord> {
   /** What kind of work it is, as Bazel's mnemonic: a label for display and routing, not keyed. */
   kind: string;
   /** Inputs every node of the action has, such as a version that names the action's logic. */
@@ -36,7 +40,10 @@ export interface ErasedSpec {
   kind: string;
   inputs: Record<string, unknown>;
   action: (
-    context: Omit<ActionContext, "depOutputs"> & { depOutputs: Record<string, unknown> },
+    context: Omit<ActionContext, "inputs" | "depOutputs"> & {
+      inputs: Record<string, unknown>;
+      depOutputs: Record<string, unknown>;
+    },
   ) => Promise<Outputs>;
   invalidateOn?: Record<string, (outputs: unknown, ports: unknown) => Promise<string> | string>;
   cacheable?: boolean;
@@ -44,11 +51,14 @@ export interface ErasedSpec {
   timeoutMs?: number;
 }
 
-/** A kind of work, defined once. `addNode` adds one of its nodes to a graph. */
+/**
+ * A kind of work, defined once. `addNode` adds one of its nodes to a graph. `D`, inferred from the
+ * node, is its deps where `P` takes a dep in any role.
+ */
 export interface Action<Ports, P extends BaseParams, R extends Outputs> {
-  addNode<GraphPorts extends Ports, Meta>(
+  addNode<GraphPorts extends Ports, Meta, D extends DepRecord = Record<never, never>>(
     graph: Graph<GraphPorts, Meta>,
-    params: NodeParams<P, Meta>,
+    params: NodeParams<P, Meta, D>,
   ): NodeRef<R>;
 }
 
@@ -73,7 +83,7 @@ export function defineAction<
   Ports,
   P extends BaseParams,
   R extends Outputs,
-  I = Record<string, unknown>,
+  I extends InputRecord = InputRecord,
 >(spec: ActionSpec<Ports, P, R, I>): Action<Ports, P, R> {
   if (typeof spec.kind !== "string" || spec.kind === "")
     throw new Error("defineAction: kind is required, the kind of work the action does");
@@ -88,7 +98,14 @@ export function defineAction<
   // eslint-disable-next-line @typescript-eslint/consistent-type-assertions -- a graph holds actions of many types as data, which erases each context's inputs, dep outputs and ports, and the brand of their file handles
   const checked = { ...spec, inputs: checkInputs(spec.inputs, where) } as unknown as ErasedSpec;
   return {
-    addNode: <Meta>(graph: Graph<Ports, Meta>, params: NodeParams<P, Meta>) =>
-      addNode<R, Meta>(graph, checked, params),
+    addNode: <Meta, D extends DepRecord>(
+      graph: Graph<Ports, Meta>,
+      params: NodeParams<P, Meta, D>,
+    ) =>
+      addNode<R, Meta>(graph, checked, params, () =>
+        typeof params.inputs === "function"
+          ? params.inputs(depRefs<NodeDeps<P, D>, unknown>(params.deps))
+          : params.inputs,
+      ),
   };
 }

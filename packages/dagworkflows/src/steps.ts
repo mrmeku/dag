@@ -7,6 +7,7 @@ import {
   type FileInput,
   type Graph,
   type Handles,
+  type InputValue,
   type NodeRef,
   type Outputs,
   type SettledRef,
@@ -93,14 +94,14 @@ interface RunParams extends BaseParams {
 }
 
 /** A run step's value inputs; its files are inputs too, each named by its path. */
-interface RunInputs {
+type RunInputs = {
   version: string;
   cmd: string[];
   cwd: string;
   env?: Record<string, string>;
   outputs?: Record<string, string>;
-  config?: unknown;
-}
+  config?: InputValue;
+};
 
 /** A run node's outputs: `result.json`, plus each file the spec declared under `DAG_OUT`. */
 export type RunOutputs<O extends string = never> = Record<"result" | O, string>;
@@ -293,7 +294,7 @@ export interface RunSpec<G extends string = never, O extends string = never> {
   /** `false` for nondeterministic commands (integration tests): run every time, never cache. */
   cacheable?: boolean;
   /** Anything else the result depends on that no file captures, such as the tool's version: a JSON value. */
-  config?: unknown;
+  config?: InputValue;
   /**
    * Fingerprints for deps the command reads only part of, keyed by role: the engine's
    * `invalidateOn`. A constant fingerprint orders the node after a dep it reads nothing from, such
@@ -647,7 +648,8 @@ export function uploadArtifact(graph: StepGraph, spec: UploadArtifactSpec): Node
       path,
       ifNoFilesFound,
       ...(spec.overwrite !== undefined && { overwrite: spec.overwrite }),
-      ...(spec.options && { options: spec.options }),
+      // A copy: the toolkit's options are an interface, and an interface is never an InputValue.
+      ...(spec.options && { options: { ...spec.options } }),
     },
     cacheable: false,
     action: async ({ depOutputs, ports: p, outputDir }) => {

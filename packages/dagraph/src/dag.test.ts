@@ -19,11 +19,15 @@ import {
   type FileHandle,
   type FileInput,
   type Handles,
+  type InputRecord,
+  type NodeInputs,
   type NodeRef,
   type OutputRef,
   type Outputs,
+  type SettledOutputRef,
   type SettledRef,
 } from "./graph/index.ts";
+import type { DepRecord } from "./graph/types.ts";
 import { createBunDagFs } from "./ports/fs.ts";
 import { createMemoryDagFs, type MemoryDagFs } from "./ports/memory-fs.ts";
 import { createNodeDagFs } from "./ports/node-fs.ts";
@@ -41,9 +45,10 @@ async function write(c: { outputDir: string; ports: Ports }, name: string, conte
   return path;
 }
 
-interface TaskOptions {
-  deps?: Record<string, NodeRef | SettledRef>;
-  inputs?: Record<string, unknown>;
+interface TaskOptions<D> {
+  deps?: D;
+  /** Its own inputs beside `id`: a record, or a function of its deps' refs. */
+  inputs?: NodeInputs<unknown, D>;
   /** What the node writes, or throws; by default its resolved inputs as JSON. */
   run?: (c: ActionContext<Ports>) => Promise<string | undefined> | string | undefined;
   cacheable?: boolean;
@@ -52,13 +57,21 @@ interface TaskOptions {
 }
 
 /** A node that writes one file. Its name is also an input, `id`, so no two nodes share a key. */
-function task<Meta>(g: Graph<Ports, Meta>, name: string, opts: TaskOptions = {}): NodeRef<string> {
-  const { deps = {}, inputs, run, ...howToRun } = opts;
+function task<Meta, D extends DepRecord = Record<never, never>>(
+  g: Graph<Ports, Meta>,
+  name: string,
+  opts: TaskOptions<D> = {},
+): NodeRef<string> {
+  const { deps, inputs, run, ...howToRun } = opts;
   return defineAction<Ports, BaseParams, string>({
     kind: "task",
     ...howToRun,
     action: async (c) => write(c, "out", (await run?.(c)) ?? JSON.stringify(c.inputs)),
-  }).addNode(g, { name, deps, inputs: { id: name, ...inputs } });
+  }).addNode(g, {
+    name,
+    ...(deps && { deps }),
+    inputs: (refs) => ({ id: name, ...(typeof inputs === "function" ? inputs(refs) : inputs) }),
+  });
 }
 
 function setup(cacheOf: (fs: MemoryDagFs) => Cache = () => new MemCache()) {
@@ -323,7 +336,7 @@ describe("the action key", () => {
 
   test("a value input keys as JSON with sorted keys, undefined properties dropped, and reads as written", async () => {
     const { ctx, fs } = setup();
-    const run = async (inputs: Record<string, unknown>) => {
+    const run = async (inputs: InputRecord) => {
       const g = new Graph<Ports>();
       task(g, "n", { inputs });
       const [r] = await execute(g, ctx);
@@ -406,7 +419,7 @@ describe("the action key", () => {
       const p = pack.addNode(g, { inputs: { version } });
       publish.addNode(g, {
         deps: { pack: p },
-        inputs: { cmd: ["npm", "publish", p.outputs.tarball] },
+        inputs: ({ pack }) => ({ cmd: ["npm", "publish", pack.tarball] }),
       });
       const results = await execute(g, ctx);
       const [packed, published] = results;
@@ -434,41 +447,68 @@ describe("refs and outputs in the key", () => {
       extra: await write(c, "e", "same"),
     }),
   });
+  /** The key of `use`, a node `declare` adds beside p and q, two nodes of `pair`. */
   const keyOfUse = async (
     ctx: ReturnType<typeof setup>["ctx"],
     names: [string, string],
-    deps: (p: NodeRef<Pair>, q: NodeRef<Pair>) => Record<string, NodeRef>,
-    ref: (p: NodeRef<Pair>, q: NodeRef<Pair>) => OutputRef,
+    declare: (g: Graph<Ports>, p: NodeRef<Pair>, q: NodeRef<Pair>) => void,
   ) => {
     // p and q share one declaration, so one entry: they differ in name and role only.
     const g = new Graph<Ports>();
-    const p = pair.addNode(g, { name: names[0] });
-    const q = pair.addNode(g, { name: names[1] });
-    task(g, "use", { deps: deps(p, q), inputs: { file: ref(p, q) } });
+    declare(g, pair.addNode(g, { name: names[0] }), pair.addNode(g, { name: names[1] }));
     const use = (await execute(g, ctx)).find((r) => r.name === "use");
     assert.ok(use, "use settles");
     return use.actionKey;
   };
+  const leftAndRight =
+    (role: "left" | "right", output: keyof Pair) =>
+    (g: Graph<Ports>, p: NodeRef<Pair>, q: NodeRef<Pair>) =>
+      void task(g, "use", {
+        deps: { left: p, right: q },
+        inputs: (refs) => ({ file: refs[role][output] }),
+      });
+  const twoRoles =
+    (role: "main" | "alias", deps: "same" | "reordered" | "split") =>
+    (g: Graph<Ports>, p: NodeRef<Pair>, q: NodeRef<Pair>) =>
+      void task(g, "use", {
+        deps: {
+          same: { main: p, alias: p },
+          reordered: { alias: p, main: p },
+          split: { main: p, alias: q },
+        }[deps],
+        inputs: (refs) => ({ file: refs[role].main }),
+      });
 
   test("an output ref keys by the role it points through and its output's name, never by its node's name or by the output name alone", async () => {
     const { ctx } = setup();
-    const roles = (p: NodeRef<Pair>, q: NodeRef<Pair>) => ({ left: p, right: q });
-    const leftMain = await keyOfUse(ctx, ["p", "q"], roles, (p) => p.outputs.main);
+    const leftMain = await keyOfUse(ctx, ["p", "q"], leftAndRight("left", "main"));
     expect({
-      renamed: (await keyOfUse(ctx, ["x", "y"], roles, (p) => p.outputs.main)) === leftMain,
-      otherOutput: (await keyOfUse(ctx, ["p", "q"], roles, (p) => p.outputs.extra)) === leftMain,
-      otherRole: (await keyOfUse(ctx, ["p", "q"], roles, (_, q) => q.outputs.main)) === leftMain,
+      renamed: (await keyOfUse(ctx, ["x", "y"], leftAndRight("left", "main"))) === leftMain,
+      otherOutput: (await keyOfUse(ctx, ["p", "q"], leftAndRight("left", "extra"))) === leftMain,
+      otherRole: (await keyOfUse(ctx, ["p", "q"], leftAndRight("right", "main"))) === leftMain,
     }).toEqual({ renamed: true, otherOutput: false, otherRole: false });
   });
 
-  test("a ref to a node two roles name keys by all its roles, in sorted order", async () => {
+  test("a ref to a node two roles name keys by all its roles, in sorted order, through either role", async () => {
     const { ctx } = setup();
-    const main = (p: NodeRef<Pair>) => p.outputs.main;
-    const both = await keyOfUse(ctx, ["p", "q"], (p) => ({ main: p, alias: p }), main);
+    const both = await keyOfUse(ctx, ["p", "q"], twoRoles("main", "same"));
     expect({
-      reordered: (await keyOfUse(ctx, ["p", "q"], (p) => ({ alias: p, main: p }), main)) === both,
-      oneRole: (await keyOfUse(ctx, ["p", "q"], (p, q) => ({ main: p, alias: q }), main)) === both,
-    }).toEqual({ reordered: true, oneRole: false });
+      reordered: (await keyOfUse(ctx, ["p", "q"], twoRoles("main", "reordered"))) === both,
+      throughAlias: (await keyOfUse(ctx, ["p", "q"], twoRoles("alias", "same"))) === both,
+      oneRole: (await keyOfUse(ctx, ["p", "q"], twoRoles("main", "split"))) === both,
+    }).toEqual({ reordered: true, throughAlias: true, oneRole: false });
+  });
+
+  test("a ref from the inputs function keys as the same ref written from its node did", async () => {
+    const { ctx } = setup();
+    // The keys these nodes had when their refs were written as p.outputs.main (25a5ee4).
+    expect({
+      leftMain: await keyOfUse(ctx, ["p", "q"], leftAndRight("left", "main")),
+      twoRoles: await keyOfUse(ctx, ["p", "q"], twoRoles("main", "same")),
+    }).toEqual({
+      leftMain: "4437984847a09b2e0b1b44733e9abf13951c0adc74eb6ab8b7f6a921b03a5f44",
+      twoRoles: "c9037e4e25ebbb96342b1d3c091c61192ff72c6db978a715c8d693ff1e43fc9d",
+    });
   });
 
   test("a content hash covers each output's name, each file's path in its output dir and its content, wherever the dir sits", async () => {
@@ -1299,7 +1339,7 @@ test("a settled dep: its dependent runs without it, keyed as missing, and runs a
     Ports,
     {
       deps: { captions: SettledRef<{ srt: string }> };
-      inputs: { srt: OutputRef<string | undefined> };
+      inputs: { srt: SettledOutputRef<string> };
     },
     string
   >({
@@ -1317,7 +1357,7 @@ test("a settled dep: its dependent runs without it, keyed as missing, and runs a
     const ref = captions.addNode(g, {});
     entry.addNode(g, {
       deps: { captions: settled(ref) },
-      inputs: { srt: settled(ref).outputs.srt },
+      inputs: ({ captions }) => ({ srt: captions.srt }),
     });
     return statuses(await execute(g, ctx));
   };

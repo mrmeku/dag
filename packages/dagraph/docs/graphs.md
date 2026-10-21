@@ -170,12 +170,12 @@ These rules apply:
 
 `addNode(graph, params)` adds one node and returns a `NodeRef<R>`. `params` holds only these four fields. Any other field is refused:
 
-| Field    | Meaning                                                                           |
-| -------- | --------------------------------------------------------------------------------- |
-| `name`   | The node's address. The default is the action's `kind`.                           |
-| `deps`   | Its dependencies, by role. See [Dependencies](#dependencies).                     |
-| `inputs` | Its own inputs, added to the action's. See [Inputs](#inputs).                     |
-| `meta`   | Data about the node for the code that reads the graph. See [Metadata](#metadata). |
+| Field    | Meaning                                                                                                             |
+| -------- | ------------------------------------------------------------------------------------------------------------------- |
+| `name`   | The node's address. The default is the action's `kind`.                                                             |
+| `deps`   | Its dependencies, by role. See [Dependencies](#dependencies).                                                       |
+| `inputs` | Its own inputs, added to the action's: a record, or a function of its deps that returns one. See [Inputs](#inputs). |
+| `meta`   | Data about the node for the code that reads the graph. See [Metadata](#metadata).                                   |
 
 ```typescript
 const graph = new Graph<Ports>();
@@ -256,30 +256,47 @@ These rules apply:
 
 - A node cannot declare an input again that its action declares.
 - A node can add inputs that its action never reads. They change its key all the same.
-- A value must be JSON. A `Map`, a `Set`, a class instance, a function, a `bigint`, `NaN` or `Infinity` is refused where it is declared, with its path, for example `inputs.limits is a Map`. A property that is `undefined` is dropped.
+- A value is JSON: a string, a finite number, a boolean, `null`, or an array or a plain record of these. Its type is `InputValue`. A value that is not JSON does not compile; the table below gives the right form. A property that is `undefined` is dropped.
 - `file()` is a whole input. It cannot be a part of a value.
 - An input is never another node. What comes from a node is a dependency.
 - The engine hashes each file path as you give it. `execute` hashes each file once per execution, also when many nodes declare it. `processNode`, called alone, hashes the files of its one node. A file that cannot be read fails the node before it gets a key.
+
+| Does not compile                        | Write instead                                                   |
+| --------------------------------------- | --------------------------------------------------------------- |
+| A `Map` or a `Set`                      | `Object.fromEntries(map)`, `[...set]`                           |
+| A `Date`                                | `date.toISOString()`                                            |
+| A `bigint`                              | `String(n)`                                                     |
+| A function or a class instance          | The data that it holds, as a record                             |
+| `undefined` as an item of a list        | `null`, or no item                                              |
+| `{ tools: { lock: file("bun.lock") } }` | `{ lock: file("bun.lock") }`                                    |
+| A node                                  | A dependency in `deps`, and a [ref](#output-refs) to its output |
+
+No type can see `NaN`, `Infinity`, or an object that is not plain, such as a class instance whose type is a record's. The engine refuses each where it is declared, with its path, for example `inputs.ratio is NaN`.
 
 If a node reads something that it does not declare, a change to it does not run the node again.
 
 ## Output refs
 
-A node whose outputs are a record has a ref to each output: `pack.outputs.tarball` is an `OutputRef<T>`, where `T` is the type of that output. A settled reference has them too: `settled(pack).outputs.tarball` resolves to `T | undefined`.
-
-A ref can be in a value input: the whole value, an item of an array or a property. The action reads it as a [handle](#file-handles) on the dependency's published file, or a list of handles for a list output. A ref to a settled dependency that did not succeed reads as `undefined`.
+A value input can name an output of a dependency. To do this, give `inputs` as a function. It gets each dependency that `deps` declares, by its role, as a record of refs to that dependency's outputs. It returns the inputs, and it runs once, when the node is added:
 
 ```typescript
 const pack = packAction.addNode(graph, {});
 publish.addNode(graph, {
   deps: { pack },
-  inputs: { argv: ["npm", "publish", pack.outputs.tarball] },
+  inputs: ({ pack }) => ({ argv: ["npm", "publish", pack.tarball] }),
 });
 ```
 
+A ref of a required dependency is an `OutputRef<T>`, where `T` is the type of that output. A ref of a settled dependency is a `SettledOutputRef<T>`. A dependency whose outputs are not a record has no refs.
+
+A ref can be in a value input: the whole value, an item of an array or a property. The action reads it as a [handle](#file-handles) on the dependency's published file, or a list of handles for a list output. A ref of a settled dependency that did not succeed reads as `undefined`.
+
 These rules apply:
 
-- Naming an output does not make a dependency. Declare the node in `deps`. A ref to a node that is not in `deps` is refused when the node is added.
+- A ref names only a dependency that `deps` declares. A role that `deps` does not declare does not compile: `Property 'mirror' does not exist`.
+- A ref goes only in what the function call that got it returns. A ref kept from the function of another node does not compile.
+- A `SettledOutputRef` never fills an input that `P` declares as an `OutputRef`, because it can be missing.
+- The refs of a dependency cannot be listed, for example by a spread, because the names of its outputs exist only in the types. Name each output, as `pack.tarball`. A list of them throws when the node is added.
 - In the key, a ref is the role it points through and the output's name. It never adds the path, so the key is the same wherever the files are. It never adds the dependency's content again, because the dependency's role holds it already. Thus an [`invalidateOn`](caching.md#read-part-of-a-dependency) fingerprint holds however the output reaches the action.
 
 Refs in values are for commands, whose command line is a value. An action that reads a file itself reads it from `depOutputs`.
@@ -288,10 +305,10 @@ Refs in values are for commands, whose command line is a value. An action that r
 
 The engine throws an error when a declaration is wrong:
 
-| Where          | Refused                                                                                                                                                                                                                           |
-| -------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `defineAction` | `config` (use `inputs`), `normalize` (use `invalidateOn`), a `timeoutMs` that is not a whole number from 1 to 2³¹−1, inputs that are not a record of files and JSON values.                                                       |
-| `addNode`      | A field other than `name`, `deps`, `inputs` and `meta`; a duplicate name; an unknown dependency; an input that the action declares; a ref to a node that is not in `deps`; inputs that are not a record of files and JSON values. |
+| Where          | Refused                                                                                                                                                                                                                                       |
+| -------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `defineAction` | `config` (use `inputs`), `normalize` (use `invalidateOn`), a `timeoutMs` that is not a whole number from 1 to 2³¹−1, a value input that holds `NaN`, `Infinity` or an object that is not plain.                                               |
+| `addNode`      | A field other than `name`, `deps`, `inputs` and `meta`; a duplicate name; an unknown dependency; an input that the action declares; a value input that holds `NaN`, `Infinity` or an object that is not plain; a list of a dependency's refs. |
 
 ## Inspect a graph
 
