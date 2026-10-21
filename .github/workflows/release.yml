@@ -25,10 +25,10 @@ jobs:
       - run: bun run build:action
 
       # The release is the graph (scripts/release.ts): checks, packs, publishes, the action's
-      # build output pushed to mrmeku/dagactions, and the CAS saved under the release key so a
+      # build output pushed to mrmeku/dagworkflows, and the CAS saved under the release key so a
       # re-run skips what already succeeded. npm authenticates through OIDC; the action repo
       # through its deploy key, read from the environment and never part of a node.
-      - uses: ./packages/dagactions/action
+      - uses: ./packages/dagworkflows/action
         with:
           workflow: scripts/release.ts
         env:

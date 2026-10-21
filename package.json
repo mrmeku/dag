@@ -6,16 +6,16 @@
     "packages/*"
   ],
   "scripts": {
-    "ci": "node packages/dagactions/src/cli.ts run scripts/ci.ts",
-    "release": "node packages/dagactions/src/cli.ts run scripts/release.ts",
-    "build:action": "cd packages/dagactions && bun run build:action",
+    "ci": "node packages/dagworkflows/src/cli.ts run scripts/ci.ts",
+    "release": "node packages/dagworkflows/src/cli.ts run scripts/release.ts",
+    "build:action": "cd packages/dagworkflows && bun run build:action",
     "typecheck": "tsgo --noEmit",
     "lint": "bun --bun eslint .",
     "format": "prettier --write .",
     "docs": "node scripts/reference-doc.ts"
   },
   "devDependencies": {
-    "@mrmeku/dagactions": "workspace:*",
+    "@mrmeku/dagworkflows": "workspace:*",
     "@mrmeku/dagraph": "workspace:*",
     "@types/bun": "latest",
     "@types/node": "^24.19.2",

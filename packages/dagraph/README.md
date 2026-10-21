@@ -157,7 +157,7 @@ When in doubt, build it as a node first. If it works, it was never a primitive. 
 - **[Bazel](https://bazel.build)** runs hermetic builds from rules in its own language, with sandboxes and remote execution. dagraph has no sandbox and no build language. It keys on what you declare, and trusts you to declare it.
 - **[p-graph](https://github.com/microsoft/p-graph)** runs a graph of promises with a concurrency limit. dagraph adds the cache, typed dependencies, timeouts and cancellation.
 
-[dagactions](https://github.com/mrmeku/dag/tree/main/packages/dagactions) is da graph's own crew: a CI runner that runs a GitHub Actions job as a dagraph graph.
+[dagworkflows](https://github.com/mrmeku/dag/tree/main/packages/dagworkflows) is da graph's own crew: a CI runner that runs a GitHub Actions job as a dagraph graph.
 
 ## Documentation
 

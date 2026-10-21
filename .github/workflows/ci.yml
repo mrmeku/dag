@@ -26,7 +26,7 @@ jobs:
 
       # Everything else is in the graph (scripts/ci.ts): an actions/cache node restores the CAS,
       # the checks run, and another saves it on main.
-      - uses: ./packages/dagactions/action
+      - uses: ./packages/dagworkflows/action
         with:
           workflow: scripts/ci.ts
         env:

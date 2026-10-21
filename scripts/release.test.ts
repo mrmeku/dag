@@ -1,5 +1,10 @@
-import { createMemoryActionsCache, createTestPorts, okSh, type Ports } from "@mrmeku/dagactions";
 import { Graph, namedOutput, soleOutput } from "@mrmeku/dagraph";
+import {
+  createMemoryActionsCache,
+  createTestPorts,
+  okExec,
+  type Ports,
+} from "@mrmeku/dagworkflows";
 import assert from "node:assert/strict";
 import { basename } from "node:path";
 import { describe, test } from "node:test";
@@ -7,21 +12,18 @@ import { commandOf, processEach } from "./process-each.ts";
 import release from "./release.ts";
 
 describe("release workflow", () => {
-  test("a tag releases its version, any other ref dry-runs; packs are outputs, publishes are receipts after the gate, the engine before the runner", async () => {
+  test("a tag releases its version, any other ref dry-runs; packs are outputs, publishes are receipts after require-all, the engine before the runner", async () => {
     const build = async (ref: string) => {
       // An earlier attempt of this release, and main's CAS before it.
-      const actionsCache = createMemoryActionsCache([
-        "dagactions-release-1.2.3-0",
-        "dagactions-main-1",
-      ]);
+      const actionsCache = createMemoryActionsCache(["dag-release-1.2.3-0", "dag-main-1"]);
       // pack and build:action write the files they declare.
       const { ports, fs, actionsArtifact } = createTestPorts({
         context: { ref, sha: "abc1234def" },
         actionsCache,
-        sh: {
+        exec: {
           run: async (cmd, opts) => {
-            const out = opts?.env?.["DAGACTIONS_OUT"];
-            assert.ok(out, "the step's DAGACTIONS_OUT");
+            const out = opts?.env?.["DAG_OUT"];
+            assert.ok(out, "the step's DAG_OUT");
             const [, script, pkg, version] = cmd;
             if (script === "scripts/pack.ts") {
               assert.ok(pkg, "the package pack.ts packs");
@@ -29,12 +31,12 @@ describe("release workflow", () => {
             }
             if (cmd[1] === "build")
               for (const file of ["main.js", "post.js"]) await fs.writeText(`${out}/${file}`, file);
-            return okSh.run(cmd, opts);
+            return okExec.run(cmd, opts);
           },
         },
       });
       const graph = new Graph<Ports>();
-      const out = await release.workflow(graph, ports, await ports.ci.context());
+      const out = await release.implementation(graph, ports, await ports.host.context());
       const processed = await processEach(graph, ports);
       const resultOf = (name: string) => processed.get(name)?.result;
       const cmdOf = async (name: string) => (await commandOf(ports, resultOf(name)))?.cmd;
@@ -71,7 +73,7 @@ describe("release workflow", () => {
       assert.ok(node, `no node ${name}`);
       return node;
     };
-    const pack = tagged.resultOf("pack:dagactions");
+    const pack = tagged.resultOf("pack:dagworkflows");
     assert.deepEqual(
       {
         versions: [tagged.version, tagged.dryRun, branch.version, branch.dryRun],
@@ -83,11 +85,11 @@ describe("release workflow", () => {
           pack?.status === "done" &&
           Object.entries(pack.outputs).map(([output, path]) => [output, basename(String(path))]),
         packInputs: tagged.processed
-          .get("pack:dagactions")
-          ?.files.includes("packages/dagactions/package.json"),
+          .get("pack:dagworkflows")
+          ?.files.includes("packages/dagworkflows/package.json"),
         publishCmd: tagged.ran("publish:dagraph"),
         dryRunPublishCmd: branch.ran("publish:dagraph"),
-        publishDaghaDeps: by("publish:dagactions").deps.sort(),
+        publishDagworkflowsDeps: by("publish:dagworkflows").deps.sort(),
         publishDagraphDeps: by("publish:dagraph").deps.sort(),
         actionCmd: tagged.ran("release:action"),
         actionDeps: by("release:action").deps.sort(),
@@ -104,33 +106,33 @@ describe("release workflow", () => {
         versions: ["1.2.3", false, "0.0.0-dev.abc1234", true],
         names: [
           "build:action",
-          "gate",
           "lint",
-          "pack:dagactions",
           "pack:dagraph",
-          "publish:dagactions",
+          "pack:dagworkflows",
           "publish:dagraph",
+          "publish:dagworkflows",
           "release",
           "release:action",
+          "require-all",
           "restore:cas",
           "save:cas",
-          "test:dagactions",
           "test:dagraph",
+          "test:dagworkflows",
           "typecheck",
           "upload:action",
-          "upload:dagactions",
           "upload:dagraph",
+          "upload:dagworkflows",
         ],
         // A release restores its own earlier attempt first, a dry run main's.
-        restored: ["dagactions-release-1.2.3-0", "dagactions-main-1"],
+        restored: ["dag-release-1.2.3-0", "dag-main-1"],
         saved: [
-          [["dagactions-release-1.2.3-abc1234def", [".dagactions/cas"]]],
-          [["dagactions-release-0.0.0-dev.abc1234-abc1234def", [".dagactions/cas"]]],
+          [["dag-release-1.2.3-abc1234def", [".dag/cas"]]],
+          [["dag-release-0.0.0-dev.abc1234-abc1234def", [".dag/cas"]]],
         ],
-        packCmd: ["bun", "scripts/pack.ts", "dagraph", "1.2.3", "$DAGACTIONS_OUT"],
+        packCmd: ["bun", "scripts/pack.ts", "dagraph", "1.2.3", "$DAG_OUT"],
         packOutputs: [
           ["result", "result.json"],
-          ["tarball", "mrmeku-dagactions-1.2.3.tgz"],
+          ["tarball", "mrmeku-dagworkflows-1.2.3.tgz"],
         ],
         packInputs: true,
         publishCmd: [
@@ -150,8 +152,8 @@ describe("release workflow", () => {
           "next",
           "--dry-run",
         ],
-        publishDaghaDeps: ["gate", "pack:dagactions", "publish:dagraph"],
-        publishDagraphDeps: ["gate", "pack:dagraph"],
+        publishDagworkflowsDeps: ["pack:dagworkflows", "publish:dagraph", "require-all"],
+        publishDagraphDeps: ["pack:dagraph", "require-all"],
         actionCmd: [
           "bun",
           "scripts/release-action.ts",
@@ -159,11 +161,11 @@ describe("release workflow", () => {
           tagged.output("build:action", "main"),
           tagged.output("build:action", "post"),
         ],
-        actionDeps: ["build:action", "gate"],
-        releaseDeps: ["publish:dagactions", "publish:dagraph", "release:action"],
+        actionDeps: ["build:action", "require-all"],
+        releaseDeps: ["publish:dagraph", "publish:dagworkflows", "release:action"],
         uploads: [
           ["dagraph-1.2.3", ["mrmeku-dagraph-1.2.3.tgz"]],
-          ["dagactions-1.2.3", ["mrmeku-dagactions-1.2.3.tgz"]],
+          ["dagworkflows-1.2.3", ["mrmeku-dagworkflows-1.2.3.tgz"]],
           ["action-1.2.3", ["main.js", "post.js"]],
         ],
         uploadDeps: [["pack:dagraph"], ["build:action"]],
@@ -171,7 +173,7 @@ describe("release workflow", () => {
         uncached: [
           "restore:cas",
           "upload:dagraph",
-          "upload:dagactions",
+          "upload:dagworkflows",
           "upload:action",
           "save:cas",
         ],

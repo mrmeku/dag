@@ -1,5 +1,5 @@
 /**
- * Fills the generated sections of packages/dagactions/docs/reference.md from their sources: the
+ * Fills the generated sections of packages/dagworkflows/docs/reference.md from their sources: the
  * CLI's commander program, the action's action.yml and the paths in config.ts. The prose around
  * them is the file's own. `bun run docs` writes it; reference-doc.test.ts fails while it is stale.
  */
@@ -8,7 +8,7 @@ import { readFileSync, writeFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { format, resolveConfig } from "prettier";
 import { parse } from "yaml";
-import { program } from "../packages/dagactions/src/cli.ts";
+import { program } from "../packages/dagworkflows/src/cli.ts";
 import {
   DEFAULT_CAS_DIR,
   DEFAULT_FAILURES_REPORT_PATH,
@@ -16,14 +16,14 @@ import {
   DEFAULT_LOG_DIR,
   DEFAULT_SUMMARY_PATH,
   LAST_RUN_FILE,
-} from "../packages/dagactions/src/config.ts";
-import { logPath } from "../packages/dagactions/src/step-records.ts";
+} from "../packages/dagworkflows/src/config.ts";
+import { logPath } from "../packages/dagworkflows/src/step-records.ts";
 
 export const REFERENCE_PATH = fileURLToPath(
-  new URL("../packages/dagactions/docs/reference.md", import.meta.url),
+  new URL("../packages/dagworkflows/docs/reference.md", import.meta.url),
 );
 const ACTION_YML_PATH = fileURLToPath(
-  new URL("../packages/dagactions/action/action.yml", import.meta.url),
+  new URL("../packages/dagworkflows/action/action.yml", import.meta.url),
 );
 
 interface ActionInput {
@@ -51,7 +51,7 @@ const table = (header: string[], rows: string[][]) =>
 function cliLines(): string[] {
   const usage = program.commands.map(
     (command) =>
-      `npx dagactions ${command.name()} ${command.registeredArguments.map((a) => `<${a.name()}>`).join(" ")} [options]`,
+      `npx --no dag ${command.name()} ${command.registeredArguments.map((a) => `<${a.name()}>`).join(" ")} [options]`,
   );
   const commandRows = program.commands.map((command) => [
     code(command.name()),
@@ -119,7 +119,7 @@ function fileLines(): string[] {
     ],
     [
       `${DEFAULT_HISTORY_DIR}/`,
-      "The history of each run: each step that finished, with the run's lock. `dagactions post`, the action's `post` entry and the next run read them.",
+      "The history of each run: each step that finished, with the run's lock. `dag post`, the action's `post` entry and the next run read them.",
     ],
     [`${DEFAULT_LOG_DIR}/`, "Local runs only: the log of each step, while it runs."],
     [DEFAULT_FAILURES_REPORT_PATH, "Local runs only: the report of the failures."],

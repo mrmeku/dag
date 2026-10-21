@@ -2,15 +2,15 @@
 
 Two packages for running work as a directed acyclic graph, with content-addressed caching.
 
-| package                                     | what it is                                                                                                                                                |
-| ------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| [`@mrmeku/dagraph`](packages/dagraph)       | The engine: a graph of file-producing actions, executed in parallel, cached by the hash of each action's config, inputs and dependency outputs.           |
-| [`@mrmeku/dagactions`](packages/dagactions) | A CI runner on the engine: write a job as a graph of steps, run it on GitHub Actions or on your laptop from the same file, with `actions/cache` as nodes. |
+| package                                         | what it is                                                                                                                                                |
+| ----------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| [`@mrmeku/dagraph`](packages/dagraph)           | The engine: a graph of file-producing actions, executed in parallel, cached by the hash of each action's config, inputs and dependency outputs.           |
+| [`@mrmeku/dagworkflows`](packages/dagworkflows) | A CI runner on the engine: write a job as a graph of steps, run it on GitHub Actions or on your laptop from the same file, with `actions/cache` as nodes. |
 
-The GitHub action is published to [`mrmeku/dagactions`](https://github.com/mrmeku/dagactions):
+The GitHub action is published to [`mrmeku/dagworkflows`](https://github.com/mrmeku/dagworkflows):
 
 ```yaml
-- uses: mrmeku/dagactions@v0
+- uses: mrmeku/dagworkflows@v0
   with:
     workflow: scripts/ci.ts
 ```
@@ -25,7 +25,7 @@ Bun 1.4 and Node 24.2 or later.
 
 ```
 bun install
-bun run ci          # the checks, as a dagactions workflow, locally
+bun run ci          # the checks, as a dagworkflows workflow, locally
 bun run release     # the release, as a dry run
 ```
 

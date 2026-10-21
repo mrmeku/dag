@@ -28,7 +28,7 @@ import { dts } from "rollup-plugin-dts";
  * holds them: optional peers and devDependencies, which a consumer's typecheck must not need.
  */
 const INLINE_TYPES: Record<string, Record<string, string>> = {
-  dagactions: {
+  dagworkflows: {
     "@actions/artifact": "@actions/artifact",
     "@actions/cache": "@actions/cache",
     "@actions/github": "@actions/github",

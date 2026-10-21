@@ -1,0 +1,64 @@
+{
+  "name": "@mrmeku/dagworkflows",
+  "private": true,
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/mrmeku/dag.git",
+    "directory": "packages/dagworkflows"
+  },
+  "module": "src/index.ts",
+  "type": "module",
+  "engines": {
+    "node": ">=24.2"
+  },
+  "exports": {
+    ".": "./src/index.ts",
+    "./github": "./src/ports/github.ts"
+  },
+  "bin": {
+    "dag": "./src/cli.ts"
+  },
+  "scripts": {
+    "test": "node --test \"src/**/*.test.ts\"",
+    "build:action": "bun build src/action/main.ts src/action/post.ts --target=node --format=esm --outdir action/dist"
+  },
+  "dependencies": {
+    "@actions/glob": "^0.7.0",
+    "@mrmeku/dagraph": "workspace:*",
+    "commander": "^14.0.3",
+    "proper-lockfile": "^4.1.2",
+    "shlex": "^3.0.0",
+    "std-env": "^4.3.0",
+    "string-width": "^8.3.0",
+    "supports-hyperlinks": "^4.6.0"
+  },
+  "peerDependencies": {
+    "@actions/artifact": "^6.3.1",
+    "@actions/cache": "^6.3.0",
+    "@actions/core": "^3.0.1",
+    "@actions/github": "^9.1.1"
+  },
+  "peerDependenciesMeta": {
+    "@actions/artifact": {
+      "optional": true
+    },
+    "@actions/cache": {
+      "optional": true
+    },
+    "@actions/core": {
+      "optional": true
+    },
+    "@actions/github": {
+      "optional": true
+    }
+  },
+  "devDependencies": {
+    "@actions/artifact": "^6.3.1",
+    "@actions/cache": "^6.3.0",
+    "@actions/core": "^3.0.1",
+    "@actions/github": "^9.1.1",
+    "@types/proper-lockfile": "^4.1.4",
+    "@xterm/headless": "^6.0.0"
+  }
+}

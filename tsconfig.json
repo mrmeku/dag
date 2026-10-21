@@ -43,8 +43,8 @@
       "@mrmeku/dagraph/fs": ["./packages/dagraph/src/ports/fs.ts"],
       "@mrmeku/dagraph/fs/node": ["./packages/dagraph/src/ports/node-fs.ts"],
       "@mrmeku/dagraph/mermaid": ["./packages/dagraph/src/mermaid.ts"],
-      "@mrmeku/dagactions": ["./packages/dagactions/src/index.ts"],
-      "@mrmeku/dagactions/github": ["./packages/dagactions/src/ports/github.ts"]
+      "@mrmeku/dagworkflows": ["./packages/dagworkflows/src/index.ts"],
+      "@mrmeku/dagworkflows/github": ["./packages/dagworkflows/src/ports/github.ts"]
     }
   },
   "exclude": ["node_modules"]

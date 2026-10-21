@@ -5,8 +5,8 @@
     "": {
       "name": "podpiper",
       "devDependencies": {
-        "@mrmeku/dagactions": "workspace:*",
         "@mrmeku/dagraph": "workspace:*",
+        "@mrmeku/dagworkflows": "workspace:*",
         "@types/bun": "latest",
         "@types/node": "^24.19.2",
         "@typescript/native-preview": "^7.0.0-dev.20260131.1",
@@ -21,10 +21,17 @@
         "yaml": "^2.9.1",
       },
     },
-    "packages/dagactions": {
-      "name": "@mrmeku/dagactions",
+    "packages/dagraph": {
+      "name": "@mrmeku/dagraph",
+      "dependencies": {
+        "js-sha256": "^0.11.1",
+        "pathe": "^2.0.3",
+      },
+    },
+    "packages/dagworkflows": {
+      "name": "@mrmeku/dagworkflows",
       "bin": {
-        "dagactions": "./src/cli.ts",
+        "dag": "./src/cli.ts",
       },
       "dependencies": {
         "@actions/glob": "^0.7.0",
@@ -56,13 +63,6 @@
         "@actions/core",
         "@actions/github",
       ],
-    },
-    "packages/dagraph": {
-      "name": "@mrmeku/dagraph",
-      "dependencies": {
-        "js-sha256": "^0.11.1",
-        "pathe": "^2.0.3",
-      },
     },
   },
   "packages": {
@@ -146,9 +146,9 @@
 
     "@jridgewell/trace-mapping": ["@jridgewell/trace-mapping@0.3.31", "", { "dependencies": { "@jridgewell/resolve-uri": "^3.1.0", "@jridgewell/sourcemap-codec": "^1.4.14" } }, "sha512-zzNR+SdQSDJzc8joaeP8QQoCQr8NuYx2dIIytl1QeBEZHJ9uW6hebsrYgbz8hJwUQao3TWCMtmfV8Nu1twOLAw=="],
 
-    "@mrmeku/dagactions": ["@mrmeku/dagactions@workspace:packages/dagactions"],
-
     "@mrmeku/dagraph": ["@mrmeku/dagraph@workspace:packages/dagraph"],
+
+    "@mrmeku/dagworkflows": ["@mrmeku/dagworkflows@workspace:packages/dagworkflows"],
 
     "@napi-rs/lzma-linux-x64-gnu": ["@napi-rs/lzma-linux-x64-gnu@1.5.1", "", { "os": "linux", "cpu": "x64" }, "sha512-oTXEIha4SsuXdTA4Iyskj0kpdx2yVXdhd75c2v3xGrHFfVMsbhTPZU/nMPL4sWKo4pBHm3aucLaqGlF696dTyQ=="],
 

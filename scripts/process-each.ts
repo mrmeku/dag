@@ -3,7 +3,6 @@
  * from processing. Each node is processed on its own, in the order it was added, under `ports`
  * and a fresh cache, its deps' entries those of the nodes processed before it.
  */
-import type { Ports } from "@mrmeku/dagactions";
 import {
   MemCache,
   namedOutput,
@@ -12,6 +11,7 @@ import {
   type Graph,
   type Result,
 } from "@mrmeku/dagraph";
+import type { Ports } from "@mrmeku/dagworkflows";
 
 export const CAS = "/cas";
 
@@ -37,12 +37,14 @@ export async function processEach(
       hashFile: async (path: string) =>
         path.startsWith(`${CAS}/`) ? ports.fs.hashFile(path) : (files.push(path), ""),
     };
-    const sh: Ports["sh"] = { run: (cmd, opts) => (commands.push(cmd), ports.sh.run(cmd, opts)) };
+    const exec: Ports["exec"] = {
+      run: (cmd, opts) => (commands.push(cmd), ports.exec.run(cmd, opts)),
+    };
     const depEntries = Object.fromEntries(
       node.deps.flatMap((dep) => (entries[dep] ? [[dep, entries[dep]]] : [])),
     );
     const result = await processNode(graph, node.name, depEntries, {
-      ports: { ...ports, fs, sh },
+      ports: { ...ports, fs, exec },
       cache: new MemCache(),
       fs,
       casBaseDir: CAS,

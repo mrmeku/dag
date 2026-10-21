@@ -1,5 +1,5 @@
-import { createTestPorts, type Ports } from "@mrmeku/dagactions";
 import { Graph } from "@mrmeku/dagraph";
+import { createTestPorts, type Ports } from "@mrmeku/dagworkflows";
 import assert from "node:assert/strict";
 import { describe, test } from "node:test";
 import ci from "./ci.ts";
@@ -10,7 +10,7 @@ describe("ci workflow", () => {
     const build = async (ref: string) => {
       const { ports } = createTestPorts({ context: { ref } });
       const graph = new Graph<Ports>();
-      await ci.workflow(graph, ports, await ports.ci.context());
+      await ci.implementation(graph, ports, await ports.host.context());
       return { nodes: graph.describe(), processed: await processEach(graph, ports) };
     };
     const { nodes, processed } = await build("refs/pull/7/merge");
@@ -31,28 +31,35 @@ describe("ci workflow", () => {
         typecheckReadsLintConfig: reads("typecheck", "eslint.config.ts"),
         engineTestsIgnoreRunner:
           reads("test:dagraph", "packages/dagraph/src/execute.ts") &&
-          !reads("test:dagraph", "packages/dagactions/src/runner.ts"),
-        runnerTestsReadThisFile: reads("test:dagactions", "scripts/ci.test.ts"),
+          !reads("test:dagraph", "packages/dagworkflows/src/runner.ts"),
+        runnerTestsReadThisFile: reads("test:dagworkflows", "scripts/ci.test.ts"),
         nobodyReadsReadme: nodes.every((n) => !reads(n.name, "README.md")),
-        gateDeps: by("gate")?.deps.sort(),
-        gateAllSettled: by("gate")?.settledDeps?.length,
+        requireAllDeps: by("require-all")?.deps.sort(),
+        requireAllSettledDeps: by("require-all")?.settledDeps?.length,
         saveCas: onMain.find((n) => n.name === "save:cas")?.deps.sort(),
         uncached: nodes.filter((n) => n.cacheable === false).map((n) => n.name),
-        limits: ci.limits,
+        schedulerOptions: ci.schedulerOptions,
       },
       {
-        names: ["gate", "lint", "restore:cas", "test:dagactions", "test:dagraph", "typecheck"],
+        names: [
+          "lint",
+          "require-all",
+          "restore:cas",
+          "test:dagraph",
+          "test:dagworkflows",
+          "typecheck",
+        ],
         onlyOnMain: ["save:cas"],
         checksAfterRestore: true,
         typecheckReadsLintConfig: true,
         engineTestsIgnoreRunner: true,
         runnerTestsReadThisFile: true,
         nobodyReadsReadme: true,
-        gateDeps: ["lint", "test:dagactions", "test:dagraph", "typecheck"],
-        gateAllSettled: 4,
-        saveCas: ["gate", "restore:cas"],
+        requireAllDeps: ["lint", "test:dagraph", "test:dagworkflows", "typecheck"],
+        requireAllSettledDeps: 4,
+        saveCas: ["require-all", "restore:cas"],
         uncached: ["restore:cas"],
-        limits: { maxParallelism: 4, concurrencyLimits: { test: 2 } },
+        schedulerOptions: { maxParallelism: 4, concurrencyLimits: { test: 2 } },
       },
     );
   });

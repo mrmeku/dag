@@ -3,14 +3,14 @@ import tseslint from "typescript-eslint";
 const FS_MODULES = ["node:fs", "node:fs/promises", "fs", "fs/promises"];
 
 /**
- * dagactions' index loads no `@actions/*` package: the toolkit is an optional peer, loaded only
+ * dagworkflows' index loads no `@actions/*` package: the toolkit is an optional peer, loaded only
  * where GitHub is. Only the GitHub adapter's files import it by value: the action's options, the
- * `./github` subpath and the globber that `w.glob` loads lazily, which the rest may load only
- * with `import()`. Type imports and `import()` stay allowed.
+ * `./github` subpath and the globber that `workflow.glob` loads lazily, which the rest may load
+ * only with `import()`. Type imports and `import()` stay allowed.
  */
-const DAGACTIONS_GITHUB_FILES = ["src/action/env.ts", "src/ports/github.ts", "src/ports/glob.ts"];
+const DAGWORKFLOWS_GITHUB_FILES = ["src/action/env.ts", "src/ports/github.ts", "src/ports/glob.ts"];
 const NO_GITHUB_IN_INDEX = "The index must load no GitHub package";
-const dagactionsImports = {
+const dagworkflowsImports = {
   patterns: [
     {
       group: ["@actions/*"],
@@ -51,8 +51,8 @@ export default tseslint.config(
     ignores: [
       "node_modules/",
       "packages/*/node_modules/",
-      "packages/dagactions/action/dist/",
-      ".dagactions/",
+      "packages/dagworkflows/action/dist/",
+      ".dag/",
     ],
   },
   ...tseslint.configs.recommended,
@@ -94,9 +94,9 @@ export default tseslint.config(
     },
   },
   {
-    files: ["packages/dagactions/src/**/*.ts"],
-    ignores: DAGACTIONS_GITHUB_FILES.map((file) => `packages/dagactions/${file}`),
-    rules: { "@typescript-eslint/no-restricted-imports": ["error", dagactionsImports] },
+    files: ["packages/dagworkflows/src/**/*.ts"],
+    ignores: DAGWORKFLOWS_GITHUB_FILES.map((file) => `packages/dagworkflows/${file}`),
+    rules: { "@typescript-eslint/no-restricted-imports": ["error", dagworkflowsImports] },
   },
   {
     files: ["packages/dagraph/src/**/*.ts"],

@@ -1,6 +1,6 @@
 /**
- * Publish one version of the dagactions action: `bun scripts/release-action.ts <version> <main>
- * <post> [--dry-run]`. github.com/mrmeku/dagactions holds build output only: action.yml,
+ * Publish one version of the dagworkflows action: `bun scripts/release-action.ts <version> <main>
+ * <post> [--dry-run]`. github.com/mrmeku/dagworkflows holds build output only: action.yml,
  * dist/main.js, dist/post.js, README.md and LICENSE. `main` is the latest build, the tag
  * `v<version>` pins one, and the moving tag `v<major>` follows the newest, as actions/checkout@v4
  * does. The push authenticates with the deploy key in ACTION_DEPLOY_KEY, read from the environment
@@ -12,8 +12,8 @@ import { cpSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 
-const ACTION_REPO = "git@github.com:mrmeku/dagactions.git";
-const ACTION_DIR = "packages/dagactions/action";
+const ACTION_REPO = "git@github.com:mrmeku/dagworkflows.git";
+const ACTION_DIR = "packages/dagworkflows/action";
 
 const [version, main, post, flag] = process.argv.slice(2);
 if (!version || !main || !post)
@@ -23,12 +23,12 @@ const major = `v${version.split(".")[0]}`;
 const tag = `v${version}`;
 const identity = [
   "-c",
-  "user.name=dagactions release",
+  "user.name=dagworkflows release",
   "-c",
-  "user.email=dagactions@users.noreply.github.com",
+  "user.email=dagworkflows@users.noreply.github.com",
 ];
 
-const scratch = mkdtempSync(join(tmpdir(), "dagactions-release-"));
+const scratch = mkdtempSync(join(tmpdir(), "dag-release-"));
 const env = { ...process.env };
 if (process.env.ACTION_DEPLOY_KEY) {
   const key = join(scratch, "deploy_key");
@@ -66,7 +66,7 @@ try {
   cpSync(resolve(main), join(dir, "dist", "main.js"));
   cpSync(resolve(post), join(dir, "dist", "post.js"));
   git(["add", "-A"], dir);
-  git(["commit", "--quiet", "--allow-empty", "-m", `dagactions ${tag}`], dir);
+  git(["commit", "--quiet", "--allow-empty", "-m", `dagworkflows ${tag}`], dir);
   git(["tag", "-f", tag], dir);
   git(["tag", "-f", major], dir);
   console.log(git(["show", "--stat", "--format=%h %s", "HEAD"], dir));
