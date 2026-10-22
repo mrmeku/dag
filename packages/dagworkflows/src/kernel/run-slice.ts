@@ -1,4 +1,4 @@
-import type { ExecEvent, Node, Result } from "@mrmeku/dagraph";
+import type { ExecEvent, FailedError, Node, Result, SucceededResult } from "@mrmeku/dagraph";
 import { commandOf, type CommandCause } from "../step-records.ts";
 import {
   depFailedMessage,
@@ -34,9 +34,7 @@ export type InFlightNodeState = NodeLines & {
 
 export type SucceededNodeState = NodeLines &
   LogRead &
-  Readonly<
-    Pick<Extract<Result, { status: "done" | "cached" }>, "status" | "actionKey" | "outputs">
-  > & {
+  Readonly<Pick<SucceededResult, "status" | "actionKey" | "outputs">> & {
     readonly startedAt: number;
     readonly endedAt: number;
   };
@@ -129,8 +127,6 @@ export const initialNodeState = (node: Node): PendingNodeState => ({
   lastLine: "",
   printed: false,
 });
-
-type FailedError = Extract<Result, { status: "failed" }>["error"];
 
 const isTimeout = (error: FailedError): boolean => error.name === "TimeoutError";
 

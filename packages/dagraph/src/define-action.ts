@@ -24,7 +24,14 @@ type Empty = Record<never, never>;
  * `nodeInputs` and `inputs`, and the outputs, `R`, by what `action` returns. Only the inputs and
  * the deps' content join a node's key; `deps` and `nodeInputs` declare, and each node gives.
  */
-export interface ActionSpec<Ports, R, D, N extends InputRecord<unknown>, I> {
+export interface ActionSpec<
+  Ports,
+  R,
+  D,
+  N extends InputRecord<unknown>,
+  I,
+  Group extends string = never,
+> {
   /** What kind of work it is, as Bazel's mnemonic: a label for display and routing, not keyed. */
   kind: string;
   /**
@@ -48,7 +55,8 @@ export interface ActionSpec<Ports, R, D, N extends InputRecord<unknown>, I> {
   invalidateOn?: NoInfer<InvalidateOn<Ports, D>>;
   /** `false` runs the node in every execution: its entry is never read or written. */
   cacheable?: boolean;
-  concurrencyGroup?: string;
+  /** The group whose limit it runs under, with `throttledScheduler`: one that `actionsFor` names. */
+  concurrencyGroup?: Group;
   /** How long the action may run, in ms, counted from its start. Not keyed. */
   timeoutMs?: number;
 }
@@ -59,7 +67,7 @@ export interface ActionSpec<Ports, R, D, N extends InputRecord<unknown>, I> {
  * and its fingerprints the handles of no output in particular.
  */
 export interface ErasedSpec extends Pick<
-  ActionSpec<unknown, unknown, DepSpecs, InputRecord<unknown>, InputRecord>,
+  ActionSpec<unknown, unknown, DepSpecs, InputRecord<unknown>, InputRecord, string>,
   "kind" | "cacheable" | "concurrencyGroup" | "timeoutMs"
 > {
   inputs: Record<string, unknown>;
@@ -94,7 +102,7 @@ export type OutputOf<T> = T extends { readonly _T?: infer R extends Outputs } ? 
 export type NodeRefOf<T> = NodeRef<OutputOf<T>>;
 
 function define<Ports, R, D, N extends InputRecord<unknown>, I extends InputRecord>(
-  spec: ActionSpec<Ports, R, D, N, I>,
+  spec: ActionSpec<Ports, R, D, N, I, string>,
 ): Action<Ports, Extract<R, Outputs>, D, N, I> {
   const where = `action "${spec.kind}"`;
   const t = spec.timeoutMs;
@@ -119,16 +127,18 @@ function define<Ports, R, D, N extends InputRecord<unknown>, I extends InputReco
 /**
  * `defineAction` bound to a program's ports, the one type it cannot infer: bind it once,
  * `const defineActionWithPorts = actionsFor<Ports>()`, and every other type comes from each spec.
+ * An action may join only a group the program names, `actionsFor<Ports, keyof typeof limits>()`
+ * over its `throttledScheduler`'s `concurrencyLimits`, so a misspelt group does not compile.
  * An action's outputs are what it returns, a path as `string`, a list as `string[]`.
  */
-export function actionsFor<Ports>() {
+export function actionsFor<Ports, Group extends string = never>() {
   return <
     R,
     D extends DepSpecs = Empty,
     N extends InputRecord<unknown> = Empty,
     I extends InputRecord = Empty,
   >(
-    spec: ActionSpec<Ports, R, D, N, I>,
+    spec: ActionSpec<Ports, R, D, N, I, Group>,
   ): Action<Ports, Extract<R, Outputs>, D, N, I> => define(spec);
 }
 

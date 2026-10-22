@@ -40,7 +40,9 @@ interface Ports {
   fs: DagFs;
 }
 
-const defineActionWithPorts = actionsFor<Ports>();
+type Group = "group_a" | "group_b" | "heavy";
+
+const defineActionWithPorts = actionsFor<Ports, Group>();
 /** Deps in any role, as an action declares a record that its nodes name. */
 const anyRole: DepSpecs = {};
 
@@ -57,7 +59,7 @@ interface TaskOptions<D> {
   /** What the node writes, or throws; by default its resolved inputs as JSON. */
   run?: (c: ActionContext<Ports>) => Promise<string | undefined> | string | undefined;
   cacheable?: boolean;
-  concurrencyGroup?: string;
+  concurrencyGroup?: Group;
   timeoutMs?: number;
 }
 
@@ -293,7 +295,7 @@ describe("execute", () => {
 describe("the action key", () => {
   test("inputs and deps alone identify an action: not its kind, function or how-to-run fields, nor the node's name or meta", async () => {
     const { ctx, fs } = setup();
-    const make = (kind: string, content: string, group?: string) =>
+    const make = (kind: string, content: string, group?: Group) =>
       defineActionWithPorts({
         kind,
         inputs: { version: 1 },

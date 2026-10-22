@@ -26,7 +26,7 @@ interface Ports {
 }
 type Meta = { video: string } | { channel: true };
 
-const defineActionWithPorts = actionsFor<Ports>();
+const defineActionWithPorts = actionsFor<Ports, "ytdlp">();
 /** Deps in any role, as an action declares a record that its nodes name. */
 const anyRole: DepSpecs = {};
 
@@ -454,6 +454,10 @@ export function wrongDeclarationsDoNotCompile() {
   defineActionWithPorts({ kind: "by ref", deps: { source: dl }, action: async () => "" });
   // @ts-expect-error an action's own inputs are JSON too
   defineAction({ kind: "limits", inputs: { limits: new Set<string>() }, action: async () => "" });
+  // @ts-expect-error a group its program does not name: actionsFor<Ports, "ytdlp">()
+  defineActionWithPorts({ kind: "misspelt", concurrencyGroup: "ytdl", action: async () => "" });
+  // @ts-expect-error a group where its program names none: actionsFor<Ports, "ytdlp">()
+  defineAction({ kind: "ungrouped", concurrencyGroup: "ytdlp", action: async () => "" });
   // @ts-expect-error a ref to a dep the node does not declare: its deps hold no mirror
   cmd.addNode(g, { deps: { dl }, inputs: (_deps: { mirror: unknown }) => ({}) });
   // @ts-expect-error a ref that another node's function received

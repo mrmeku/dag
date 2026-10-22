@@ -50,9 +50,12 @@ A scheduler admits ready nodes. It takes them in the engine's order and only fil
 | `unboundedScheduler()`        | Admits each node when it is ready. This is the default.                                                                   |
 | `throttledScheduler(options)` | Processes at most `maxParallelism` nodes at once, and runs at most `concurrencyLimits[group]` actions of a group at once. |
 
-A node joins a group with the `concurrencyGroup` of its action:
+A node joins a group with the `concurrencyGroup` of its action. Name the groups where you bind your ports, from the limits you schedule with, and an action whose group is not one of them does not compile:
 
 ```typescript
+const concurrencyLimits = { whisper: 1 };
+const defineActionWithPorts = actionsFor<Ports, keyof typeof concurrencyLimits>();
+
 const transcribe = defineActionWithPorts({
   kind: "transcribe",
   deps: { download },
@@ -64,11 +67,11 @@ const transcribe = defineActionWithPorts({
 });
 
 await execute(graph, context, {
-  scheduler: throttledScheduler({ maxParallelism: 8, concurrencyLimits: { whisper: 1 } }),
+  scheduler: throttledScheduler({ maxParallelism: 8, concurrencyLimits }),
 });
 ```
 
-A group that is not in `concurrencyLimits` has no limit. A group of limit 1 runs its actions one at a time while other nodes run beside them, as Ninja's `console` pool does.
+A program that names no groups can give an action none. The scheduler gives a group that is not in `concurrencyLimits` no limit. A group of limit 1 runs its actions one at a time while other nodes run beside them, as Ninja's `console` pool does.
 
 ### A cache hit does not wait for its group
 

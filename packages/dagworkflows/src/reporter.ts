@@ -1,4 +1,4 @@
-import type { Node, Result } from "@mrmeku/dagraph";
+import { isSucceeded, type Node, type Result } from "@mrmeku/dagraph";
 import { createGithubStore } from "./github/renderer.ts";
 import { titleOf } from "./kernel/format.ts";
 import type { Pass } from "./kernel/run-slice.ts";
@@ -26,7 +26,7 @@ export async function finishPass(
   );
   await ports.host.summary(markdown);
   await store.finish(pass, nodes);
-  const failed = results.filter((r) => r.status !== "done" && r.status !== "cached").length;
+  const failed = results.filter((r) => !isSucceeded(r)).length;
   return { failed, markdown };
 }
 

@@ -3,6 +3,7 @@ import {
   execute,
   FsCache,
   Graph,
+  isSucceeded,
   orchestrate,
   processNode,
   requiredDeps,
@@ -92,7 +93,7 @@ async function buildGraph(opts: { implementation: Implementation; ports: Ports; 
 function owedPosts(graph: Graph<Ports>, history: RunHistory): Set<string> {
   const posts = postNodes(graph);
   const owed = new Set<string>();
-  const finished = (n: string) => ["done", "cached"].includes(history[n]?.status ?? "");
+  const finished = (n: string) => history[n] !== undefined && isSucceeded(history[n]);
   // Nodes come in the order they were added, each after its deps.
   for (const node of graph.describe()) {
     const status = history[node.name]?.status;

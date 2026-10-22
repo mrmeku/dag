@@ -21,7 +21,7 @@ An action is a kind of work. `defineAction` takes these fields:
 | `action`           | `(actionContext) => Promise<outputs>`, the function that does the work. See [The action context](#the-action-context).         |
 | `invalidateOn`     | Optional. Fingerprints for dependencies that the nodes read only in part. See [Caching](caching.md#read-part-of-a-dependency). |
 | `cacheable`        | Optional. `false` runs the node in each execution. See [Caching](caching.md#run-a-node-each-time).                             |
-| `concurrencyGroup` | Optional. The group that limits this action, with `throttledScheduler`. See [Execution](execution.md#schedulers).              |
+| `concurrencyGroup` | Optional. One of the groups `actionsFor<Ports, Group>()` names. See [Execution](execution.md#schedulers).                      |
 | `timeoutMs`        | Optional. How long the action can run, from 1 to 2,147,483,647 ms. See [Execution](execution.md#timeouts-and-cancellation).    |
 
 The last three fields tell how a node runs, not what it makes. None of them is part of the key.

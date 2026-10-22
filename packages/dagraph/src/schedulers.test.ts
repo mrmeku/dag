@@ -225,7 +225,7 @@ describe("orchestrate", () => {
     const fs = createMemoryDagFs();
     const ctx = { ports: { fs }, cache: new MemCache(), fs, casBaseDir: "/cas" };
     const controller = new AbortController();
-    const defineActionWithPorts = actionsFor<{ fs: DagFs }>();
+    const defineActionWithPorts = actionsFor<{ fs: DagFs }, "heavy">();
     const heavy = defineActionWithPorts({
       kind: "heavy",
       nodeInputs: nodeInputs<{ id: number }>,
