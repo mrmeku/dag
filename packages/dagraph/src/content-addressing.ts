@@ -2,6 +2,7 @@ import { sha256 } from "js-sha256";
 import { normalize } from "pathe";
 import type { CacheEntry, DagFs } from "./cache.ts";
 import type { Outputs } from "./graph/index.ts";
+import { isMissingFileError } from "./utils.ts";
 
 /** Flatten an Outputs value (string, array, or record) into a flat list of file paths. */
 export function collectPaths(outputs: Outputs): string[] {
@@ -66,9 +67,6 @@ function relativeTo(keyDir: string, path: string): string {
   return rest.slice(rest.indexOf("/") + 1);
 }
 
-/** Whether a read failed for want of a file: `DagFs.hashFile` rejects so, as `node:fs` does. */
-const isMissing = (e: unknown) => e instanceof Error && "code" in e && e.code === "ENOENT";
-
 /**
  * A hash of a node's outputs, early cutoff compares it and dependents key on it: each output's
  * name, each file's path relative to its output directory, and each file's content. So which
@@ -87,7 +85,7 @@ export async function hashOutputFiles(
       try {
         hashed.push([file, await hashFile(path)]);
       } catch (e) {
-        if (!isMissing(e)) throw e;
+        if (!isMissingFileError(e)) throw e;
         const output = name === undefined ? file : `"${name}" (${file})`;
         throw new Error(
           `output ${output} was not written. ` +

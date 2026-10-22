@@ -2,7 +2,7 @@ import type { ExecEvent, JsonValue, Node, Result } from "@mrmeku/dagraph";
 import assert from "node:assert/strict";
 import { describe, test } from "node:test";
 import { createTestPorts, steppingClock } from "../ports/memory.ts";
-import { formatDuration, reportHeadline } from "./format.ts";
+import { errorMessage, formatDuration, reportHeadline } from "./format.ts";
 import type { NodeReport } from "./report.ts";
 import { completedLines, initialNodeState, nodeReducer, type NodeState } from "./run-slice.ts";
 import { createRunStore, type RunListener } from "./store.ts";
@@ -271,10 +271,8 @@ describe("run store", () => {
     events(...started(a), built(a, "ka"));
     // One that throws still lets the first, a terminal restoring its streams, have its say.
     const thrown = [
-      await Promise.resolve()
-        .then(store.interrupt)
-        .catch((e: Error) => e.message),
-      await store.close().catch((e: Error) => e.message),
+      await Promise.resolve().then(store.interrupt).catch(errorMessage),
+      await store.close().catch(errorMessage),
     ];
     assert.deepEqual(thrown, ["second interrupt broke", "second close broke"]);
     assert.deepEqual(heard, [
@@ -302,7 +300,7 @@ describe("run store", () => {
     ]);
     store.begin(pass);
     events(...started(a), printed(a, "a out\n"));
-    const error = await store.report(pass).catch((e: Error) => e.message);
+    const error = await store.report(pass).catch(errorMessage);
     assert.deepEqual({ heard, error }, { heard: [["a out"]], error: "a broken listener" });
   });
 

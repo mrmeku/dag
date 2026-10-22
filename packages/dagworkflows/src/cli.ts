@@ -123,7 +123,7 @@ postCommand.action(async (file, opts) => {
 });
 
 // Node 24.0 and 24.1 have no import.meta.main and would exit 0 here having run nothing.
-if (import.meta.main === undefined || Number(process.versions.node.split(".")[0]) < 24) {
+if (!("main" in import.meta) || Number(process.versions.node.split(".")[0]) < 24) {
   console.error("dag needs Node 24.2 or later");
   process.exit(1);
 }

@@ -9,6 +9,7 @@ import { styleText } from "node:util";
 import { run } from "../commands.ts";
 import { LIVE_FRAME_MS, type OutputStyle } from "../config.ts";
 import { defineStep } from "../define-step.ts";
+import { errorMessage } from "../kernel/format.ts";
 import type { Exec, ExecResult, Ports } from "../ports.ts";
 import { createMemorySyncFs, createTestPorts } from "../ports/memory.ts";
 import { runJob, type RunOptions } from "../runner.ts";
@@ -184,9 +185,10 @@ describe("local session, grouped style", () => {
     const session = localRun("grouped", ports, { implementation, workflowFile: "ci flows.ts" });
     session.files.files.set(".dag/logs/old.log", "a node outside this run\n");
     session.files.files.set(".dag/logs/lint.log", "lint's last run\n");
+    const { writeFileSync } = session.files;
     session.files.writeFileSync = (path, data) => {
       if (String(path).endsWith("failures.md")) throw new Error("EACCES: permission denied");
-      session.files.files.set(String(path), String(data));
+      writeFileSync(path, data);
     };
     const code = await session.job();
     assert.deepEqual(
@@ -574,7 +576,7 @@ describe("local session, failures style", () => {
       },
     });
     const session = localRun("failures", ports, { implementation });
-    const thrown = await session.job().catch((e: Error) => e.message);
+    const thrown = await session.job().catch(errorMessage);
     assert.deepEqual(
       { thrown, stdout: session.stdout(), report: session.report() },
       {
@@ -763,7 +765,7 @@ describe("local session, failures style, at the edges", () => {
       return readText(path);
     };
     const session = localRun("failures", ports);
-    const job = session.job().catch((e: Error) => e.message);
+    const job = session.job().catch(errorMessage);
     await waitUntil(t, () => readStarted);
     session.processEvents.emit("exit");
     const atExit = { stdout: session.stdout(), report: session.report() };
@@ -904,7 +906,7 @@ describe("local session, failures style, at the edges", () => {
     });
     const session = localRun("failures", ports, { implementation });
     const controller = new AbortController();
-    const job = session.job(controller.signal).catch((e: Error) => e.message);
+    const job = session.job(controller.signal).catch(errorMessage);
     await waitUntil(t, () => !!session.logs()[".dag/logs/slow.log"]);
     controller.abort();
     assert.deepEqual(

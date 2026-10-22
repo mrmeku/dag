@@ -43,7 +43,10 @@ const dir = `packages/${pkg}`;
 
 const run = ([command, ...args]: [string, ...string[]], cwd = ".") => {
   const r = spawnSync(command, args, { cwd, stdio: ["ignore", "pipe", "inherit"] });
-  if (r.status !== 0) throw new Error(`${[command, ...args].join(" ")} exited ${r.status}`);
+  const shown = [command, ...args].join(" ");
+  if (r.error) throw r.error;
+  if (r.signal) throw new Error(`${shown} was killed by ${r.signal}`);
+  if (r.status !== 0) throw new Error(`${shown} exited ${r.status}`);
   return r.stdout.toString();
 };
 const toJsRecord = (v: object): Record<string, unknown> =>

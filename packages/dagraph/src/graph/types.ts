@@ -380,9 +380,9 @@ export type DepOutputsOf<D> = {
 /** An input as the action reads it: a file as a handle, an output ref as that output's handles. */
 export type Resolved<V> = V extends FileInput
   ? FileHandle
-  : V extends SettledOutputRef<infer T, unknown>
+  : V extends SettledOutputRef<infer T>
     ? Handles<T> | undefined
-    : V extends OutputRef<infer T, unknown>
+    : V extends OutputRef<infer T>
       ? Handles<T>
       : V extends readonly (infer U)[]
         ? Resolved<U>[]

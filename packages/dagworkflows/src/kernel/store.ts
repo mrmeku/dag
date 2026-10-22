@@ -65,8 +65,9 @@ export function createRunStore(
   const durations: Record<string, number> = {};
   let passCount = 0;
   let listenerQueue = Promise.resolve();
-  const queueInOrder = (work: () => void | Promise<void>) =>
-    (listenerQueue = listenerQueue.then(work));
+  const queueInOrder = (work: () => void | Promise<void>) => {
+    listenerQueue = listenerQueue.then(work);
+  };
   const runImmediately = (hook: () => void) => {
     try {
       hook();
@@ -199,10 +200,12 @@ export function createRunStore(
           )
         : [];
     },
-    finish: (pass: Pass, reports: NodeReport[]) =>
+    finish: (pass: Pass, reports: NodeReport[]) => {
       queueInOrder(async () => {
         for (const listener of listeners) await listener.finish?.(pass, reports);
-      }),
+      });
+      return listenerQueue;
+    },
     close: async (error?: unknown) => {
       // Only a run that threw already rejects here, and `error` is that run's own.
       await listenerQueue.catch(() => {});

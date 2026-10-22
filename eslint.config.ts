@@ -1,3 +1,4 @@
+import { defineConfig } from "eslint/config";
 import tseslint from "typescript-eslint";
 
 const FS_MODULES = ["node:fs", "node:fs/promises", "fs", "fs/promises"];
@@ -46,7 +47,7 @@ const dagraphImports = {
   ],
 };
 
-export default tseslint.config(
+export default defineConfig(
   {
     ignores: [
       "node_modules/",
@@ -55,7 +56,7 @@ export default tseslint.config(
       ".dag/",
     ],
   },
-  ...tseslint.configs.recommended,
+  ...tseslint.configs.strictTypeChecked,
   // Two tsconfig roots exist in the monorepo (the root's and dag/'s); name this one.
   {
     languageOptions: {
@@ -69,13 +70,36 @@ export default tseslint.config(
         { argsIgnorePattern: "^_", varsIgnorePattern: "^_" },
       ],
       "@typescript-eslint/consistent-type-assertions": ["error", { assertionStyle: "never" }],
-      "@typescript-eslint/no-non-null-assertion": "error",
-      "@typescript-eslint/no-explicit-any": "error",
-      "@typescript-eslint/no-unsafe-argument": "error",
-      "@typescript-eslint/no-unsafe-assignment": "error",
-      "@typescript-eslint/no-unsafe-call": "error",
-      "@typescript-eslint/no-unsafe-member-access": "error",
-      "@typescript-eslint/no-unsafe-return": "error",
+      "@typescript-eslint/no-floating-promises": [
+        "error",
+        {
+          allowForKnownSafeCalls: [
+            { from: "package", package: "node:test", name: ["describe", "suite", "test", "it"] },
+          ],
+        },
+      ],
+      "@typescript-eslint/prefer-promise-reject-errors": [
+        "error",
+        { allowThrowingAny: true, allowThrowingUnknown: true },
+      ],
+      "@typescript-eslint/restrict-template-expressions": [
+        "error",
+        {
+          allowAny: false,
+          allowBoolean: true,
+          allowNever: false,
+          allowNullish: true,
+          allowNumber: true,
+          allowRegExp: false,
+        },
+      ],
+      "@typescript-eslint/no-confusing-void-expression": "off",
+      "@typescript-eslint/no-dynamic-delete": "off",
+      "@typescript-eslint/no-generated-empty-object-type": "off",
+      "@typescript-eslint/no-invalid-void-type": "off",
+      "@typescript-eslint/no-meaningless-void-operator": "off",
+      "@typescript-eslint/require-await": "off",
+      "@typescript-eslint/unified-signatures": "off",
     },
   },
   {
@@ -102,5 +126,9 @@ export default tseslint.config(
     files: ["packages/dagraph/src/**/*.ts"],
     ignores: [...DAGRAPH_ADAPTERS.map((file) => `packages/dagraph/${file}`), "**/*.test.ts"],
     rules: { "@typescript-eslint/no-restricted-imports": ["error", dagraphImports] },
+  },
+  {
+    files: ["**/*.test.ts"],
+    rules: { "@typescript-eslint/restrict-template-expressions": "off" },
   },
 );

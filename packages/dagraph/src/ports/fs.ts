@@ -6,6 +6,7 @@
 import { mkdir, readdir, rename, rm } from "node:fs/promises";
 import { resolve } from "node:path";
 import type { DagFs } from "../cache.ts";
+import { isMissingFileError } from "../utils.ts";
 
 /** Streams large files through the native hasher instead of reading them whole. */
 export function createBunDagFs(): DagFs {
@@ -26,8 +27,8 @@ export function createBunDagFs(): DagFs {
     rename,
     remove: (path) => rm(path, { recursive: true, force: true }),
     readdir: (dir) =>
-      readdir(dir).catch((e: NodeJS.ErrnoException) => {
-        if (e.code === "ENOENT") return [];
+      readdir(dir).catch((e: unknown) => {
+        if (isMissingFileError(e)) return [];
         throw e;
       }),
     resolve,

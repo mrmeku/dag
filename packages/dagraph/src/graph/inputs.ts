@@ -20,8 +20,11 @@ function jsonValue(value: unknown, path: string): unknown {
   if (typeof value !== "object" || value === null || isOutputRef(value)) return value;
   if (!isPlainObject(value)) {
     const name = path.slice(path.lastIndexOf(".") + 1);
+    // The types give every object a constructor; Object.create can make one without.
+    const type: unknown = value.constructor;
+    const className = typeof type === "function" && type.name ? type.name : "class instance";
     throw new Error(
-      `${path} is a ${value.constructor?.name ?? "class instance"}, which is not JSON. Give a ` +
+      `${path} is a ${className}, which is not JSON. Give a ` +
         `plain object of its fields${isIdentifier(name) ? `: { ...${name} }` : ""}.`,
     );
   }

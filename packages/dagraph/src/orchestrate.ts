@@ -133,7 +133,7 @@ export async function orchestrate<Meta>(
       onEvent?.({ type: "dispatch", node: node.name, ...meta(node) });
       processing++;
       void run(node, state.depEntries(node), acquireFor(node))
-        .catch((e): Result => {
+        .catch((e: unknown): Result => {
           if (signal?.aborted) return { name: node.name, actionKey: "", status: "cancelled" };
           return {
             name: node.name,

@@ -3,6 +3,10 @@ import type { FailedError, JsonValue } from "./types.ts";
 /** A thrown value's message: an error's own, anything else as text. */
 export const errorMessage = (e: unknown): string => (e instanceof Error ? e.message : String(e));
 
+/** Whether a read failed for want of a file, as `node:fs` and `DagFs.hashFile` reject. */
+export const isMissingFileError = (e: unknown) =>
+  e instanceof Error && "code" in e && e.code === "ENOENT";
+
 /** Whether `object` is a plain record: a class instance, an array or a `Map` is not. */
 export const isPlainObject = (object: object) => {
   const proto: unknown = Object.getPrototypeOf(object);

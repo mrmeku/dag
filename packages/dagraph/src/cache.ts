@@ -16,25 +16,28 @@ export const isCacheEntry = (value: unknown): value is CacheEntry =>
   "contentHash" in value &&
   typeof value.contentHash === "string";
 
-/** Minimal filesystem contract the DAG executor needs. Implementations ship in `ports/fs`. */
+/**
+ * Minimal filesystem contract the DAG executor needs. Implementations ship in `ports/fs`. The
+ * engine calls its members detached, as `fs.hashFile`, so none may read `this`.
+ */
 export interface DagFs {
-  exists(path: string): Promise<boolean>;
-  readText(path: string): Promise<string>;
-  writeText(path: string, content: string): Promise<void>;
+  exists: (path: string) => Promise<boolean>;
+  readText: (path: string) => Promise<string>;
+  writeText: (path: string, content: string) => Promise<void>;
   /**
    * The SHA256 hex of a file's content. With no file at `path`, it rejects with an error whose
    * `code` is `"ENOENT"`, as `node:fs` does: so the engine names an output that was not written.
    */
-  hashFile(path: string): Promise<string>;
-  ensureDir(path: string): Promise<void>;
+  hashFile: (path: string) => Promise<string>;
+  ensureDir: (path: string) => Promise<void>;
   /** POSIX `rename`: replaces a file at `to` atomically; fails when `to` is a non-empty directory. */
-  rename(from: string, to: string): Promise<void>;
+  rename: (from: string, to: string) => Promise<void>;
   /** Removes a file, or a directory and everything in it; nothing when the path does not exist. */
-  remove(path: string): Promise<void>;
+  remove: (path: string) => Promise<void>;
   /** The names of the entries in a directory; none when the directory does not exist. */
-  readdir(dir: string): Promise<string[]>;
+  readdir: (dir: string) => Promise<string[]>;
   /** The absolute form of `path`, as an action sees it. */
-  resolve(path: string): string;
+  resolve: (path: string) => string;
 }
 
 /** Content-addressed cache used by the executor to skip unchanged nodes. */

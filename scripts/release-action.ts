@@ -41,7 +41,10 @@ const git = (args: string[], cwd = scratch) => {
     env,
     stdio: ["ignore", "pipe", "inherit"],
   });
-  if (r.status !== 0) throw new Error(`git ${args.join(" ")} exited ${r.status}`);
+  const shown = `git ${args.join(" ")}`;
+  if (r.error) throw r.error;
+  if (r.signal) throw new Error(`${shown} was killed by ${r.signal}`);
+  if (r.status !== 0) throw new Error(`${shown} exited ${r.status}`);
   return r.stdout.toString().trim();
 };
 

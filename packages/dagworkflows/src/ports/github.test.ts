@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { describe, test } from "node:test";
+import { describe, mock, test } from "node:test";
 
 // `@actions/github` reads the event from the environment when it loads, so the environment is
 // set first and the adapter imported after.
@@ -23,15 +23,14 @@ const { createGithubHost } = await import("./github.ts");
 /** What the toolkit writes to stdout while `f` runs, line by line. */
 const stdoutOf = (f: () => void): string[] => {
   let out = "";
-  const write = process.stdout.write;
-  process.stdout.write = (chunk: string | Uint8Array) => {
+  const write = mock.method(process.stdout, "write", (chunk: string | Uint8Array) => {
     out += String(chunk);
     return true;
-  };
+  });
   try {
     f();
   } finally {
-    process.stdout.write = write;
+    write.mock.restore();
   }
   return out.split("\n").slice(0, -1);
 };
@@ -43,8 +42,8 @@ const recording = (calls: Call[], status: number): typeof fetch => {
   const record = async (...[url, init]: Parameters<typeof fetch>) => {
     calls.push({
       method: init?.method ?? "GET",
-      url: String(url),
-      body: init?.body ? JSON.parse(String(init.body)) : undefined,
+      url: url instanceof Request ? url.url : url.toString(),
+      body: typeof init?.body === "string" && init.body ? JSON.parse(init.body) : undefined,
     });
     return new Response(JSON.stringify({ id: 7 }), {
       status,
