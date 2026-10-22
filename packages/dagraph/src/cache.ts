@@ -8,7 +8,7 @@ export interface CacheEntry {
   contentHash: string;
 }
 
-const isCacheEntry = (value: unknown): value is CacheEntry =>
+export const isCacheEntry = (value: unknown): value is CacheEntry =>
   typeof value === "object" &&
   value !== null &&
   "outputs" in value &&

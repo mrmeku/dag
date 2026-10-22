@@ -1,4 +1,4 @@
-import { isOutputs, type Outputs } from "./graph/index.ts";
+import { isCacheEntry, type CacheEntry } from "./cache.ts";
 import { isJsonValue } from "./utils.ts";
 
 /** A value as JSON holds it. A property that is `undefined` is left out when it is written. */
@@ -17,8 +17,8 @@ export type JsonValue =
  * anything else.
  */
 export type Result = { name: string; actionKey: string } & (
-  | { status: "done"; outputs: Outputs; contentHash: string; elapsed: number }
-  | { status: "cached"; outputs: Outputs; contentHash: string }
+  | (CacheEntry & { status: "done"; elapsed: number })
+  | (CacheEntry & { status: "cached" })
   /** `error.name` is "TimeoutError" after the node's own timeout. */
   | {
       status: "failed";
@@ -30,19 +30,23 @@ export type Result = { name: string; actionKey: string } & (
   | { status: "cancelled" }
 );
 
+/** The result of a node that succeeded, `done` or `cached`: it carries the node's entry. */
+export type SucceededResult = Extract<Result, { status: "done" | "cached" }>;
+
+/** The error of a `failed` result. */
+export type FailedError = Extract<Result, { status: "failed" }>["error"];
+
 /** Whether `value` is a `Result`: the guard for one read back from a file or another process. */
 export function isResult(value: unknown): value is Result {
   if (typeof value !== "object" || value === null || !("status" in value)) return false;
   if (!("name" in value && typeof value.name === "string")) return false;
   if (!("actionKey" in value && typeof value.actionKey === "string")) return false;
-  const hasOutputs = "outputs" in value && isOutputs(value.outputs);
-  const hasHash = "contentHash" in value && typeof value.contentHash === "string";
   const hasElapsed = "elapsed" in value && typeof value.elapsed === "number";
   switch (value.status) {
     case "done":
-      return hasOutputs && hasHash && hasElapsed;
+      return isCacheEntry(value) && hasElapsed;
     case "cached":
-      return hasOutputs && hasHash;
+      return isCacheEntry(value);
     case "failed":
       return (
         hasElapsed &&
@@ -60,6 +64,11 @@ export function isResult(value: unknown): value is Result {
     default:
       return value.status === "cancelled";
   }
+}
+
+/** Whether the node succeeded: its result is `done` or `cached`. */
+export function isSucceeded(result: Result): result is SucceededResult {
+  return result.status === "done" || result.status === "cached";
 }
 
 export type Tally = Record<Result["status"], number>;

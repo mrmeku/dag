@@ -8,6 +8,7 @@ import {
   hashOutputFiles,
   mapPaths,
   verifyOutputs,
+  type HashFileFn,
   type InputHashMemo,
   type KeyedDep,
   type KeyedInput,
@@ -16,7 +17,7 @@ import { fileHandle } from "./file-handle.ts";
 import { graphNodes, type Graph, type GraphNode } from "./graph/graph.ts";
 import { canonical, resolveValue } from "./graph/inputs.ts";
 import { FILE_INPUT, isFileInput, requiredDeps, type Outputs } from "./graph/types.ts";
-import type { ExecEvent, Result } from "./types.ts";
+import type { ExecEvent, FailedError, Result } from "./types.ts";
 import { errorOf } from "./utils.ts";
 
 /**
@@ -91,7 +92,7 @@ async function actionKeyOf(
   { spec, roles, inputs }: GraphNode,
   entryOf: (dep: string) => CacheEntry | undefined,
   ports: unknown,
-  hashFile: (path: string) => Promise<string>,
+  hashFile: HashFileFn,
   handle: (path: string) => unknown,
   memo: InputHashMemo,
 ): Promise<string> {
@@ -205,7 +206,7 @@ export async function processNode<Ports, Meta>(
   };
   options.onEvent?.({ type: "start", node: name, ...meta });
   const startTime = Date.now();
-  const failed = (error: ReturnType<typeof errorOf>): Result => ({
+  const failed = (error: FailedError): Result => ({
     name,
     actionKey,
     status: "failed",

@@ -58,8 +58,10 @@ export interface ActionSpec<Ports, R, D, N extends InputRecord<unknown>, I> {
  * node's inputs and its deps' entries, so the action takes the context of no action in particular,
  * and its fingerprints the handles of no output in particular.
  */
-export interface ErasedSpec {
-  kind: string;
+export interface ErasedSpec extends Pick<
+  ActionSpec<unknown, unknown, DepSpecs, InputRecord<unknown>, InputRecord>,
+  "kind" | "cacheable" | "concurrencyGroup" | "timeoutMs"
+> {
   inputs: Record<string, unknown>;
   action: (
     context: Omit<ActionContext, "inputs" | "depOutputs"> & {
@@ -68,9 +70,6 @@ export interface ErasedSpec {
     },
   ) => Promise<Outputs>;
   invalidateOn?: Record<string, (outputs: unknown, ports: unknown) => Promise<string> | string>;
-  cacheable?: boolean;
-  concurrencyGroup?: string;
-  timeoutMs?: number;
 }
 
 /**

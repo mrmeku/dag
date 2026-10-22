@@ -1,6 +1,6 @@
 import type { CacheEntry } from "./cache.ts";
 import { requiredDeps, type Node } from "./graph/index.ts";
-import type { Result } from "./types.ts";
+import { isSucceeded, type Result } from "./types.ts";
 
 /** A node the scheduler may take: ready to be processed, or a miss waiting for its group's slot. */
 export interface Ready<Meta = unknown> {
@@ -90,7 +90,7 @@ export class ExecState<Meta = unknown> {
   settle(node: Node<Meta>, result: Result): void {
     this.results.set(node.name, result);
     this.ready = this.ready.filter((r) => r.node.name !== node.name);
-    if (result.status === "done" || result.status === "cached")
+    if (isSucceeded(result))
       this.entries.set(node.name, { outputs: result.outputs, contentHash: result.contentHash });
     const children = (this.dependents.get(node.name) ?? []).filter(
       (child) => !this.results.has(child.name) && child.deps.every((d) => this.results.has(d)),

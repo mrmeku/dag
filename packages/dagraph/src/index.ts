@@ -72,9 +72,12 @@ export {
 } from "./schedulers.ts";
 export {
   isResult,
+  isSucceeded,
   tally,
   type ExecEvent,
+  type FailedError,
   type JsonValue,
   type Result,
+  type SucceededResult,
   type Tally,
 } from "./types.ts";

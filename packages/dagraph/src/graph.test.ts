@@ -18,6 +18,7 @@ import {
 } from "./graph/index.ts";
 import { createMemoryDagFs } from "./ports/memory-fs.ts";
 import { processNode } from "./process-node.ts";
+import { isSucceeded } from "./types.ts";
 import { errorMessage } from "./utils.ts";
 
 interface Ports {
@@ -255,7 +256,7 @@ describe("graphs", () => {
     const results = await execute(channel(["v1", "v2"]), ctx);
     const entryOf = (name: string) => {
       const r = results.find((x) => x.name === name);
-      return r?.status === "done" || r?.status === "cached"
+      return r && isSucceeded(r)
         ? ({ outputs: r.outputs, contentHash: r.contentHash } satisfies CacheEntry)
         : undefined;
     };

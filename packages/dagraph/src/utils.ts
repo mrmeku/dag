@@ -1,4 +1,4 @@
-import type { JsonValue } from "./types.ts";
+import type { FailedError, JsonValue } from "./types.ts";
 
 /** A thrown value's message: an error's own, anything else as text. */
 export const errorMessage = (e: unknown): string => (e instanceof Error ? e.message : String(e));
@@ -59,10 +59,7 @@ function jsonCause(cause: unknown, within: readonly Error[]): JsonValue | undefi
  * A thrown value as a result's error: its name, its message and its cause as JSON. A cause that
  * throws as it is read, from a getter or a proxy, is dropped.
  */
-export function errorOf(
-  e: unknown,
-  message = errorMessage(e),
-): { name: string; message: string; cause?: JsonValue } {
+export function errorOf(e: unknown, message = errorMessage(e)): FailedError {
   let cause: JsonValue | undefined;
   try {
     cause = e instanceof Error ? jsonCause(e.cause, [e]) : undefined;

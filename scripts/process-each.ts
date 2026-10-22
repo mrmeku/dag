@@ -3,7 +3,14 @@
  * from processing. Each node is processed on its own, in the order it was added, under `ports`
  * and a fresh cache, its deps' entries those of the nodes processed before it.
  */
-import { MemCache, processNode, type CacheEntry, type Graph, type Result } from "@mrmeku/dagraph";
+import {
+  isSucceeded,
+  MemCache,
+  processNode,
+  type CacheEntry,
+  type Graph,
+  type Result,
+} from "@mrmeku/dagraph";
 import type { Ports } from "@mrmeku/dagworkflows";
 
 export const CAS = "/cas";
@@ -42,7 +49,7 @@ export async function processEach(
       fs,
       casBaseDir: CAS,
     });
-    if (result.status === "done" || result.status === "cached")
+    if (isSucceeded(result))
       entries[node.name] = { outputs: result.outputs, contentHash: result.contentHash };
     processed.set(node.name, { result, files, commands });
   }

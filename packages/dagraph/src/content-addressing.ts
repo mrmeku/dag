@@ -1,6 +1,6 @@
 import { sha256 } from "js-sha256";
 import { normalize } from "pathe";
-import type { CacheEntry } from "./cache.ts";
+import type { CacheEntry, DagFs } from "./cache.ts";
 import type { Outputs } from "./graph/index.ts";
 
 /** Flatten an Outputs value (string, array, or record) into a flat list of file paths. */
@@ -19,7 +19,7 @@ export function mapPaths<T>(outputs: Outputs, f: (path: string) => T) {
   );
 }
 
-export type HashFileFn = (path: string) => Promise<string>;
+export type HashFileFn = DagFs["hashFile"];
 
 /** SHA256 hex of in-memory content; the one hash every DagFs implementation should agree with. */
 export function hashBytes(data: string | Uint8Array): string {

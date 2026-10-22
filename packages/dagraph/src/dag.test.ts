@@ -17,6 +17,7 @@ import {
   settled,
   soleOutput,
   type ActionContext,
+  type DepRecord,
   type DepSpecs,
   type FileHandle,
   type FileInput,
@@ -28,12 +29,11 @@ import {
   type Outputs,
   type SettledOutputRef,
 } from "./graph/index.ts";
-import type { DepRecord } from "./graph/types.ts";
 import { createBunDagFs } from "./ports/fs.ts";
 import { createMemoryDagFs, type MemoryDagFs } from "./ports/memory-fs.ts";
 import { createNodeDagFs } from "./ports/node-fs.ts";
 import { throttledScheduler } from "./schedulers.ts";
-import { isResult, tally, type ExecEvent, type Result } from "./types.ts";
+import { isResult, isSucceeded, tally, type ExecEvent, type Result } from "./types.ts";
 import { errorMessage } from "./utils.ts";
 
 interface Ports {
@@ -88,14 +88,10 @@ function setup(cacheOf: (fs: MemoryDagFs) => Cache = () => new MemCache()) {
 
 const statuses = (rs: Result[]) => Object.fromEntries(rs.map((r) => [r.name, r.status]));
 const counts = (rs: Result[]) => ({ ran: tally(rs).done, hit: tally(rs).cached });
-const outputsOf = (r: Result | undefined) =>
-  r?.status === "done" || r?.status === "cached" ? soleOutput(r.outputs) : "";
+const outputsOf = (r: Result | undefined) => (r && isSucceeded(r) ? soleOutput(r.outputs) : "");
 /** A result that succeeded; refused when it did not. */
 const succeeded = (r: Result | undefined) => {
-  assert.ok(
-    r?.status === "done" || r?.status === "cached",
-    `${r?.name ?? "the node"} did not succeed`,
-  );
+  assert.ok(r && isSucceeded(r), `${r?.name ?? "the node"} did not succeed`);
   return r;
 };
 /** A dep's outputs when they are one path. */

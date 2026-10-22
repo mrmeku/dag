@@ -111,7 +111,7 @@ A `Scheduler` is a function that gets a `SchedulerContext` and returns when the 
 | `dep-failed` | A required dependency did not succeed, so the node did not run. `dep` names it.                                   |
 | `cancelled`  | The execution was cancelled before the node completed.                                                            |
 
-A node succeeded when its result is `done` or `cached`. Only a success has outputs. `done` tells that the action ran, not that its content changed. `tally(results)` counts the results by status, in a record keyed by the five statuses.
+A node succeeded when its result is `done` or `cached`. `isSucceeded(result)` is `true` for these two statuses and narrows the type of `result` to `SucceededResult`. Only a success has outputs. `done` tells that the action ran, not that its content changed. `tally(results)` counts the results by status, in a record keyed by the five statuses.
 
 A result is plain data, its `error.cause` included, so you can write it to a file or send it to another process as it is. The engine converts the `cause` of the thrown error:
 
