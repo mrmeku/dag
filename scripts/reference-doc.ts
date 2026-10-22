@@ -3,7 +3,7 @@
  * CLI's commander program, the action's action.yml and the paths in config.ts. The prose around
  * them is the file's own. `bun run docs` writes it; reference-doc.test.ts fails while it is stale.
  */
-import type { Option } from "commander";
+import type { Option } from "@commander-js/extra-typings";
 import { readFileSync, writeFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { format, resolveConfig } from "prettier";

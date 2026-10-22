@@ -15,6 +15,7 @@
     "docs": "node scripts/reference-doc.ts"
   },
   "devDependencies": {
+    "@commander-js/extra-typings": "^14.0.0",
     "@mrmeku/dagworkflows": "workspace:*",
     "@mrmeku/dagraph": "workspace:*",
     "@types/bun": "latest",

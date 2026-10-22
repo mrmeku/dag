@@ -4,6 +4,7 @@ import { styleText } from "node:util";
 import { quote } from "shlex";
 import { isAgent, isCI } from "std-env";
 import { createSupportsHyperlinks } from "supports-hyperlinks";
+import type { RunCommandOptions } from "../cli.ts";
 import {
   DEFAULT_FAILURES_REPORT_PATH,
   DEFAULT_LOG_DIR,
@@ -47,14 +48,9 @@ export function createLocalSession(
     failuresReportFile = DEFAULT_FAILURES_REPORT_PATH,
     streams = process,
     syncFs = nodeSyncFs,
-  }: {
-    outputStyle?: OutputStyle | undefined;
-    summaryFile?: string;
-    logDir?: string;
-    failuresReportFile?: string;
-    streams?: WriteStreams;
-    syncFs?: SyncFs;
-  },
+  }: Partial<
+    Pick<RunCommandOptions, "outputStyle" | "summaryFile" | "logDir" | "failuresReportFile">
+  > & { streams?: WriteStreams; syncFs?: SyncFs },
 ): RunOptions & { store: RunStore } {
   const { exec, fs, clock } = runOptions.ports;
   const style = outputStyleFor(outputStyle, streams.stdout.isTTY === true);

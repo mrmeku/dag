@@ -1,6 +1,6 @@
 #!/usr/bin/env node
+import { Command, Option, type OptionValues } from "@commander-js/extra-typings";
 import { createNodeDagFs } from "@mrmeku/dagraph/fs/node";
-import { Command, Option } from "commander";
 import { resolve } from "node:path";
 import { check, lock } from "proper-lockfile";
 import {
@@ -11,7 +11,6 @@ import {
   DEFAULT_SUMMARY_PATH,
   OUTPUT_STYLE_ENV,
   OUTPUT_STYLES,
-  type OutputStyle,
 } from "./config.ts";
 import { createLocalHost } from "./ports/local.ts";
 import { abortOnSignals, createExec, systemClock } from "./ports/real.ts";
@@ -23,21 +22,7 @@ export const program = new Command("dag").description(
   "Run a CI workflow as a dagraph DAG: on GitHub Actions when GITHUB_ACTIONS=true (workflow commands, step summary, check runs), otherwise locally (terminal output, summary file).",
 );
 
-interface CommonOptions {
-  only?: string;
-  casDir: string;
-  historyDir: string;
-  summaryFile: string;
-}
-
-interface RunCommandOptions extends CommonOptions {
-  force?: boolean;
-  outputStyle?: OutputStyle;
-  logDir: string;
-  failuresReportFile: string;
-}
-
-const withCommonOptions = (cmd: Command) =>
+const withCommonOptions = <Options extends OptionValues>(cmd: Command<[], Options>) =>
   cmd
     .argument("<workflow>", "path to the workflow file")
     .option(
@@ -93,7 +78,7 @@ async function runOptionsFor(
   };
 }
 
-withCommonOptions(
+const runCommand = withCommonOptions(
   program
     .command("run")
     .description("Execute a workflow file that default-exports defineWorkflow(...)")
@@ -109,7 +94,11 @@ withCommonOptions(
       "where the report of the run's failures is written",
       DEFAULT_FAILURES_REPORT_PATH,
     ),
-).action(async (file: string, opts: RunCommandOptions) => {
+);
+/** The options of `run`, as commander parses them. */
+export type RunCommandOptions = ReturnType<typeof runCommand.opts>;
+
+runCommand.action(async (file, opts) => {
   const runOptions = await runOptionsFor(file, opts);
   // Off GitHub a session draws the run in the terminal and records its logs and failures.
   const jobOptions = isGithubActions
@@ -121,11 +110,15 @@ withCommonOptions(
   );
 });
 
-withCommonOptions(
+const postCommand = withCommonOptions(
   program
     .command("post")
     .description("Run the post steps that stopped runs' histories show as not reached"),
-).action(async (file: string, opts: CommonOptions) => {
+);
+/** The options `run` and `post` share; `post` has no others. */
+type CommonOptions = ReturnType<typeof postCommand.opts>;
+
+postCommand.action(async (file, opts) => {
   process.exitCode = (await runPost(await runOptionsFor(file, opts))).exitCode;
 });
 
