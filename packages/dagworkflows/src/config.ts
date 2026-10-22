@@ -76,19 +76,8 @@ export const LIVE_LATEST_LINE_MIN_COLUMNS = 4;
 export const LIVE_WAITING_ROWS = 2;
 export const LIVE_WAITS_ON_SHOWN = 2;
 export const SPINNER_FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
-/** Directory names pruned from source hashing. Must include the CAS itself. */
-export const DEFAULT_EXCLUDES = [
-  "node_modules",
-  ".git",
-  ".dag",
-  ".work",
-  "output",
-  "var",
-  "logs",
-  "target",
-  "coverage",
-  "dist",
-];
+/** Directories `workflow.glob` leaves out. Leave out others with a negation: `!dist/**`. */
+export const DEFAULT_EXCLUDES = [".git", "node_modules", ".dag"];
 /** GitHub refuses a check run whose summary is over 65,535 characters; the tail that fits is kept. */
 export const CHECK_TEXT_MAX_CHARS = 65_000;
 /** Above this many nodes the summary draws one node per kind instead (GitHub refuses huge diagrams). */

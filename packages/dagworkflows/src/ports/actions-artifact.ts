@@ -1,4 +1,4 @@
-import type { ActionsArtifact } from "../ports.ts";
+import type { ActionsArtifact, Ports } from "../ports.ts";
 
 /** No artifact service: every upload is a no-op with no id, every delete finds nothing. The local default. */
 export const nullActionsArtifact: ActionsArtifact = {
@@ -9,7 +9,7 @@ export const nullActionsArtifact: ActionsArtifact = {
 };
 
 /** `@actions/artifact` reaches the service with the runtime token and results URL the runner hands a JavaScript action. */
-export function artifactServiceAvailable(env: Record<string, string | undefined>): boolean {
+export function artifactServiceAvailable(env: Ports["env"]): boolean {
   return Boolean(env["ACTIONS_RUNTIME_TOKEN"] && env["ACTIONS_RESULTS_URL"]);
 }
 

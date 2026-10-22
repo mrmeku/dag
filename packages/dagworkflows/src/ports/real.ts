@@ -94,9 +94,11 @@ export function createExec(
         };
         proc.stdout.setEncoding("utf8").on("data", recordChunk(out));
         proc.stderr.setEncoding("utf8").on("data", recordChunk(err));
-        proc.on("error", (e) => {
-          onOutput(e.message);
-          void settle({ code: -1, stdout: "", stderr: e.message, output: e.message, ok: false });
+        proc.on("error", (e: NodeJS.ErrnoException) => {
+          // Node's wording, `spawn bash ENOENT`, under Bun too.
+          const message = e.code ? `spawn ${bin} ${e.code}` : e.message;
+          onOutput(message);
+          void settle({ code: -1, stdout: "", stderr: message, output: message, ok: false });
         });
         proc.on("exit", () => {
           timers.push(

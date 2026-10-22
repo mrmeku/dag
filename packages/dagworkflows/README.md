@@ -2,23 +2,23 @@
 
 # dagworkflows
 
-**Run a GitHub Actions job as a graph of cached steps, on GitHub and on your laptop.**
+**Run a GitHub Actions job as a graph of cached tasks, on GitHub and on your laptop.**
 
 [![npm](https://img.shields.io/npm/v/@mrmeku/dagworkflows.svg)](https://www.npmjs.com/package/@mrmeku/dagworkflows)
 [![CI](https://github.com/mrmeku/dag/actions/workflows/ci.yml/badge.svg)](https://github.com/mrmeku/dag/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/npm/l/@mrmeku/dagworkflows.svg)](https://github.com/mrmeku/dag/blob/main/LICENSE)
 
-<img src="https://raw.githubusercontent.com/mrmeku/dag/main/packages/dagworkflows/docs/media/demo.gif" width="720" alt="Two runs of npx --no dag run scripts/ci.ts. In the first run, six steps run and lint fails. In the second run, five steps come from the cache and only lint runs again.">
+<img src="https://raw.githubusercontent.com/mrmeku/dag/main/packages/dagworkflows/docs/media/demo.gif" width="720" alt="Two runs of npx --no dag run scripts/ci.ts. In the first run, six tasks run and lint fails. In the second run, four tasks come from the cache; install, which is never cached, and lint run again.">
 
 </div>
 
 ## Why dagworkflows
 
-dagworkflows makes a CI job faster, and it makes a failure easier to fix. A GitHub Actions job runs its steps in sequence, and it runs all of them on each push. dagworkflows changes this in three ways:
+dagworkflows makes a CI job faster, and it makes a failure easier to fix. A GitHub Actions job runs its steps in sequence, and it runs all of them on each push. dagworkflows runs the job as a graph of tasks instead, which changes this in three ways:
 
-- **Steps run in parallel.** Each step declares the steps that it needs. dagworkflows starts all other steps immediately, within the limits that you set.
-- **Unchanged steps do not run.** Each step declares the files that it reads. If these files and the step's dependencies did not change, dagworkflows uses the result from the cache.
-- **The same file runs on your laptop.** `npx --no dag run` shows the job live in your terminal. For each failure, it shows the log, the command, and the command that runs the step again.
+- **Tasks run in parallel.** Each task declares the tasks that it needs. dagworkflows starts all other tasks immediately, within the limits that you set.
+- **Unchanged tasks do not run.** Each task declares the files that it reads. If these files and the task's dependencies did not change, dagworkflows uses the result from the cache.
+- **The same file runs on your laptop.** `npx --no dag run` shows the job live in your terminal. For each failure, it shows the log, the command, and the command that runs the task again.
 
 ## Contents
 
@@ -45,16 +45,14 @@ dagworkflows makes a CI job faster, and it makes a failure easier to fix. A GitH
    export default defineWorkflow({
      implementation: async (workflow) => {
        const src = await workflow.glob("src/**", "package.json", "tsconfig.json");
-       workflow.runAll({
-         typecheck: { cmd: ["npx", "tsc", "--noEmit"], inputs: src },
-         lint: { cmd: ["npx", "eslint", "src"], inputs: src },
-         test: { cmd: ["npm", "test"], inputs: src },
-       });
+       workflow.run({ name: "typecheck", cmd: ["npx", "tsc", "--noEmit"], inputs: src });
+       workflow.run({ name: "lint", cmd: ["npx", "eslint", "src"], inputs: src });
+       workflow.run({ name: "test", cmd: ["npm", "test"], inputs: src });
      },
    });
    ```
 
-   Each key of `runAll` is a step. These steps have no dependencies, so they start at the same time. `inputs` lists the files that a step reads.
+   Each `workflow.run` adds a task that runs one command. These tasks have no dependencies, so they start at the same time. `inputs` holds the files that a task reads.
 
 3. Run the workflow locally:
 
@@ -62,7 +60,7 @@ dagworkflows makes a CI job faster, and it makes a failure easier to fix. A GitH
    npx --no dag run scripts/ci.ts
    ```
 
-4. Run the workflow again. All three steps come from the cache. Then edit `README.md` and run it again. No step runs, because no step reads `README.md`.
+4. Run the workflow again. All three tasks come from the cache. Then edit `README.md` and run it again. No task runs, because no task reads `README.md`.
 
 5. Add the workflow to `.github/workflows/ci.yml`:
 
@@ -86,13 +84,15 @@ dagworkflows makes a CI job faster, and it makes a failure easier to fix. A GitH
              GITHUB_TOKEN: ${{ github.token }}
    ```
 
-   `checks: write` and `GITHUB_TOKEN` are optional. With them, each step shows as a check run on the pull request.
+   `checks: write` and `GITHUB_TOKEN` are optional. With them, each task shows as a check run on the pull request.
 
 ### Keep the cache between GitHub runs
 
-Each GitHub runner starts with an empty cache. To use the results of the last run, restore the cache before the checks and save it after them. Both operations are steps in the graph:
+Each GitHub runner starts with an empty cache. To use the results of the last run, restore the cache before the checks and save it after them. Both operations are tasks in the graph:
 
 ```typescript
+import { defineWorkflow, settled } from "@mrmeku/dagworkflows";
+
 export default defineWorkflow({
   implementation: async (workflow) => {
     const cas = workflow.restoreCache({
@@ -103,52 +103,51 @@ export default defineWorkflow({
     });
     const afterRestore = { deps: { cas }, invalidateOn: { cas: () => "" } };
     const src = await workflow.glob("src/**", "package.json", "tsconfig.json");
-    const checks = workflow.runAll({
-      typecheck: { cmd: ["npx", "tsc", "--noEmit"], inputs: src, ...afterRestore },
-      lint: { cmd: ["npx", "eslint", "src"], inputs: src, ...afterRestore },
-      test: { cmd: ["npm", "test"], inputs: src, ...afterRestore },
+    const check = (name: string, cmd: string[]) =>
+      workflow.run({ name, cmd, inputs: src, ...afterRestore });
+    const requireAll = workflow.requireAll({
+      deps: {
+        typecheck: check("typecheck", ["npx", "tsc", "--noEmit"]),
+        lint: check("lint", ["npx", "eslint", "src"]),
+        test: check("test", ["npm", "test"]),
+      },
     });
-    const requireAll = workflow.requireAll({ deps: checks });
-    workflow.saveCache({
-      name: "save:cas",
-      cache: cas,
-      deps: { requireAll: workflow.settled(requireAll) },
-    });
+    workflow.saveCache({ name: "save:cas", cache: cas, deps: { requireAll: settled(requireAll) } });
   },
 });
 ```
 
 - `deps: { cas }` starts each check after the restore.
 - `invalidateOn: { cas: () => "" }` keeps the restored key out of the cache key of each check.
-- `workflow.settled(requireAll)` saves the cache also when a check fails.
+- `settled(requireAll)` saves the cache also when a check fails.
 
 ## Features
 
-- **A graph of steps.** Steps declare their dependencies. Independent steps run in parallel, with a limit for the run and for each group. [Workflows](https://github.com/mrmeku/dag/blob/main/packages/dagworkflows/docs/workflows.md)
-- **A content-addressed cache.** A step runs again only when its command, its input files, or the outputs of its dependencies change. [The cache key](https://github.com/mrmeku/dag/blob/main/packages/dagworkflows/docs/workflows.md#the-cache-key)
-- **Files between steps.** A step writes output files, and other steps read them by reference. [Outputs](https://github.com/mrmeku/dag/blob/main/packages/dagworkflows/docs/workflows.md#outputs)
-- **GitHub's cache and artifacts as steps.** `workflow.restoreCache`, `workflow.saveCache` and `workflow.uploadArtifact` are `actions/cache` and `actions/upload-artifact`. [Cache and artifacts](https://github.com/mrmeku/dag/blob/main/packages/dagworkflows/docs/cache-and-artifacts.md)
+- **A graph of tasks.** Tasks declare their dependencies. Independent tasks run in parallel, with a limit for the run and for each group. A task is a command, with or without a shell, or a TypeScript function. [Workflows](https://github.com/mrmeku/dag/blob/main/packages/dagworkflows/docs/workflows.md)
+- **A content-addressed cache.** A task runs again only when its command, its inputs, or the outputs of its dependencies change. A task that declares no inputs runs each time, as a GitHub step does. [The cache key](https://github.com/mrmeku/dag/blob/main/packages/dagworkflows/docs/workflows.md#the-cache-key)
+- **Files between tasks.** A task writes output files, and other tasks read them through the dependencies that they declare. [Outputs](https://github.com/mrmeku/dag/blob/main/packages/dagworkflows/docs/workflows.md#outputs)
+- **GitHub's cache and artifacts as tasks.** `workflow.restoreCache`, `workflow.saveCache` and `workflow.uploadArtifact` are `actions/cache` and `actions/upload-artifact`. [Cache and artifacts](https://github.com/mrmeku/dag/blob/main/packages/dagworkflows/docs/cache-and-artifacts.md)
 - **GitHub's job lifecycle.** Post steps, timeouts and cancellation behave as they do on GitHub. [Lifecycle](https://github.com/mrmeku/dag/blob/main/packages/dagworkflows/docs/lifecycle.md)
 - **Output for each reader.** A live view in a terminal, a short report for an AI agent, and log groups, check runs and a step summary on GitHub. [Output](https://github.com/mrmeku/dag/blob/main/packages/dagworkflows/docs/output.md)
 - **Secrets stay out of the cache.** Commands see secrets only through the environment, and dagworkflows masks them as GitHub does. [Secrets](https://github.com/mrmeku/dag/blob/main/packages/dagworkflows/docs/secrets.md)
-- **Built on the actions toolkit.** `workflow.glob` and `workflow.hash` match what `hashFiles()` matches, byte for byte.
+- **Built on the actions toolkit.** `workflow.hash` is the `hashFiles()` expression, byte for byte. `workflow.glob` matches what the `path:` of `actions/cache` matches, less `.git`, `node_modules` and `.dag`.
 
 ## How it works
 
-dagworkflows runs a graph of steps, and it caches the result of each step by the content of what the step reads. The graph engine is [`@mrmeku/dagraph`](https://github.com/mrmeku/dag/tree/main/packages/dagraph). dagworkflows adds the steps that a GitHub Actions job uses.
+dagworkflows runs a graph of tasks, and it caches the result of each task by the content of what the task reads. The graph engine is [`@mrmeku/dagraph`](https://github.com/mrmeku/dag/tree/main/packages/dagraph). Each task is one node of the engine's graph.
 
-| Term       | Meaning                                                                                                          |
-| ---------- | ---------------------------------------------------------------------------------------------------------------- |
-| Step       | One command, or one GitHub operation such as a cache restore. The output calls a step a _node_.                  |
-| Dependency | A step that must finish before another step starts. Declare it in `deps`.                                        |
-| Input      | A file outside the graph that a step reads. Declare it in `inputs`.                                              |
-| Output     | A file that a step writes to `$DAG_OUT`. Other steps read it.                                                    |
-| CAS        | The content-addressed store in `.dag/cas`. It holds the outputs of each step, by cache key.                      |
-| Cache key  | A hash of the step's command and `env`, the content of its inputs, and the content of its dependencies' outputs. |
+| Term       | Meaning                                                                                                                      |
+| ---------- | ---------------------------------------------------------------------------------------------------------------------------- |
+| Task       | One node: a TypeScript function. A command or a GitHub operation, such as a cache restore, is a task too.                    |
+| Dependency | A task that must finish before another task starts. Declare it in `deps`.                                                    |
+| Input      | Something outside the graph that a task reads: a file, or a value such as an environment variable's. Declare it in `inputs`. |
+| Output     | A file that a task writes to its output directory. Other tasks read it through their `deps`.                                 |
+| CAS        | The content-addressed store in `.dag/cas`. It holds the outputs of each task, by cache key.                                  |
+| Cache key  | A hash of the task's inputs, its command and `env`, and the content of its dependencies' outputs.                            |
 
-Before a step runs, dagworkflows calculates its cache key. If the CAS has an entry for the key, the step does not run. dagworkflows uses the stored outputs.
+Before a task runs, dagworkflows calculates its cache key. If the CAS has an entry for the key, the task does not run. dagworkflows uses the stored outputs.
 
-If a step runs again but writes the same outputs, its dependents do not run again. Thus a change that does not change a step's outputs stops at that step.
+If a task runs again but writes the same outputs, its dependents do not run again. Thus a change that does not change a task's outputs stops at that task.
 
 ## Output
 
@@ -156,14 +155,14 @@ dagworkflows shows each run in the format that its reader needs. It selects the 
 
 | Where it runs  | What it shows                                                                                                  |
 | -------------- | -------------------------------------------------------------------------------------------------------------- |
-| A terminal     | One line for each step that finishes, a block for each failure, and a live footer with the steps that run now. |
+| A terminal     | One line for each task that finishes, a block for each failure, and a live footer with the tasks that run now. |
 | An AI agent    | Only the failures and a recap, in plain text, in approximately 10,000 characters.                              |
-| A pipe or CI   | The full log of each step, in groups, as GitHub shows it.                                                      |
-| GitHub Actions | A log group, an annotation and a check run for each step, and a step summary with a timeline and the graph.    |
+| A pipe or CI   | The full log of each task, in groups, as GitHub shows it.                                                      |
+| GitHub Actions | A log group, an annotation and a check run for each task, and a step summary with a timeline and the graph.    |
 
-Each local run also writes the log of each step to `.dag/logs/` and a report of the failures to `.dag/failures.md`. Give this report to a person or an agent that must fix the failures.
+Each local run also writes the log of each task to `.dag/logs/` and a report of the failures to `.dag/failures.md`. Give this report to a person or an agent that must fix the failures.
 
-Each run ends with a recap. The recap names the step that caused the failure, and the command that runs that step again:
+Each run ends with a recap. The recap names the task that caused the failure, and the command that runs that task again:
 
 ```
 ✖ test:unit failed · scripts/ci.ts · built 1 · cached 4 · failed 2 · skipped 1 · wall 9.8s
@@ -174,14 +173,14 @@ reproduce: npx --no dag run scripts/ci.ts --only test:unit
 
 ## Compared to other tools
 
-- **[act](https://github.com/nektos/act)** runs your YAML workflows locally, in Docker. dagworkflows replaces the steps of one job with a TypeScript graph and caches them. It does not use Docker.
-- **[Turborepo](https://turborepo.com), [Nx](https://nx.dev) and [wireit](https://github.com/google/wireit)** run the scripts of a repository as a cached graph. dagworkflows does this for the steps of a CI job. GitHub's cache, artifacts, post steps and check runs are steps in its graph.
-- **Several GitHub Actions jobs** also run in parallel. But each job needs a new runner, a checkout and an install. dagworkflows runs the steps in parallel on one runner.
+- **[act](https://github.com/nektos/act)** runs your YAML workflows locally, in Docker. dagworkflows replaces the steps of one job with a TypeScript graph of tasks and caches them. It does not use Docker.
+- **[Turborepo](https://turborepo.com), [Nx](https://nx.dev) and [wireit](https://github.com/google/wireit)** run the scripts of a repository as a cached graph. dagworkflows does this for the steps of a CI job. GitHub's cache, artifacts, post steps and check runs are tasks in its graph.
+- **Several GitHub Actions jobs** also run in parallel. But each job needs a new runner, a checkout and an install. dagworkflows runs the tasks in parallel on one runner.
 
 ## Documentation
 
-- [Workflows](https://github.com/mrmeku/dag/blob/main/packages/dagworkflows/docs/workflows.md): steps, dependencies, inputs, outputs and scheduler options.
-- [Cache and artifacts](https://github.com/mrmeku/dag/blob/main/packages/dagworkflows/docs/cache-and-artifacts.md): `actions/cache` and `actions/upload-artifact` as steps.
+- [Workflows](https://github.com/mrmeku/dag/blob/main/packages/dagworkflows/docs/workflows.md): tasks, commands, dependencies, inputs, outputs, scheduler options and composition.
+- [Cache and artifacts](https://github.com/mrmeku/dag/blob/main/packages/dagworkflows/docs/cache-and-artifacts.md): `actions/cache` and `actions/upload-artifact` as tasks.
 - [Lifecycle](https://github.com/mrmeku/dag/blob/main/packages/dagworkflows/docs/lifecycle.md): post steps, timeouts and cancellation.
 - [Output](https://github.com/mrmeku/dag/blob/main/packages/dagworkflows/docs/output.md): the terminal, the log files, the GitHub log, check runs and the step summary.
 - [Secrets](https://github.com/mrmeku/dag/blob/main/packages/dagworkflows/docs/secrets.md): how commands get secrets, and how dagworkflows masks them.

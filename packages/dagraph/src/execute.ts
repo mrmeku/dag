@@ -28,12 +28,6 @@ export function execute<Ports, Meta>(
   executionContext: ExecutionContext<NoInfer<Ports>>,
   options: ExecuteOptions<Meta> = {},
 ): Promise<Result[]> {
-  // v0.3.0's per-node forms, which an untyped caller can still pass: refused, never misread.
-  const perNode = "A choice per node is an executor's: pass it in processNode's options";
-  if ("cacheOnly" in options)
-    return Promise.reject(new Error(`execute takes no cacheOnly. ${perNode}.`));
-  if (options.force !== undefined && typeof options.force !== "boolean")
-    return Promise.reject(new Error(`execute's force is true or false. ${perNode}.`));
   const { force = false, onEvent, scheduler = unboundedScheduler(), signal } = options;
   const execution = { ...executionContext };
   inputHashMemos.set(execution, new Map());

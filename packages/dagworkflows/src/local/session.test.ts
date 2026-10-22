@@ -1,4 +1,4 @@
-import type { ExecEvent, JsonValue, Node, Result } from "@mrmeku/dagraph";
+import { settled, type ExecEvent, type JsonValue, type Node, type Result } from "@mrmeku/dagraph";
 import xterm from "@xterm/headless";
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
@@ -6,12 +6,12 @@ import { resolve } from "node:path";
 import { afterEach, beforeEach, describe, mock, test, type TestContext } from "node:test";
 import { pathToFileURL } from "node:url";
 import { styleText } from "node:util";
+import { run } from "../commands.ts";
 import { LIVE_FRAME_MS, type OutputStyle } from "../config.ts";
 import { defineStep } from "../define-step.ts";
 import type { Exec, ExecResult, Ports } from "../ports.ts";
 import { createMemorySyncFs, createTestPorts } from "../ports/memory.ts";
 import { runJob, type RunOptions } from "../runner.ts";
-import { run } from "../steps.ts";
 import { defineWorkflow } from "../workflow.ts";
 import { createLocalSession } from "./session.ts";
 import type { WriteStreams } from "./terminal/frame.ts";
@@ -202,14 +202,14 @@ describe("local session, grouped style", () => {
           "▷ ../up",
           "▷ /abs",
           "▷ :",
+          "▶ ✔︎ restore (1ms)",
+          "    Cache not found for input keys: k",
           "▶ ✖︎ lint (1ms)",
           "    checking",
           "    \x1b[31merror\x1b[0m",
           "    ── error ──",
           "    lint exited 1",
           "[error] lint: lint exited 1",
-          "▶ ✔︎ restore (1ms)",
-          "    Cache not found for input keys: k",
           "▶ ✔︎ ../up (1ms)",
           "    up",
           "▶ ✔︎ /abs (1ms)",
@@ -269,7 +269,7 @@ describe("local session, failures style", () => {
         workflow.run({
           name: "upload",
           cmd: ["upload"],
-          deps: { lint: workflow.settled(lint) },
+          deps: { lint: settled(lint) },
           cacheable: false,
         });
         workflow.run({
@@ -298,7 +298,7 @@ describe("local session, failures style", () => {
           "✖︎ pack  0.0s · 2 lines",
           "│ packed",
           `│ ${"=".repeat(500)}…`,
-          "│ declared output tarball missing: pkg.tgz",
+          '│ output "tarball" (pkg.tgz) was not written. Write it at out.tarball before the action returns.',
           "├ log    .dag/logs/pack.log",
           "├ cmd    pack   (cwd .)",
           "└ rerun  npx --no dag run ci.ts --only pack",
@@ -365,7 +365,7 @@ describe("local session, failures style", () => {
           "## ✖︎ pack · 0.0s · 2 lines",
           "",
           "- command: `pack` (cwd `.`)",
-          "- error: declared output tarball missing: pkg.tgz",
+          '- error: output "tarball" (pkg.tgz) was not written. Write it at out.tarball before the action returns.',
           "- log: `.dag/logs/pack.log` (2 lines)",
           "- rerun: `npx --no dag run ci.ts --only pack`",
           "",
@@ -663,7 +663,7 @@ describe("local session, failures style, at the edges", () => {
       {
         implementation: async (graph) => {
           for (const name of ["hang", "stuck"])
-            run(graph, { name, cmd: [name], timeoutMinutes: 0.0001, cacheable: false });
+            run(graph, { name, cmd: [name], timeoutMs: 6, cacheable: false });
           upload.addNode(graph, {});
         },
       },
@@ -828,7 +828,7 @@ describe("local session, failures style, at the edges", () => {
           name: "save",
           main: fast,
           cmd: ["save"],
-          deps: { slow: workflow.settled(slow) },
+          deps: { slow: settled(slow) },
         });
       },
     });
@@ -898,7 +898,7 @@ describe("local session, failures style, at the edges", () => {
           name: "save",
           main: fast,
           cmd: ["save"],
-          deps: { slow: workflow.settled(slow) },
+          deps: { slow: settled(slow) },
         });
       },
     });
@@ -1142,7 +1142,7 @@ describe("local session, live style", () => {
           name: "teardown",
           main: fast,
           cmd: ["teardown"],
-          deps: { slow: workflow.settled(slow) },
+          deps: { slow: settled(slow) },
         });
         workflow.post({ name: "save", main: fast, cmd: ["save"], deps: { slow } });
       },
@@ -1302,11 +1302,16 @@ describe("local session, live style", () => {
     await screenAt(1600);
     const crowded = session.footer();
     await emitAt(1900, [
-      failureOf(a1, "k1", "declared output report missing: lint.xml", {
-        argv: ["eslint", "."],
-        cwd: ".",
-        code: 0,
-      }),
+      failureOf(
+        a1,
+        "k1",
+        'run "a1": output "report" (lint.xml) was not written. Write it at out.report before the action returns.',
+        {
+          argv: ["eslint", "."],
+          cwd: ".",
+          code: 0,
+        },
+      ),
       ...started(g),
       failureOf(g, "", "failed: a1"),
       ...skipped.map((node) => {
@@ -1374,8 +1379,9 @@ describe("local session, live style", () => {
           "✖︎ a1  0.8s · 2 lines",
           "│ checking src",
           "│ src/a.ts:1:1 error no-console",
-          "│ declared output report missing: lint.x",
-          "ml",
+          '│ run "a1": output "report" (lint.xml) w',
+          "as not written. Write it at out.report b",
+          "efore the action returns.",
           "├ log    .dag/logs/a1.log",
           "├ cmd    eslint .   (cwd .)",
           "└ rerun  npx --no dag run ci.ts --only a",
@@ -1402,7 +1408,7 @@ describe("local session, live style", () => {
           `${red("✖︎")} ${bold("a1")}  ${dim("0.8s · 2 lines")}`,
           `${dim("│")} checking src`,
           `${dim("│")} src/a.ts:1:1 error no-console`,
-          `${dim("│")} ${red("declared output report missing: lint.xml")}`,
+          `${dim("│")} ${red('run "a1": output "report" (lint.xml) was not written. Write it at out.report before the action returns.')}`,
           `${dim("├ log    ")}${link(".dag/logs/a1.log")}`,
           `${dim("├ cmd    ")}eslint .   ${dim("(cwd .)")}`,
           `${dim("└ rerun  ")}npx --no dag run ci.ts --only a1`,

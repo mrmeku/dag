@@ -680,7 +680,7 @@ describe("file handles", () => {
     });
   });
 
-  test("a handle stands whole: TypeScript refuses it in a template string or with +, and String, JSON.stringify and join throw", async () => {
+  test("a handle is never part of a string: TypeScript refuses it in a template string or with +, and String, JSON.stringify and join throw", async () => {
     const { ctx } = setup();
     const thrown: string[] = [];
     const g = new Graph<Ports>();
@@ -709,7 +709,7 @@ describe("file handles", () => {
       },
     }).addNode(g, { deps: { src } });
     const [made] = await execute(g, ctx);
-    const refusal = `The handle of ${outputsOf(made)} is not a string. Pass its path, or read it with text() or json().`;
+    const refusal = `the handle on ${outputsOf(made)} can't be part of a string. Use its .path.`;
     expect(thrown).toEqual([refusal, refusal, refusal, refusal, refusal]);
   });
 });

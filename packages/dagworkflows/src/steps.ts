@@ -1,26 +1,24 @@
 import type { UploadArtifactOptions, UploadArtifactResponse } from "@actions/artifact";
 import {
   dep,
-  file,
   isFileHandle,
   nodeInputs,
   settled,
   type Dep,
+  type DepRecord,
+  type DepRefs,
   type DepSpecs,
-  type FileInput,
   type Graph,
-  type Handles,
-  type InputValue,
   type NodeRef,
-  type Outputs,
+  type OutputRef,
   type SettledDep,
-  type SettledRef,
+  type SettledOutputRef,
 } from "@mrmeku/dagraph";
-import { basename, dirname } from "node:path";
 import { defineStep } from "./define-step.ts";
 import { errorMessage } from "./kernel/format.ts";
 import type { Ports } from "./ports.ts";
-import { logPath, type CommandCause } from "./step-records.ts";
+import { logOf, writeLog } from "./step-records.ts";
+import { depRoles } from "./task.ts";
 
 export { logPath, type CommandCause } from "./step-records.ts";
 
@@ -33,14 +31,11 @@ export const glob = async (patterns: string[]): Promise<string[]> =>
 export const hashFiles = async (patterns: string[]): Promise<string> =>
   (await import("./ports/glob.ts")).hashFiles(patterns);
 
-type Deps = Record<string, NodeRef | SettledRef | undefined>;
-type DepOutputs = Record<string, Handles<Outputs> | undefined>;
+/** The graph a workflow adds its steps to; its nodes' `meta` is the team's. */
+type StepGraph = Graph<Ports>;
 
 /** A step's deps as its action declares them: any role, as each workflow names them. */
 const anyRole: DepSpecs = {};
-
-/** The graph a workflow adds its steps to; its nodes' `meta` is the team's. */
-type StepGraph = Graph<Ports>;
 
 /* ------------------------------------------------------------------ posts */
 
@@ -51,8 +46,8 @@ type StepGraph = Graph<Ports>;
 export interface PostRecord {
   main: string;
   refs: string[];
-  deps: Deps;
-  addTo: (graph: StepGraph, name: string, deps: Deps) => void;
+  deps: DepRecord;
+  addTo: (graph: StepGraph, name: string, deps: DepRecord) => void;
 }
 
 /** The post steps of each graph the facade added steps to, by node name. */
@@ -72,360 +67,6 @@ export function recordPost(graph: StepGraph, name: string, post: PostRecord): vo
 export function postNodes(graph: StepGraph): Map<string, string> {
   return new Map([...postsOf(graph)].map(([name, post]) => [name, post.main]));
 }
-
-/* ------------------------------------------------------------------ logs */
-
-/** The log of the step writing into `outputDir`, which the engine makes in `{cas}/{key}/`. */
-const logOf = (outputDir: string): string => {
-  const keyDir = dirname(outputDir);
-  return logPath(dirname(keyDir), basename(keyDir));
-};
-
-/**
- * Writes the log of the step writing into `outputDir` beside it and renames it into place, so a
- * reader never sees half of one. Every attempt of a key writes the same log, so a run whose node
- * a concurrent run of the same key also runs may show that run's log: the same command on the
- * same inputs.
- */
-async function writeLog(fs: Ports["fs"], outputDir: string, log: string): Promise<void> {
-  const path = logOf(outputDir);
-  const written = `${path}.${basename(outputDir)}`;
-  await fs.writeText(written, log);
-  await fs.rename(written, path);
-}
-/* ------------------------------------------------------------------ run */
-
-/** A run step's value inputs; its files are inputs too, each named by its path. */
-type RunInputs = {
-  version: string;
-  cmd: string[];
-  cwd: string;
-  env?: Record<string, string>;
-  outputs?: Record<string, string>;
-  config?: InputValue;
-};
-
-/** A run node's outputs: `result.json`, plus each file the spec declared under `DAG_OUT`. */
-export type RunOutputs<O extends string = never> = Record<"result" | O, string>;
-
-/**
- * One output of a step as a command refers to it: `pack.outputs.tarball`, the
- * `steps.pack.outputs.tarball` of a workflow file. Whole or inside a template string
- * (`--file=${pack.outputs.tarball}`), in a command argument, an `env` value or an artifact path,
- * it resolves to the file's path when the step runs; the step it names must be in `deps`. A
- * plain `{ node, output }` is a ref as an argument of its own; in a template string, which calls
- * `toString`, the graph build refuses it.
- */
-export interface OutputRef {
-  readonly node: string;
-  readonly output: string;
-  /**
-   * The token a string holds in the ref's place: the node and output names. The step that takes
-   * it keys it by the roles that node has in its deps and the output's name, never a path or the
-   * node's name. Its NUL bytes keep it apart from any text, and make a token that nothing
-   * resolved fail at spawn.
-   */
-  toString(): string;
-}
-
-const REF_TAG = "dag-ref";
-const REF = new RegExp(`\\0${REF_TAG}:([^\\0]*)\\0`, "g");
-const DEP_TAG = "dag-dep";
-const DEP = new RegExp(`\\0${DEP_TAG}:([^\\0]*)\\0`, "g");
-
-/** The token a string holds in place of `node.outputs.output`. */
-export const refToken = (node: string, output: string): string =>
-  `\0${REF_TAG}:${JSON.stringify([node, output])}\0`;
-
-function outputRef(node: string, output: string): OutputRef {
-  const token = refToken(node, output);
-  return { node, output, toString: () => token };
-}
-
-const isRefJson = (value: unknown): value is [string, string] =>
-  Array.isArray(value) && value.length === 2 && value.every((v) => typeof v === "string");
-
-const isDepJson = (value: unknown): value is [[string, ...string[]], string] =>
-  Array.isArray(value) &&
-  value.length === 2 &&
-  Array.isArray(value[0]) &&
-  value[0].length > 0 &&
-  value[0].every((role) => typeof role === "string") &&
-  typeof value[1] === "string";
-
-/** What a token holds, refused when it is not what `refToken` or `depToken` writes. */
-function tokenJson<T>(json: string, is: (value: unknown) => value is T): T {
-  const value: unknown = JSON.parse(json);
-  if (!is(value)) throw new Error(`not a ref token: ${json}`);
-  return value;
-}
-
-/** `text` with each ref's token replaced by what `fill` makes of its node and output. */
-const fillRefs = (text: string, fill: (node: string, output: string) => string): string =>
-  text.replace(REF, (_, ref: string) => fill(...tokenJson(ref, isRefJson)));
-
-/**
- * The token a step's own command, `env` or artifact path holds for a ref, as its key holds it:
- * the roles the ref's node has in the step's deps and the output's name, as the engine keys an
- * output ref in a value input. So renaming the dep re-keys neither the step nor its dependents.
- */
-const depToken = (roles: string[], output: string): string =>
-  `\0${DEP_TAG}:${JSON.stringify([roles, output])}\0`;
-
-/** `text` with each dep token replaced by what `fill` makes of its first role and output. */
-const fillDeps = (
-  text: string,
-  fill: (role: string, output: string, token: string) => string,
-): string =>
-  text.replace(DEP, (token, ref: string) => {
-    const [[role], output] = tokenJson(ref, isDepJson);
-    return fill(role, output, token);
-  });
-
-/** What `run` returns: the node's ref, and `outputs` with this facade's `OutputRef` per output. */
-export type RunRef<O extends string = never> = {
-  readonly name: string;
-  readonly settled?: false;
-  readonly _T?: RunOutputs<O>;
-  outputs: Record<"result" | O, OutputRef>;
-};
-
-type Arg = string | OutputRef;
-
-/**
- * An argument as the command and the key hold it. A ref's token comes from its fields, not its
- * `toString`, so a plain `{ node, output }` is a ref too; only a template string calls `toString`.
- */
-const text = (arg: Arg): string => (typeof arg === "string" ? arg : refToken(arg.node, arg.output));
-
-/**
- * `keyed` gives a text with each ref, which names a node, as the dep token of the roles that node
- * has in `deps`; `refs` holds the nodes the refs name. A ref to a node outside `deps` is refused.
- */
-function byRole(name: string, deps: Deps): { keyed: (text: string) => string; refs: Set<string> } {
-  const refs = new Set<string>();
-  const rolesOf = (node: string) =>
-    Object.keys(deps)
-      .filter((role) => deps[role]?.name === node)
-      .sort();
-  const keyed = (value: string) => {
-    if (value.includes("[object Object]"))
-      throw new Error(
-        `${name}: an object in a template string; a ref there must come from a step's outputs`,
-      );
-    return fillRefs(value, (node, output) => {
-      const roles = rolesOf(node);
-      if (roles.length === 0)
-        throw new Error(`${name} uses ${node}.outputs.${output}, but ${node} is not in its deps`);
-      refs.add(node);
-      return depToken(roles, output);
-    });
-  };
-  return { keyed, refs };
-}
-
-/** The name of the node in `role`, which a dep token names. */
-function depName(deps: Deps, role: string): string {
-  const dep = deps[role];
-  if (!dep) throw new Error(`no dep in role ${role}`);
-  return dep.name;
-}
-
-/** `text` with each ref as the step names it: `node.outputs.output`. */
-const described = (text: string, deps: Deps): string =>
-  fillDeps(text, (role, output) => `${depName(deps, role)}.outputs.${output}`);
-
-/**
- * `text` with each ref replaced by its output's path. A settled dep that failed has no path: a
- * ref to it that is the whole of `text` makes it undefined, and one inside a longer string, which
- * would build some other path, fails the step.
- */
-function fillPaths(text: string, deps: Deps, depOutputs: DepOutputs): string | undefined {
-  let missing = false;
-  const filled = fillDeps(text, (role, output, token) => {
-    const node = depName(deps, role);
-    const out = depOutputs[role];
-    if (out === undefined) {
-      if (text !== token)
-        throw new Error(`"${described(text, deps)}" has no path: ${node}, a settled dep, failed`);
-      missing = true;
-      return "";
-    }
-    // A handle's type is a symbol's: only its own mark tells it from a record of handles.
-    const file = isFileHandle(out) || Array.isArray(out) ? undefined : out[output];
-    if (file === undefined) throw new Error(`${node} has no output ${output}`);
-    return (Array.isArray(file) ? file : [file]).map((f) => f.path).join(":");
-  });
-  return missing ? undefined : filled;
-}
-
-/** The longest timeout setTimeout can keep: 2^31 - 1 ms. */
-const MAX_TIMEOUT_MINUTES = 35_791;
-
-/**
- * Everything a run node needs except its name. `G` is the set of concurrency groups the
- * workflow's scheduler options declare; the facade from defineWorkflow narrows it so a
- * misspelled group, which the scheduler would silently leave unlimited, is a type error instead.
- */
-export interface RunSpec<G extends string = never, O extends string = never> {
-  /** The command and its arguments, no shell. `$DAG_OUT` is the output directory; an `OutputRef`, whole or in a template string, is the path it names. */
-  cmd: Arg[];
-  cwd?: string;
-  /**
-   * Variables for the command, in the cache key like the command itself, merged over what it
-   * inherits: the step's whole environment. Secrets stay in the inherited environment, out of the
-   * key.
-   */
-  env?: Record<string, Arg>;
-  /**
-   * Files the command writes under `$DAG_OUT`, by role: `{ tarball: "pkg-1.0.0.tgz" }`. Each
-   * becomes an output, content-addressed like any other, and a missing one fails the node.
-   */
-  outputs?: Record<O, string>;
-  /** Files outside the graph the command reads; each is a `file()` input, named by its path, and joins the cache key. */
-  inputs?: string[];
-  /** Upstream nodes the command needs. Ordering lives here, nowhere else. */
-  deps?: Deps;
-  group?: G;
-  /**
-   * GitHub's `timeout-minutes` for the step. When it elapses the command is interrupted as a
-   * cancel interrupts it, and the step fails ("The action 'test' has timed out after 15 minutes.")
-   * whatever the command exits with. Fractions are allowed. Unset is no limit. Not in the cache key.
-   */
-  timeoutMinutes?: number;
-  /** `false` for nondeterministic commands (integration tests): run every time, never cache. */
-  cacheable?: boolean;
-  /** Anything else the result depends on that no file captures, such as the tool's version: a JSON value. */
-  config?: InputValue;
-  /**
-   * Fingerprints for deps the command reads only part of, keyed by role: the engine's
-   * `invalidateOn`. A constant fingerprint orders the node after a dep it reads nothing from, such
-   * as a cache restore: `deps: { cas }, invalidateOn: { cas: () => "" }`. Build one from the files'
-   * contents, never from a handle's `path`, which changes with the machine.
-   */
-  invalidateOn?: Record<string, (outputs: Handles<Outputs>) => string | Promise<string>>;
-}
-
-/**
- * The generic step: run a command; a non-zero exit fails the node. Its outputs are `result.json`
- * (command, cwd, exit code) and the files it declared under `$DAG_OUT`. The log is written
- * beside them for the reporter but is not an output, so a timing line never re-keys a consumer.
- * The command, `cwd` and `env` are value inputs, in the cache key; the files it reads come in
- * through `inputs`, upstream results through `deps`. A dep's output is named where the command
- * takes it, `["npm", "publish", pack.outputs.tarball]` or `env: { TARBALL: pack.outputs.tarball }`,
- * and resolves to its path at run time. For a settled dep that failed, a whole argument is the
- * empty string, as `${{ steps.pack.outputs.tarball }}` would be, and a template string fails the
- * step.
- */
-export function run<O extends string = never>(
-  graph: StepGraph,
-  opts: RunSpec<string, O> & { name: string; postOf?: string },
-): RunRef<O> {
-  // As the engine refuses it: a spread that still carries it would key the node on the whole dep.
-  if ("normalize" in opts)
-    throw new Error(
-      `${opts.name}: normalize is gone: declare invalidateOn: { [role]: (outputs) => fingerprint }`,
-    );
-  const minutes = opts.timeoutMinutes;
-  if (minutes !== undefined && !(minutes > 0 && minutes <= MAX_TIMEOUT_MINUTES))
-    throw new RangeError(
-      `${opts.name}: timeoutMinutes must be more than 0 and at most ${MAX_TIMEOUT_MINUTES}, got ${minutes}`,
-    );
-  const invalidateOn = opts.invalidateOn;
-  const declared: Record<string, string> = opts.outputs ?? {};
-  const deps = opts.deps ?? {};
-  const { keyed, refs } = byRole(opts.name, deps);
-  const cmd = opts.cmd.map((arg) => keyed(text(arg)));
-  const env =
-    opts.env && Object.fromEntries(Object.entries(opts.env).map(([k, v]) => [k, keyed(text(v))]));
-  const inputs: RunInputs = {
-    version: "run:v6",
-    cmd,
-    cwd: opts.cwd ?? "",
-    ...(env && { env }),
-    ...(opts.outputs && { outputs: opts.outputs }),
-    ...(opts.config !== undefined && { config: opts.config }),
-  };
-  const step = defineStep({
-    kind: opts.name,
-    deps: anyRole,
-    // The files the command reads, each a node input by its path.
-    nodeInputs: nodeInputs<Record<string, FileInput>>,
-    inputs,
-    ...(opts.group && { concurrencyGroup: opts.group }),
-    ...(opts.cacheable === false && { cacheable: false }),
-    ...(minutes !== undefined && { timeoutMs: Math.max(1, Math.round(minutes * 60_000)) }),
-    ...(invalidateOn && { invalidateOn }),
-    action: async ({ inputs, depOutputs, ports, outputDir, signal, output }) => {
-      const resolve = (text: string): string =>
-        fillPaths(text.replace(/\$DAG_OUT\b/g, outputDir), deps, depOutputs) ?? "";
-      const vars = Object.entries(inputs.env ?? {}).map(([k, v]): [string, string] => [
-        k,
-        resolve(v),
-      ]);
-      const argv = inputs.cmd.map(resolve);
-      const r = await ports.exec.run(argv, {
-        ...(inputs.cwd && { cwd: inputs.cwd }),
-        env: { ...Object.fromEntries(vars), DAG_OUT: outputDir },
-        signal,
-        onOutput: output,
-      });
-      await writeLog(ports.fs, outputDir, r.output);
-      const result = `${outputDir}/result.json`;
-      // An output whose bytes key its dependents, so it keeps the cwd as configured.
-      await ports.fs.writeText(
-        result,
-        JSON.stringify({ cmd: inputs.cmd, cwd: inputs.cwd, code: r.code }, null, 2),
-      );
-      const cause: CommandCause = { argv, cwd: inputs.cwd || ".", code: r.code };
-      if (!r.ok) throw new Error(`${argv.join(" ")} exited ${r.code}`, { cause });
-      // One that traps its timeout's signal and exits 0 timed out all the same, as its cause says.
-      if (signal.aborted) throw new Error(`${argv.join(" ")} was stopped`, { cause });
-      const outputs: Record<string, string> = { result };
-      for (const [role, file] of Object.entries(declared)) {
-        const path = `${outputDir}/${file}`;
-        if (!(await ports.fs.exists(path)))
-          throw new Error(`declared output ${role} missing: ${file}`, { cause });
-        outputs[role] = path;
-      }
-      return outputs;
-    },
-  });
-  const files = opts.inputs && { inputs: Object.fromEntries(opts.inputs.map((p) => [p, file(p)])) };
-  const ref = step.addNode(graph, { ...files, ...(opts.deps && { deps: opts.deps }) });
-  if (opts.postOf)
-    recordPost(graph, ref.name, {
-      main: opts.postOf,
-      refs: [...refs],
-      deps,
-      addTo: (g, name, deps) => void step.addNode(g, { ...files, name, deps }),
-    });
-  const outputs = Object.fromEntries(
-    ["result", ...Object.keys(declared)].map((output) => [output, outputRef(ref.name, output)]),
-  );
-  // eslint-disable-next-line @typescript-eslint/consistent-type-assertions -- `outputs` holds "result" and each declared O, which Object.keys loses
-  return { ...ref, outputs } as RunRef<O>;
-}
-
-/**
- * Several run nodes at once, keyed by name. The record says what it is: a set of named
- * nodes with no order among them. Any ordering is declared through each spec's `deps`. The
- * returned record has the same keys, so `checks.lint` is a typed ref for downstream nodes.
- */
-export function runAll<K extends string>(
-  graph: StepGraph,
-  specs: Record<K, RunSpec<string>>,
-): Record<K, RunRef> {
-  const refs: Partial<Record<K, RunRef>> = {};
-  for (const name in specs) refs[name] = run(graph, { name, ...specs[name] });
-  if (!hasEvery(refs, specs)) throw new Error("runAll: a spec added no node");
-  return refs;
-}
-
-const hasEvery = <K extends string, V>(
-  record: Partial<Record<K, V>>,
-  keys: Record<K, unknown>,
-): record is Record<K, V> => Object.keys(keys).every((key) => key in record);
 
 /* ------------------------------------------------------------------ requireAll */
 
@@ -457,38 +98,6 @@ export function requireAll(
   });
   return step.addNode(graph, {
     deps: Object.fromEntries(Object.entries(opts.deps).map(([role, ref]) => [role, settled(ref)])),
-  });
-}
-
-/* ------------------------------------------------------------------ post */
-
-/** A post step is a run step with a `main`; it runs every time, so it is never cacheable. */
-export type PostSpec<G extends string = never, O extends string = never> = Omit<
-  RunSpec<G, O>,
-  "cacheable" | "deps"
-> & {
-  /** The node this is the post of; the command names its outputs as `main.outputs.<key>`, like any dep's. */
-  main: NodeRef;
-  /** What the post waits for. A graph has no end of job, so this is never implied; `{}` is right after `main`. */
-  deps: Deps;
-};
-
-/**
- * A command as the `post:` of another node, as a GitHub action's post runs after its main: it
- * runs every time its main succeeded, after the `deps` it names whether they succeeded or not
- * (`if: always()` is `settled`, as everywhere else), and still runs after a cancel, from the
- * run's history. A failed main has no post.
- */
-export function post<O extends string = never>(
-  graph: StepGraph,
-  opts: PostSpec<string, O> & { name: string },
-): RunRef<O> {
-  const { main, ...spec } = opts;
-  return run(graph, {
-    ...spec,
-    cacheable: false,
-    deps: { main, ...spec.deps },
-    postOf: main.name,
   });
 }
 
@@ -530,7 +139,7 @@ export function restoreCache(graph: StepGraph, spec: RestoreCacheSpec): RestoreC
       return out;
     },
   });
-  return { ...step.addNode(graph, {}), spec };
+  return Object.assign(step.addNode(graph, {}), { spec });
 }
 
 /** A save's deps as its action declares them: the restore it saves for, and any other role. */
@@ -546,7 +155,7 @@ const cacheAndAnyRole: DepSpecs & { cache: Dep<string> } = { cache: dep<string>(
  */
 export function saveCache(
   graph: StepGraph,
-  opts: { name: string; cache: RestoreCacheRef; deps: Deps & { cache?: never } },
+  opts: { name: string; cache: RestoreCacheRef; deps: DepRecord & { cache?: never } },
 ): NodeRef<string> {
   const { path, key } = opts.cache.spec;
   const step = defineStep({
@@ -601,15 +210,25 @@ export function saveCache(
 
 /* ------------------------------------------------- actions/upload-artifact */
 
+/** What an artifact's `path` names: a glob, or an output of a dep, missing when a `settled` one failed. */
+type PathItem<S> =
+  | string
+  | OutputRef<string | string[], S>
+  | SettledOutputRef<string | string[], S>;
+
 /** The inputs of `actions/upload-artifact`: `name`, `path`, `if-no-files-found`, `overwrite`, and the client's own options. */
-export interface UploadArtifactSpec {
+export interface UploadArtifactSpec<D extends DepRecord = DepRecord> {
   /** The node's name; `artifact` is the artifact's. */
   name: string;
   /** The artifact's name on the run page: no `"`, `:`, `<`, `>`, `|`, `*`, `?`, `\\` or `/`. */
   artifact: string;
-  /** What goes in: globs over the working tree, as `workflow.glob` takes them, and outputs of nodes in `deps`, whole or in a template string. */
-  path: Arg[];
-  deps?: Deps;
+  /**
+   * Globs as `workflow.glob` takes them, or a function of `deps` that names their outputs too,
+   * left out when a `settled` dep failed: `deps: { pack }, path: ({ pack }) => ["reports/**",
+   * pack.tarball]`.
+   */
+  path: readonly string[] | (<S>(deps: DepRefs<D, S>) => readonly PathItem<S>[]);
+  deps?: D;
   /** What an empty `path` does: a warning and no artifact (the default), a failure, or nothing. */
   ifNoFilesFound?: "warn" | "error" | "ignore";
   /** Delete an artifact of the same name first: a re-run of a failed job shares its run's artifacts. */
@@ -634,38 +253,37 @@ function commonDir(files: string[]): string {
  * `actions/upload-artifact` as a node. Artifacts belong to a run, so it runs every time, never
  * from the cache, and writes what `@actions/artifact` returned to `artifact.json`: the id, size
  * and digest, or `{}` when nothing went up. `path` names the files: a glob is matched when the
- * node runs, an output ref resolves to the file a dep produced, so `path: [pack.outputs.tarball]`
- * uploads a tarball straight from the CAS. The archive is rooted at the deepest directory holding
- * every file, as the action roots it, so one node's outputs sit at the top. An upload the service
- * refuses fails the node, as the action fails its step; without a service, locally or in a
- * `run:` step, nothing is uploaded and the log says so.
+ * node runs, an output ref resolves to the file a dep produced, so `path: ({ pack }) =>
+ * [pack.tarball]` uploads a tarball straight from the CAS. The archive is rooted at the deepest
+ * directory holding every file, as the action roots it, so one node's outputs sit at the top. An
+ * upload the service refuses fails the node, as the action fails its step; without a service,
+ * locally or in a `run:` step, nothing is uploaded and the log says so.
  */
-export function uploadArtifact(graph: StepGraph, spec: UploadArtifactSpec): NodeRef<string> {
+export function uploadArtifact<D extends DepRecord>(
+  graph: StepGraph,
+  spec: UploadArtifactSpec<D>,
+): NodeRef<string> {
   const ifNoFilesFound = spec.ifNoFilesFound ?? "warn";
-  const deps = spec.deps ?? {};
-  const { keyed } = byRole(spec.name, deps);
-  const path = spec.path.map((entry) => keyed(text(entry)));
+  // What `path` names, as the no-files message shows it; set when the node is added.
+  let shown: string[] = [];
   const step = defineStep({
     kind: spec.name,
     deps: anyRole,
+    nodeInputs: nodeInputs<{ path: readonly PathItem<unknown>[] }>,
     inputs: {
-      version: "upload-artifact:v2",
+      version: "upload-artifact:v4",
       artifact: spec.artifact,
-      path,
       ifNoFilesFound,
       ...(spec.overwrite !== undefined && { overwrite: spec.overwrite }),
       // A copy: the toolkit's options are an interface, and an interface is never an InputValue.
       ...(spec.options && { options: { ...spec.options } }),
     },
     cacheable: false,
-    action: async ({ depOutputs, ports: p, outputDir }) => {
-      const patterns = path.filter((entry) => entry.search(DEP) < 0);
-      // An entry naming an output is a file, left out when it is a failed settled dep's.
-      const named = path.flatMap((entry) => {
-        if (entry.search(DEP) < 0) return [];
-        const file = fillPaths(entry, deps, depOutputs);
-        return file === undefined ? [] : [file];
-      });
+    action: async ({ inputs: { path }, ports: p, outputDir }) => {
+      const patterns = path.filter((item) => typeof item === "string");
+      const named = path.flatMap((item) =>
+        isFileHandle(item) ? [item.path] : Array.isArray(item) ? item.map((file) => file.path) : [],
+      );
       const files = [...(patterns.length ? await glob(patterns) : []), ...named];
       const out = `${outputDir}/artifact.json`;
       const done = async (uploaded: UploadArtifactResponse, line: string) => {
@@ -674,7 +292,6 @@ export function uploadArtifact(graph: StepGraph, spec: UploadArtifactSpec): Node
         return out;
       };
       if (files.length === 0) {
-        const shown = path.map((entry) => described(entry, deps));
         const line = `No files were found with the provided path: ${shown.join(", ")}. No artifacts will be uploaded.`;
         if (ifNoFilesFound === "error") throw new Error(line);
         if (ifNoFilesFound === "warn") p.host.annotate("warning", spec.name, line);
@@ -701,5 +318,18 @@ export function uploadArtifact(graph: StepGraph, spec: UploadArtifactSpec): Node
       );
     },
   });
-  return step.addNode(graph, spec.deps ? { deps: spec.deps } : {});
+  return step.addNode(graph, {
+    ...(spec.deps && { deps: spec.deps }),
+    inputs: (refs) => {
+      const path = typeof spec.path === "function" ? spec.path(refs) : spec.path;
+      // A ref as the function named it: its dep's role and its output.
+      const roles = depRoles(spec.deps);
+      shown = path.map((item) =>
+        typeof item === "string"
+          ? item
+          : `${roles.find(([, dep]) => dep.name === item.node)?.[0] ?? item.node}.${item.output}`,
+      );
+      return { path };
+    },
+  });
 }

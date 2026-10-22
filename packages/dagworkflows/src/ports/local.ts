@@ -1,19 +1,15 @@
-import type { DagFs } from "@mrmeku/dagraph";
 import { dirname } from "node:path";
 import { stripVTControlCharacters } from "node:util";
-import type { Exec, Host } from "../ports.ts";
+import type { Host, Ports } from "../ports.ts";
 
 /**
  * Local adapter: the same reporter output as GitHub, rendered for a terminal. Groups become
  * indented blocks, annotations become tagged lines, and the summary is written to a file.
  * Context comes from git. This is what makes `bun run ci` on a laptop identical to the job.
  */
-export function createLocalHost(opts: {
-  exec: Exec;
-  fs: DagFs;
-  summaryPath: string;
-  write?: (line: string) => void;
-}): Host {
+export function createLocalHost(
+  opts: Pick<Ports, "exec" | "fs"> & { summaryPath: string; write?: (line: string) => void },
+): Host {
   const write = opts.write ?? ((line) => console.log(line));
   let written = false;
   const git = async (...args: string[]) => (await opts.exec.run(["git", ...args])).stdout.trim();

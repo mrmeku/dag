@@ -68,8 +68,6 @@ export const graphNodes = <Meta>(
   graph: Graph<unknown, Meta>,
 ): ReadonlyMap<string, GraphNode<Meta>> => stateOf(graph).nodes;
 
-const PARAMS = new Set(["name", "deps", "inputs", "meta"]);
-
 /** Add a node: its `params` as declared, and its own inputs, as given or as its function returns them. */
 export function addNode<R extends Outputs, Meta>(
   graph: Graph<unknown, Meta>,
@@ -81,14 +79,6 @@ export function addNode<R extends Outputs, Meta>(
   const own = params.name ?? spec.kind;
   const name = state.prefix ? `${state.prefix}:${own}` : own;
   const where = `node "${name}"`;
-  const extra = Object.keys(params).filter((k) => !PARAMS.has(k));
-  if (extra.length > 0)
-    throw new Error(
-      `${where}: params hold only name, deps, inputs and meta, not ${extra.join(", ")}. ` +
-        (extra.includes("kind")
-          ? "A kind is its action's: defineAction({ kind })."
-          : "What decides the output reaches the action as an input: inputs: { ... }."),
-    );
   if (state.nodes.has(name))
     throw new Error(
       `Duplicate node name "${name}". Names are unique in a graph: give the node a name of its ` +
@@ -100,7 +90,9 @@ export function addNode<R extends Outputs, Meta>(
   );
   for (const [role, ref] of roles)
     if (!state.nodes.has(ref.name))
-      throw new Error(`${where} depends on unknown node "${ref.name}" (deps.${role})`);
+      throw new Error(
+        `${where}: deps.${role} is "${ref.name}", which this graph does not hold. Add that node first.`,
+      );
   // Two roles may name one node: it is one dep, and required if either role requires it.
   const deps = [...new Set(roles.map(([, ref]) => ref.name))];
   const required = new Set(roles.filter(([, ref]) => !ref.settled).map(([, ref]) => ref.name));
@@ -109,7 +101,10 @@ export function addNode<R extends Outputs, Meta>(
   const ownInputs = checkInputs(inputsOf, where);
   const redeclared = Object.keys(ownInputs).filter((k) => Object.hasOwn(spec.inputs, k));
   if (redeclared.length > 0)
-    throw new Error(`${where}: inputs.${redeclared[0]} is declared by its action "${spec.kind}"`);
+    throw new Error(
+      `${where}: inputs.${redeclared[0]} is declared by its action "${spec.kind}". Give the ` +
+        `node's input another name.`,
+    );
   const inputs = { ...spec.inputs, ...ownInputs };
 
   const meta = params.meta === undefined ? state.meta : params.meta;

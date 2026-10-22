@@ -8,9 +8,9 @@
  *   saved under the release key whatever happened, so a re-run after a partial failure finds the
  *   receipts of what already published and skips it.
  * - checks: the same nodes as CI (scripts/checks.ts), so a tree CI already tested is a cache hit.
- * - pack: one tarball per package, a declared output under $DAG_OUT, content-addressed. One
- *   build program emits both packages, so each pack reads both packages' sources. The engine is
- *   published before the runner that depends on it.
+ * - pack: one tarball per package, a declared output, content-addressed. One build program emits
+ *   both packages, so each pack reads both packages' sources. The engine is published before the
+ *   runner that depends on it.
  * - publish: a receipt. Cached by the tarball it published and the command, so a re-run skips it;
  *   runs only after require-all. A dry run publishes with --dry-run: a different command, a
  *   different key, never confused with the real one. A prerelease version goes under the `next`
@@ -22,7 +22,7 @@
  *   whether or not require-all passes, so what a dry run or a failed publish would have shipped
  *   can be inspected.
  */
-import { defineWorkflow, type RunRef } from "@mrmeku/dagworkflows";
+import { defineWorkflow, settled, type NodeRef } from "@mrmeku/dagworkflows";
 import { addChecks } from "./checks.ts";
 
 type Pkg = "dagraph" | "dagworkflows";
@@ -51,10 +51,10 @@ export default defineWorkflow({
       "packages/*/README.md",
       ...TOOLCHAIN,
     );
-    const pack = (pkg: Pkg): RunRef<"tarball"> => {
+    const pack = (pkg: Pkg) => {
       const tarball = workflow.run({
         name: `pack:${pkg}`,
-        cmd: ["bun", "scripts/pack.ts", pkg, version, "$DAG_OUT"],
+        cmd: ({ outputDir }) => ["bun", "scripts/pack.ts", pkg, version, outputDir],
         outputs: { tarball: `mrmeku-${pkg}-${version}.tgz` },
         inputs: sources,
         ...afterCas,
@@ -62,19 +62,15 @@ export default defineWorkflow({
       workflow.uploadArtifact({
         name: `upload:${pkg}`,
         artifact: `${pkg}-${version}`,
-        path: [tarball.outputs.tarball],
+        path: ({ pack }) => [pack.tarball],
         deps: { pack: tarball },
       });
       return tarball;
     };
-    // In dependency order: the engine first.
-    const tarballs: Record<Pkg, RunRef<"tarball">> = {
-      dagraph: pack("dagraph"),
-      dagworkflows: pack("dagworkflows"),
-    };
+    const tarballs = { dagraph: pack("dagraph"), dagworkflows: pack("dagworkflows") };
     const bundle = workflow.run({
       name: "build:action",
-      cmd: [
+      cmd: ({ outputDir }) => [
         "bun",
         "build",
         "packages/dagworkflows/src/action/main.ts",
@@ -82,7 +78,7 @@ export default defineWorkflow({
         "--target=node",
         "--format=esm",
         "--outdir",
-        "$DAG_OUT",
+        outputDir,
       ],
       outputs: { main: "main.js", post: "post.js" },
       inputs: sources,
@@ -92,47 +88,46 @@ export default defineWorkflow({
     workflow.uploadArtifact({
       name: "upload:action",
       artifact: `action-${version}`,
-      path: [bundle.outputs.main, bundle.outputs.post],
+      path: ({ bundle }) => [bundle.main, bundle.post],
       deps: { bundle },
     });
 
-    const publish = (pkg: Pkg, engine?: RunRef): RunRef =>
+    const publish = (pkg: Pkg, after: { engine?: NodeRef }) =>
       workflow.run({
         name: `publish:${pkg}`,
-        cmd: [
+        cmd: ({ pack }) => [
           "npm",
           "publish",
-          tarballs[pkg].outputs.tarball,
+          pack.tarball,
           "--access",
           "public",
           ...(version.includes("-") ? ["--tag", "next"] : []),
           ...(dryRun ? ["--dry-run"] : []),
         ],
-        deps: { requireAll, pack: tarballs[pkg], ...(engine && { engine }) },
+        deps: { requireAll, pack: tarballs[pkg], ...after },
+        cacheable: true,
       });
-    const engine = publish("dagraph");
-    const published: Record<Pkg, RunRef> = {
-      dagraph: engine,
-      dagworkflows: publish("dagworkflows", engine),
-    };
+    const engine = publish("dagraph", {});
+    const published = { dagraph: engine, dagworkflows: publish("dagworkflows", { engine }) };
     const action = workflow.run({
       name: "release:action",
-      cmd: [
+      cmd: ({ bundle }) => [
         "bun",
         "scripts/release-action.ts",
         version,
-        bundle.outputs.main,
-        bundle.outputs.post,
+        bundle.main,
+        bundle.post,
         ...(dryRun ? ["--dry-run"] : []),
       ],
       deps: { requireAll, bundle },
+      cacheable: true,
     });
 
     const release = workflow.requireAll({ name: "release", deps: { ...published, action } });
     workflow.saveCache({
       name: "save:cas",
       cache: cas,
-      deps: { release: workflow.settled(release) },
+      deps: { release: settled(release) },
     });
     return { version, dryRun, release };
   },

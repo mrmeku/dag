@@ -3,14 +3,7 @@
  * from processing. Each node is processed on its own, in the order it was added, under `ports`
  * and a fresh cache, its deps' entries those of the nodes processed before it.
  */
-import {
-  MemCache,
-  namedOutput,
-  processNode,
-  type CacheEntry,
-  type Graph,
-  type Result,
-} from "@mrmeku/dagraph";
+import { MemCache, processNode, type CacheEntry, type Graph, type Result } from "@mrmeku/dagraph";
 import type { Ports } from "@mrmeku/dagworkflows";
 
 export const CAS = "/cas";
@@ -55,24 +48,3 @@ export async function processEach(
   }
   return processed;
 }
-
-/** What a run step's `result.json` says it ran: its command as configured, and its cwd. */
-export async function commandOf(
-  ports: Ports,
-  result: Result | undefined,
-): Promise<{ cmd: string[]; cwd: string } | undefined> {
-  if (result?.status !== "done") return undefined;
-  const path = namedOutput(result.outputs, "result");
-  const ran: unknown = JSON.parse(await ports.fs.readText(path));
-  if (!isCommand(ran)) throw new Error(`${path} is not a run step's result.json`);
-  return ran;
-}
-
-const isCommand = (value: unknown): value is { cmd: string[]; cwd: string } =>
-  typeof value === "object" &&
-  value !== null &&
-  "cmd" in value &&
-  Array.isArray(value.cmd) &&
-  value.cmd.every((arg) => typeof arg === "string") &&
-  "cwd" in value &&
-  typeof value.cwd === "string";

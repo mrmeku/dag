@@ -4,7 +4,7 @@ dagworkflows shows each run in the format that its reader needs:
 
 - **In a terminal**, a person watches the run live and reads each failure once.
 - **An AI agent** gets only the failures, in plain text, in a fixed budget of characters.
-- **On GitHub**, each step gets a log group, a check run and a line in the step summary.
+- **On GitHub**, each task gets a log group, a check run and a line in the step summary.
 
 All formats come from one store of the run. To draw a run in your own format, see [Run store API](api.md).
 
@@ -14,9 +14,9 @@ A local run selects one of three styles:
 
 | Style      | Selected when                                                                        | What it prints                                                                                   |
 | ---------- | ------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------ |
-| `live`     | stdout is a terminal.                                                                | One line for each step, a block for each failure, and a live footer.                             |
+| `live`     | stdout is a terminal.                                                                | One line for each task, a block for each failure, and a live footer.                             |
 | `failures` | An AI agent runs the command, as [std-env](https://github.com/unjs/std-env) detects. | The failure blocks and the recap, in approximately 10,000 characters. The rest is in the report. |
-| `grouped`  | The run is in CI or stdout is a pipe.                                                | The full log of each step, as GitHub groups it.                                                  |
+| `grouped`  | The run is in CI or stdout is a pipe.                                                | The full log of each task, as GitHub groups it.                                                  |
 
 To select a style, use `--output-style` or `DAG_OUTPUT_STYLE`.
 
@@ -28,7 +28,7 @@ dagworkflows removes color and other escape codes from the command output that `
 
 A local run writes only to the terminal's scrollback. It does not take the full screen.
 
-When a step finishes, `live` writes one line for it. When a step fails, `live` writes a block:
+When a task finishes, `live` writes one line for it. When a task fails, `live` writes a block:
 
 ```
 ✖︎ lint  exit 1 · 2.9s · 8 lines
@@ -50,11 +50,11 @@ The block holds these lines:
 2. The error, if the exit code does not explain the failure.
 3. The path of the log file.
 4. The command, in a format that a shell accepts.
-5. The command that runs the step again.
+5. The command that runs the task again.
 
 ### The footer
 
-Below the scrollback, a footer shows the steps that run now. For each step, it shows the time, the time of the last run, and the last line that the step printed. A step that did not start yet shows "checking cache". A step that waits shows why it waits.
+Below the scrollback, a footer shows the tasks that run now. For each task, it shows the time, the time of the last run, and the last line that the task printed. A task that did not start yet shows "checking cache". A task that waits shows why it waits.
 
 The footer is never taller than half the terminal, or `LIVE_MAX_ROWS` (8) rows. When the run ends, the footer goes away and the recap prints.
 
@@ -66,27 +66,27 @@ The footer has these limits:
 
 ### Which failure is the cause
 
-A step's failure is its own when the step ran its command. This is true also after a dependency that it takes with `workflow.settled` failed. A step that failed only because a dependency failed, for example `require-all`, shows under the failure that caused it. The skipped steps also show there.
+A task's failure is its own when the task ran its command. This is true also after a dependency that it takes with `settled` failed. A task that failed only because a dependency failed, for example `require-all`, shows under the failure that caused it. The skipped tasks also show there.
 
 ## Log files and the failures report
 
 Each local run writes two types of files, in all styles.
 
-**Log files.** dagworkflows writes the log of each step to `.dag/logs/<step>.log` as the step prints it. A `:` or `/` in a step name makes a directory. Use `tail -F` to follow a running step. These rules apply:
+**Log files.** dagworkflows writes the log of each task to `.dag/logs/<task>.log` as the task prints it. A `:` or `/` in a task name makes a directory. Use `tail -F` to follow a running task. These rules apply:
 
-- dagworkflows replaces a step's log file when the step starts.
-- When a step finishes without output, as a cache hit does, dagworkflows copies its log from the CAS.
-- The log files of steps outside the run stay.
+- dagworkflows replaces a task's log file when the task starts.
+- When a task finishes without output, as a cache hit does, dagworkflows copies its log from the CAS.
+- The log files of tasks outside the run stay.
 
 **The failures report.** `.dag/failures.md` is the file to give to a person or an agent that must fix the failures. For each failure, it holds:
 
 - the command, and the exit code or the error,
 - the log file and the last lines of the log,
 - the dependencies that also failed,
-- the steps that the failure caused to fail or skip,
-- the command that runs the step again.
+- the tasks that the failure caused to fail or skip,
+- the command that runs the task again.
 
-dagworkflows writes the report when each pass starts, when a step fails, and when the run ends. It also writes it when the run has an error, or when a second Ctrl-C stops the run.
+dagworkflows writes the report when each pass starts, when a task fails, and when the run ends. It also writes it when the run has an error, or when a second Ctrl-C stops the run.
 
 Use `--log-dir` and `--failures-report-file` to change these paths. `dag post` writes neither file.
 
@@ -94,16 +94,16 @@ Use `--log-dir` and `--failures-report-file` to change these paths. `dag post` w
 
 On GitHub, dagworkflows writes these items to the log:
 
-- A line when a step starts, with the duration of the step in the last run. Cached steps get no line.
-- One collapsible group for each step that ran. dagworkflows writes the group when the step finishes, so the output of parallel steps does not mix. The group holds stdout and stderr in the order that the command wrote them.
-- One line for each step that was skipped or cancelled.
+- A line when a task starts, with the duration of the task in the last run. Cached tasks get no line.
+- One collapsible group for each task that ran. dagworkflows writes the group when the task finishes, so the output of parallel tasks does not mix. The group holds stdout and stderr in the order that the command wrote them.
+- One line for each task that was skipped or cancelled.
 - An annotation for each failure.
 
 The runner reads the workflow commands in each log, as it does for a `run:` step. These rules apply:
 
-- dagworkflows does not cache logs. Thus a cached step on a new runner shows no log.
+- dagworkflows does not cache logs. Thus a cached task on a new runner shows no log.
 - If a command leaves `::stop-commands::` open, dagworkflows ends it at the end of the group, as GitHub does at the end of a step.
-- A step that a cancellation stopped shows the log that it wrote before it stopped.
+- A task that a cancellation stopped shows the log that it wrote before it stopped.
 
 ### The recap
 
@@ -116,11 +116,11 @@ skipped, dependency failed: deploy
 reproduce: npx --no dag run scripts/ci.ts --only test:unit
 ```
 
-The cause of a failure is a failed step that has no failed dependency. Above, `require-all` failed because `test:unit` failed. Thus the first line and the `reproduce` line name only `test:unit`.
+The cause of a failure is a failed task that has no failed dependency. Above, `require-all` failed because `test:unit` failed. Thus the first line and the `reproduce` line name only `test:unit`.
 
 ## Check runs
 
-dagworkflows makes one check run for each step, in the Checks tab of the pull request. The check runs update while the run continues, and each one links to the run's log.
+dagworkflows makes one check run for each task, in the Checks tab of the pull request. The check runs update while the run continues, and each one links to the run's log.
 
 Check runs need two things. If one is missing, dagworkflows makes no check runs and shows no error:
 
@@ -131,16 +131,16 @@ Check runs need two things. If one is missing, dagworkflows makes no check runs 
 
 The step summary is a list of renderers under the heading `## <workflow file>`. A renderer is a function. It gets the run's data, a `RunReport`, and it returns lines of Markdown. To draw nothing, it returns `[]`.
 
-The `RunReport` holds each step with its status, time, previous time, error and outputs. `log(name)` reads the log of a step.
+The `RunReport` holds each task with its status, time, previous time, error and outputs. `log(name)` reads the log of a task.
 
 | Renderer             | Draws                                                                                                                   |
 | -------------------- | ----------------------------------------------------------------------------------------------------------------------- |
 | `renderStatus`       | The result as a heading, then counts, wall time, parallelism, cache hits and the time they saved.                       |
-| `renderTimeline`     | A Gantt chart of the steps that ran.                                                                                    |
-| `renderCriticalPath` | The longest chain by time, of steps that took `CRITICAL_PATH_FLOOR_MS` (1 s) or more. If no step did, it draws nothing. |
+| `renderTimeline`     | A Gantt chart of the tasks that ran.                                                                                    |
+| `renderCriticalPath` | The longest chain by time, of tasks that took `CRITICAL_PATH_FLOOR_MS` (1 s) or more. If no task did, it draws nothing. |
 | `renderDag`          | The graph, colored by status.                                                                                           |
-| `renderFailures`     | The end of the log of each failed step, and a line for each skipped or cancelled step.                                  |
-| `renderTable`        | Each step, its status, its time and the change from the previous run.                                                   |
+| `renderFailures`     | The end of the log of each failed task, and a line for each skipped or cancelled task.                                  |
+| `renderTable`        | Each task, its status, its time and the change from the previous run.                                                   |
 
 `DEFAULT_SUMMARY_RENDERERS` holds all renderers except `renderTable`.
 
@@ -158,7 +158,7 @@ import {
   type RunReport,
 } from "@mrmeku/dagworkflows";
 
-// The steps that are slower than in the last run.
+// The tasks that are slower than in the last run.
 const renderSlower = (r: RunReport) => {
   const rows = r.nodes.flatMap((n) =>
     n.status === "done" && n.duration !== undefined && n.previous && n.duration > n.previous * 1.2
@@ -168,7 +168,7 @@ const renderSlower = (r: RunReport) => {
   return rows.length > 0 ? ["### slower than last run", "", ...rows] : [];
 };
 
-// The graph without the cache steps, in a folded section.
+// The graph without the cache tasks, in a folded section.
 const renderFoldedDag = (r: RunReport) => [
   "<details><summary>DAG</summary>",
   "",

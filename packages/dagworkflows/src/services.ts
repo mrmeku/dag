@@ -2,11 +2,9 @@
  * The toolkit's services as the CLI picks them, apart from cli.ts so that a test can load them on
  * any Node. On GitHub they are optional peer dependencies, loaded only when a service is there.
  */
-import type { ActionsArtifact, ActionsCache, Host } from "./ports.ts";
+import type { ActionsArtifact, ActionsCache, Host, Ports } from "./ports.ts";
 import { artifactServiceAvailable, nullActionsArtifact } from "./ports/actions-artifact.ts";
 import { nullActionsCache } from "./ports/actions-cache.ts";
-
-type Env = Record<string, string | undefined>;
 
 /**
  * A module of the actions toolkit, which the CLI loads on GitHub alone and the package lists as
@@ -32,7 +30,7 @@ export async function peer<T>(load: () => Promise<T>): Promise<T> {
  * not install the package; the toolkit's isFeatureAvailable decides once one is there. Locally
  * there is no service, so every restore misses.
  */
-export async function pickActionsCache(env: Env, host: Host): Promise<ActionsCache> {
+export async function pickActionsCache(env: Ports["env"], host: Host): Promise<ActionsCache> {
   if (env.GITHUB_ACTIONS !== "true") return nullActionsCache;
   if (env.ACTIONS_CACHE_URL || env.ACTIONS_RESULTS_URL) {
     const cache = await peer(() => import("@actions/cache"));
@@ -47,7 +45,7 @@ export async function pickActionsCache(env: Env, host: Host): Promise<ActionsCac
 }
 
 /** `@actions/artifact` likewise: the service takes the runtime token only the action receives. */
-export async function pickActionsArtifact(env: Env, host: Host): Promise<ActionsArtifact> {
+export async function pickActionsArtifact(env: Ports["env"], host: Host): Promise<ActionsArtifact> {
   if (env.GITHUB_ACTIONS !== "true") return nullActionsArtifact;
   if (artifactServiceAvailable(env)) {
     const { DefaultArtifactClient } = await peer(() => import("@actions/artifact"));

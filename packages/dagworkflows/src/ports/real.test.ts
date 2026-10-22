@@ -179,6 +179,31 @@ describe("createExec env", () => {
   });
 });
 
+describe("createExec spawn failure", () => {
+  test("a program that cannot be started resolves with code -1 and the spawn error's code, in Node's words under Bun too", async () => {
+    const streamed: string[] = [];
+    const missing = await createExec().run(["bash", "-c", "true"], {
+      env: { PATH: "/nonexistent" },
+      onOutput: (chunk) => streamed.push(chunk),
+    });
+    const badCwd = await createExec().run(["bash", "-c", "true"], { cwd: "/nonexistent-dir" });
+    assert.deepEqual(
+      { missing: { ...missing, streamed }, badCwd: badCwd.stderr },
+      {
+        missing: {
+          code: -1,
+          stdout: "",
+          stderr: "spawn bash ENOENT",
+          output: "spawn bash ENOENT",
+          ok: false,
+          streamed: ["spawn bash ENOENT"],
+        },
+        badCwd: "spawn bash ENOENT",
+      },
+    );
+  });
+});
+
 describe("abortOnSignals", () => {
   test("a second signal exits at once and kills what the running commands started", async () => {
     const dir = mkdtempSync(join(tmpdir(), "dag-signals-"));

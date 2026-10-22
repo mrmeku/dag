@@ -118,12 +118,6 @@ describe("declarations", () => {
     // Its type is a record's, so only the run-time check sees the class.
     const prompt: { readonly text: string } = new Prompt("clean");
     expect({
-      field: refusal(() =>
-        // @ts-expect-error: params hold no videoId
-        download.addNode(g, { inputs: { videoId: "v" }, videoId: "v" }),
-      ),
-      // @ts-expect-error: params hold no kind
-      kind: refusal(() => download.addNode(g, { inputs: { videoId: "v" }, kind: "dl" })),
       duplicate: refusal(() => download.addNode(g, { inputs: { videoId: "v3" } })),
       unknownDep: refusal(() => captions.addNode(g, { deps: { download: other } })),
       // Built at run time, so its type names no input: only the run-time check sees the repeat.
@@ -144,42 +138,32 @@ describe("declarations", () => {
         feed.addNode(g, { name: "s", deps: { dl }, inputs: ({ dl }) => ({ ...dl }) }),
       ),
     }).toEqual({
-      field:
-        'node "download": params hold only name, deps, inputs and meta, not videoId. What decides the output reaches the action as an input: inputs: { ... }.',
-      kind: 'node "download": params hold only name, deps, inputs and meta, not kind. A kind is its action\'s: defineAction({ kind }).',
       duplicate:
         'Duplicate node name "download". Names are unique in a graph: give the node a name of its own, or add it through graph.subgraph(prefix, meta).',
-      unknownDep: 'node "captions" depends on unknown node "v2:download" (deps.download)',
-      redeclared: 'node "n": inputs.version is declared by its action "versioned"',
+      unknownDep:
+        'node "captions": deps.download is "v2:download", which this graph does not hold. Add that node first.',
+      redeclared:
+        'node "n": inputs.version is declared by its action "versioned". Give the node\'s input another name.',
       inherited: "accepted",
-      nan: 'node "n": inputs.v.ratio is NaN',
-      infinity: 'node "n": inputs.v[0] is Infinity',
-      instance: 'node "n": inputs.v.prompt is a Prompt',
+      nan: 'node "n": inputs.v.ratio is NaN, which is not JSON. Give a finite number, or null.',
+      infinity:
+        'node "n": inputs.v[0] is Infinity, which is not JSON. Give a finite number, or null.',
+      instance:
+        'node "n": inputs.v.prompt is a Prompt, which is not JSON. Give a plain object of its fields: { ...prompt }.',
       listed: 'node "l": the refs of dl cannot be listed: name each output, as dl.<output>',
       spread: 'node "s": the refs of dl cannot be listed: name each output, as dl.<output>',
     });
   });
 
-  test("defineAction refuses config, normalize, a timeoutMs setTimeout does not honor, and NaN in its inputs", () => {
+  test("defineAction refuses a timeoutMs setTimeout does not honor, and NaN in its inputs", () => {
     const action = async () => "";
     const timeout = (timeoutMs: number) => () => defineAction({ kind: "t", timeoutMs, action });
     expect({
-      // @ts-expect-error: an action has a kind
-      noKind: refusal(() => defineAction({ action })),
-      // @ts-expect-error: config is gone
-      config: refusal(() => defineAction({ kind: "c", config: "v1", action })),
-      // @ts-expect-error: normalize is gone
-      normalize: refusal(() => defineAction({ kind: "n", normalize: () => ({}), action })),
       timeouts: [0, -1, 1.5, Number.NaN, Infinity, 2 ** 31, 1, 2 ** 31 - 1].map((t) =>
         refusal(timeout(t)).replace(/.*got /, "refused "),
       ),
       inputs: refusal(() => defineAction({ kind: "i", inputs: { ratio: Number.NaN }, action })),
     }).toEqual({
-      noKind: "defineAction: kind is required, the kind of work the action does",
-      config:
-        'action "c": config is gone: declare it in inputs (config: { version: 1 } becomes inputs: { version: 1 })',
-      normalize:
-        'action "n": normalize is gone: declare invalidateOn: { [role]: (outputs, ports) => fingerprint }',
       timeouts: [
         "refused 0",
         "refused -1",
@@ -190,7 +174,7 @@ describe("declarations", () => {
         "accepted",
         "accepted",
       ],
-      inputs: 'action "i": inputs.ratio is NaN',
+      inputs: 'action "i": inputs.ratio is NaN, which is not JSON. Give a finite number, or null.',
     });
   });
 });
@@ -308,6 +292,65 @@ describe("graphs", () => {
   });
 });
 
+describe("refs", () => {
+  test("a ref, a node's ref and a file input refuse every conversion to a string while the graph is built; the engine keys and resolves them without one", async () => {
+    const g = new Graph<Ports, Meta>();
+    const dl = download.addNode(g, { inputs: { videoId: "v1" } });
+    const conversions = (ref: unknown) => [
+      refusal(() => String(ref)),
+      refusal(() => JSON.stringify({ argv: [ref] })),
+      refusal(() => [ref].join(" ")),
+      refusal(() => `${ref}`),
+    ];
+    const read = defineActionWithPorts({
+      kind: "read",
+      deps: anyRole,
+      action: async (c) => {
+        const path = `${c.outputDir}/read.txt`;
+        await c.ports.fs.writeText(path, "read");
+        return path;
+      },
+    });
+    let output: string[] = [];
+    let settledOutput: string[] = [];
+    read.addNode(g, {
+      deps: { dl },
+      inputs: ({ dl }) => ((output = conversions(dl.audio)), { argv: ["play", dl.audio] }),
+    });
+    read.addNode(g, {
+      name: "settled read",
+      deps: { dl: settled(dl) },
+      inputs: ({ dl }) => ((settledOutput = conversions(dl.audio)), { argv: ["play", dl.audio] }),
+    });
+    const results = await execute(g, setup().ctx);
+    const audio =
+      'dl.audio can\'t be part of a string: its path exists only once "download" has run. ' +
+      "Make it its own array item or property: [..., dl.audio] or { audio: dl.audio }.";
+    const node = 'node "download" can\'t be part of a string. Put it in deps: deps: { download }.';
+    const settledNode =
+      'node "download" can\'t be part of a string. Put it in deps: ' +
+      "deps: { download: settled(download) }.";
+    const lockfile =
+      'file("bun.lock") can\'t be part of a string. Make it its own input: ' +
+      'inputs: { "bun.lock": file("bun.lock") }.';
+    expect({
+      output,
+      settledOutput,
+      node: conversions(dl),
+      settledNode: conversions(settled(dl)),
+      file: conversions(file("bun.lock")),
+      statuses: results.map((r) => r.status),
+    }).toEqual({
+      output: [audio, audio, audio, audio],
+      settledOutput: [audio, audio, audio, audio],
+      node: [node, node, node, node],
+      settledNode: [settledNode, settledNode, settledNode, settledNode],
+      file: [lockfile, lockfile, lockfile, lockfile],
+      statuses: ["done", "done", "done"],
+    });
+  });
+});
+
 /** Checked by the typechecker alone, never run: each line after a `@ts-expect-error` must not compile. */
 export function wrongDeclarationsDoNotCompile() {
   const g = new Graph<Ports, Meta>();
@@ -390,7 +433,7 @@ export function wrongDeclarationsDoNotCompile() {
   cmd.addNode(g, { inputs: { at: new Point(1) } });
   // @ts-expect-error undefined is no array item
   cmd.addNode(g, { inputs: { list: [1, undefined] } });
-  // @ts-expect-error a file() is a whole input, never part of a value
+  // @ts-expect-error a file() is its own input, never part of a value
   cmd.addNode(g, { inputs: { tools: { lock: file("bun.lock") } } });
   // @ts-expect-error a node is a dep, never a value
   cmd.addNode(g, { inputs: { tools: { dep: dl } } });
@@ -480,6 +523,27 @@ export function wrongDeclarationsDoNotCompile() {
     // @ts-expect-error a maybe role declared by its type, used as present: a node may leave it out
     action: async ({ depOutputs }) => depOutputs.summary.text(),
   });
+  // @ts-expect-error params hold no videoId: it is an input
+  download.addNode(g, { name: "p", inputs: { videoId: "v" }, videoId: "v" });
+  // @ts-expect-error params hold no kind: a kind is its action's
+  download.addNode(g, { name: "k", inputs: { videoId: "v" }, kind: "dl" });
+  cmd.addNode(g, {
+    name: "strings",
+    deps: { dl },
+    inputs: ({ dl }) => ({
+      // @ts-expect-error a ref in a template string (TS2731)
+      flag: `--file=${dl.audio}`,
+      // @ts-expect-error a ref with + (TS2469)
+      plus: "--file=" + dl.audio,
+    }),
+  });
+  // @ts-expect-error a node's ref in a template string (TS2731)
+  void `${dl}`;
+  // @ts-expect-error a node's ref where a string goes (TS2322)
+  const named: string = dl;
+  // @ts-expect-error a file input in a template string (TS2731)
+  void `--config=${file("eslint.config.ts")}`;
+  void named;
   // @ts-expect-error an action needing ports on a graph that gives none
   feed.addNode(new Graph(), {});
   // @ts-expect-error ports that do not satisfy the graph's

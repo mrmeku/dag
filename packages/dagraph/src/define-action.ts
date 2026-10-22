@@ -94,26 +94,16 @@ export type OutputOf<T> = T extends { readonly _T?: infer R extends Outputs } ? 
 /** A ref to a node of an action: `NodeRefOf<typeof fetch>`. */
 export type NodeRefOf<T> = NodeRef<OutputOf<T>>;
 
-const GONE: Record<string, string> = {
-  config:
-    "config is gone: declare it in inputs (config: { version: 1 } becomes inputs: { version: 1 })",
-  normalize: "normalize is gone: declare invalidateOn: { [role]: (outputs, ports) => fingerprint }",
-};
-
 function define<Ports, R, D, N extends InputRecord<unknown>, I extends InputRecord>(
   spec: ActionSpec<Ports, R, D, N, I>,
 ): Action<Ports, Extract<R, Outputs>, D, N, I> {
-  if (typeof spec.kind !== "string" || spec.kind === "")
-    throw new Error("defineAction: kind is required, the kind of work the action does");
   const where = `action "${spec.kind}"`;
-  for (const field of Object.keys(spec))
-    if (GONE[field]) throw new Error(`${where}: ${GONE[field]}`);
   const t = spec.timeoutMs;
   if (t !== undefined && !(Number.isInteger(t) && t > 0 && t <= MAX_TIMEOUT_MS))
     throw new RangeError(
       `${where}: timeoutMs must be a whole number of ms from 1 to ${MAX_TIMEOUT_MS}, got ${t}`,
     );
-  // eslint-disable-next-line @typescript-eslint/consistent-type-assertions -- a graph holds actions of many types as data, which erases each context's inputs, dep outputs and ports, and the brand of their file handles
+  // eslint-disable-next-line @typescript-eslint/consistent-type-assertions -- a graph holds actions of many types as data, which erases each context's inputs, dep outputs and ports
   const checked = { ...spec, inputs: checkInputs(spec.inputs, where) } as unknown as ErasedSpec;
   return {
     [DEP]: true,

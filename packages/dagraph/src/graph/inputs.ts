@@ -2,6 +2,7 @@ import type { CacheEntry } from "../cache.ts";
 import { errorMessage, isPlainObject } from "../utils.ts";
 import {
   isFileInput,
+  isIdentifier,
   isOutputRef,
   type InputRecord,
   type OutputRef,
@@ -13,11 +14,17 @@ import {
  * type sees is refused by its path: `NaN`, `Infinity`, and an object that is not plain.
  */
 function jsonValue(value: unknown, path: string): unknown {
-  if (typeof value === "number" && !Number.isFinite(value)) throw new Error(`${path} is ${value}`);
+  if (typeof value === "number" && !Number.isFinite(value))
+    throw new Error(`${path} is ${value}, which is not JSON. Give a finite number, or null.`);
   if (Array.isArray(value)) return value.map((item, i) => jsonValue(item, `${path}[${i}]`));
   if (typeof value !== "object" || value === null || isOutputRef(value)) return value;
-  if (!isPlainObject(value))
-    throw new Error(`${path} is a ${value.constructor?.name ?? "class instance"}`);
+  if (!isPlainObject(value)) {
+    const name = path.slice(path.lastIndexOf(".") + 1);
+    throw new Error(
+      `${path} is a ${value.constructor?.name ?? "class instance"}, which is not JSON. Give a ` +
+        `plain object of its fields${isIdentifier(name) ? `: { ...${name} }` : ""}.`,
+    );
+  }
   return Object.fromEntries(
     Object.entries(value)
       .filter(([, v]) => v !== undefined)
@@ -27,7 +34,7 @@ function jsonValue(value: unknown, path: string): unknown {
 
 /**
  * Inputs as declared, or as their function returns them, checked for what their type cannot
- * see. Returns a copy, so a later change to the caller's object keys nothing.
+ * see. Returns a copy, as the key reads it: a later change to the caller's object keys nothing.
  */
 export function checkInputs(
   inputs: InputRecord<unknown> | undefined | (() => InputRecord<unknown> | undefined),

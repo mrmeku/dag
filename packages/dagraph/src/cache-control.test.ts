@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 
 import { MemCache } from "./cache.ts";
 import { actionsFor } from "./define-action.ts";
-import { execute, type ExecuteOptions } from "./execute.ts";
+import { execute } from "./execute.ts";
 import { dep, Graph, nodeInputs, type ActionContext } from "./graph/index.ts";
 import { orchestrate } from "./orchestrate.ts";
 import { createMemoryDagFs, type MemoryDagFs } from "./ports/memory-fs.ts";
@@ -150,28 +150,6 @@ describe("cache control", () => {
         uploaded: "done",
       },
       changedRan: ["entry", "packaged", "source", "transcript", "uploaded"],
-    });
-  });
-
-  test("execute refuses v0.3.0's per-node forms, naming where a choice per node lives", async () => {
-    const { ports, ctx } = setup();
-    const refused = (options: ExecuteOptions) =>
-      execute(buildGraph(), ctx, options).then(
-        () => "accepted",
-        (e: Error) => e.message,
-      );
-    expect({
-      // @ts-expect-error: force is true or false
-      predicate: await refused({ force: (n: { kind: string }) => n.kind === "source" }),
-      // @ts-expect-error: execute takes no cacheOnly
-      cacheOnly: await refused({ cacheOnly: true }),
-      ran: ports.ran,
-    }).toEqual({
-      predicate:
-        "execute's force is true or false. A choice per node is an executor's: pass it in processNode's options.",
-      cacheOnly:
-        "execute takes no cacheOnly. A choice per node is an executor's: pass it in processNode's options.",
-      ran: [],
     });
   });
 

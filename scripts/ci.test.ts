@@ -1,5 +1,5 @@
 import { Graph } from "@mrmeku/dagraph";
-import { createTestPorts, type Ports } from "@mrmeku/dagworkflows";
+import { createTestPorts, createWorkflow, type Ports } from "@mrmeku/dagworkflows";
 import assert from "node:assert/strict";
 import { describe, test } from "node:test";
 import ci from "./ci.ts";
@@ -10,7 +10,7 @@ describe("ci workflow", () => {
     const build = async (ref: string) => {
       const { ports } = createTestPorts({ context: { ref } });
       const graph = new Graph<Ports>();
-      await ci.implementation(graph, ports, await ports.host.context());
+      await createWorkflow(graph, ports, await ports.host.context()).compose(ci);
       return { nodes: graph.describe(), processed: await processEach(graph, ports) };
     };
     const { nodes, processed } = await build("refs/pull/7/merge");

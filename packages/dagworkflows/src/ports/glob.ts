@@ -25,10 +25,6 @@ const withExcludes = (patterns: string[]) =>
  * The files matching any of `patterns` by `@actions/glob`'s rules, the ones `actions/cache`,
  * `actions/upload-artifact` and the `hashFiles()` expression match by, sorted and deduplicated,
  * as paths relative to the process cwd; the directories in `DEFAULT_EXCLUDES` are negated.
- * Hand the result to a node's `inputs` so the engine folds the files' content hashes into its
- * key. Declare only what the command reads: a node whose inputs are `src/**` does not re-run
- * when the README changes. A negation filters but does not prune, so root a pattern below
- * `node_modules`: `src/**` walks `src`, while `**` walks the whole tree.
  */
 export async function glob(patterns: string[]): Promise<string[]> {
   const globber = await create(withExcludes(patterns), { matchDirectories: false });
@@ -36,7 +32,7 @@ export async function glob(patterns: string[]): Promise<string[]> {
   return [...new Set((await globber.glob()).map((f) => relative(cwd, f)))].sort();
 }
 
-/** The `hashFiles()` expression of a workflow file, with the same excludes as `glob`: one hash over the matched files' contents, "" when none match. */
+/** The `hashFiles()` expression of a workflow file, without `glob`'s excludes: "" when none match. */
 export function hashFiles(patterns: string[]): Promise<string> {
-  return toolkitHashFiles(withExcludes(patterns));
+  return toolkitHashFiles(patterns.join("\n"));
 }

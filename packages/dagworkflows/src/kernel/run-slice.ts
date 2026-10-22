@@ -1,4 +1,4 @@
-import type { ExecEvent, Node, Outputs, Result } from "@mrmeku/dagraph";
+import type { ExecEvent, Node, Result } from "@mrmeku/dagraph";
 import { commandOf, type CommandCause } from "../step-records.ts";
 import {
   depFailedMessage,
@@ -33,20 +33,19 @@ export type InFlightNodeState = NodeLines & {
 };
 
 export type SucceededNodeState = NodeLines &
-  LogRead & {
-    readonly status: "done" | "cached";
+  LogRead &
+  Readonly<
+    Pick<Extract<Result, { status: "done" | "cached" }>, "status" | "actionKey" | "outputs">
+  > & {
     readonly startedAt: number;
     readonly endedAt: number;
-    readonly actionKey: string;
-    readonly outputs: Outputs;
   };
 
 export type FailedNodeState = NodeLines &
-  LogRead & {
-    readonly status: "failed";
+  LogRead &
+  Readonly<Pick<Extract<Result, { status: "failed" }>, "status" | "actionKey">> & {
     readonly startedAt: number;
     readonly endedAt: number;
-    readonly actionKey: string;
     readonly error: string;
     readonly timedOut: boolean;
     /** A failed command, from its error's cause. */
@@ -61,11 +60,10 @@ export type SkippedNodeState = NodeLines &
 
 /** Dispatched or not; `actionKey` is "" for one cancelled before it had one. */
 export type CancelledNodeState = NodeLines &
-  LogRead & {
-    readonly status: "cancelled";
+  LogRead &
+  Readonly<Pick<Extract<Result, { status: "cancelled" }>, "status" | "actionKey">> & {
     readonly startedAt?: number;
     readonly endedAt: number;
-    readonly actionKey: string;
   };
 
 export type SettledNodeState =

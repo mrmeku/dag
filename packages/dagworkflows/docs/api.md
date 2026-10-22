@@ -21,7 +21,7 @@ process.exitCode = await runJob(
 
 ## The store
 
-`createRunStore` follows Redux. `runReducer` is the only writer of the `RunState`: it turns each action (an event of the engine, a step's output among them, a pass that begins, a cancellation) into a new state, with a `NodeState` for each step. After each action the store tells its listeners. `store.getState()` returns the state, and `selectors` derives values from it, such as `selectors.nodesInFlight(store.getState())`.
+`createRunStore` follows Redux. `runReducer` is the only writer of the `RunState`: it turns each action (an event of the engine, a task's output among them, a pass that begins, a cancellation) into a new state, with a `NodeState` for each task. After each action the store tells its listeners. `store.getState()` returns the state, and `selectors` derives values from it, such as `selectors.nodesInFlight(store.getState())`.
 
 A `NodeState` is a union on `status`: each variant has only the fields its status can have, so a `FailedNodeState` has an `error` and a `PendingNodeState` has no times. When a command fails, the `FailedNodeState` holds the command as `command`. This value comes from the `cause` of the error, a `CommandCause`: the arguments, the `cwd` and the exit status.
 
@@ -42,17 +42,17 @@ A `RunListener` can have these functions. All are optional.
 | Event              | When                                                            | Gets                                                                   |
 | ------------------ | --------------------------------------------------------------- | ---------------------------------------------------------------------- |
 | `begin`            | A pass starts.                                                  | The pass, the run, and `isFirstPass`: true for the store's first pass. |
-| `start`            | A step starts.                                                  | The step's state and the run.                                          |
-| `settle`           | A step finishes, after dagworkflows reads its log from the CAS. | The step's state, the run and the log.                                 |
+| `start`            | A task starts.                                                  | The task's state and the run.                                          |
+| `settle`           | A task finishes, after dagworkflows reads its log from the CAS. | The task's state, the run and the log.                                 |
 | `finish`           | A pass ends.                                                    | The pass and its `NodeReport`s, which the step summary draws.          |
 | `close`            | The run ends.                                                   | The run, whose `lifecycle` says how it ended.                          |
 | `interrupt`        | The process exits by force.                                     | The run.                                                               |
-| `immediate.start`  | A step starts, immediately.                                     | The step's state.                                                      |
-| `immediate.output` | A step prints a complete line, immediately.                     | The step's state and the new lines.                                    |
+| `immediate.start`  | A task starts, immediately.                                     | The task's state.                                                      |
+| `immediate.output` | A task prints a complete line, immediately.                     | The task's state and the new lines.                                    |
 
 ### Order
 
-`begin`, `start`, `settle` and `finish` come in the order that the events occurred. Each gets the step as its event left it, and the run as it is at that time. A pass does not begin before all `settle` events of the last pass.
+`begin`, `start`, `settle` and `finish` come in the order that the events occurred. Each gets the task as its event left it, and the run as it is at that time. A pass does not begin before all `settle` events of the last pass.
 
 A post pass that has no work begins but does not finish. It has no banner, so it prints nothing.
 
@@ -66,10 +66,10 @@ A post pass that has no work begins but does not finish. It has no banner, so it
 
 These functions run inside the engine's event and the command's `data` listener. If one throws an error, the run fails, as for the ordered events. The command's stream does not break.
 
-A line that the command did not end yet is the step's `unfinishedLine`. `unfinishedLine` keeps only the text after the last carriage return, as a terminal shows it. Thus a progress bar costs only its last line.
+A line that the command did not end yet is the task's `unfinishedLine`. `unfinishedLine` keeps only the text after the last carriage return, as a terminal shows it. Thus a progress bar costs only its last line.
 
 ## The last run
 
-`run.lastRunDurations` holds the time of each step in the last run. It comes from `last-run.json` in the CAS directory.
+`run.lastRunDurations` holds the time of each task in the last run. It comes from `last-run.json` in the CAS directory.
 
-The store reads this file before it first writes it, because a step can restore the CAS that holds it. To read it when the run begins, set `lastRunAtBegin`.
+The store reads this file before it first writes it, because a task can restore the CAS that holds it. To read it when the run begins, set `lastRunAtBegin`.

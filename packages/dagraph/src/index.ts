@@ -17,6 +17,7 @@ export {
 export { execute, type ExecuteOptions } from "./execute.ts";
 export {
   Graph,
+  checkInputs,
   closure,
   dep,
   file,
@@ -25,13 +26,19 @@ export {
   maybe,
   namedOutput,
   nodeInputs,
+  nodeRefNamed,
+  notAString,
+  requiredDeps,
   settled,
   soleOutput,
 } from "./graph/index.ts";
 export type {
   ActionContext,
   Dep,
+  DepRecord,
+  DepRefs,
   DepSpecs,
+  DepSpecsOf,
   FileHandle,
   FileInput,
   Handles,
@@ -40,7 +47,9 @@ export type {
   InvalidateOn,
   Node,
   NodeInputsSpec,
+  NodeParams,
   NodeRef,
+  NotAString,
   OutputRef,
   Outputs,
   SettledDep,

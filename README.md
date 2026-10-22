@@ -4,8 +4,8 @@ Two packages for running work as a directed acyclic graph, with content-addresse
 
 | package                                         | what it is                                                                                                                                                |
 | ----------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| [`@mrmeku/dagraph`](packages/dagraph)           | The engine: a graph of file-producing actions, executed in parallel, cached by the hash of each action's config, inputs and dependency outputs.           |
-| [`@mrmeku/dagworkflows`](packages/dagworkflows) | A CI runner on the engine: write a job as a graph of steps, run it on GitHub Actions or on your laptop from the same file, with `actions/cache` as nodes. |
+| [`@mrmeku/dagraph`](packages/dagraph)           | The engine: a graph of file-producing actions, executed in parallel, cached by the hash of each node's inputs and dependency outputs.                     |
+| [`@mrmeku/dagworkflows`](packages/dagworkflows) | A CI runner on the engine: write a job as a graph of tasks, run it on GitHub Actions or on your laptop from the same file, with `actions/cache` as nodes. |
 
 The GitHub action is published to [`mrmeku/dagworkflows`](https://github.com/mrmeku/dagworkflows):
 

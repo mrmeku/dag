@@ -1,6 +1,7 @@
-import { closure, settled, type Graph } from "@mrmeku/dagraph";
+import { closure, nodeRefNamed, settled, type Graph } from "@mrmeku/dagraph";
 import type { Ports } from "./ports.ts";
 import { postsOf, recordPost } from "./steps.ts";
+import { depRoles } from "./task.ts";
 
 /**
  * The subgraph needed to run `names`: the engine's `closure` of those nodes, and the post steps of
@@ -39,9 +40,7 @@ export function selectNodes(graph: Graph<Ports>, names: string[]): Graph<Ports> 
     }
     if (!keep.has(post.main) || !post.refs.every((d) => keep.has(d))) continue;
     keep.add(name);
-    const directDeps = Object.entries(post.deps).flatMap(([role, ref]) =>
-      ref && keep.has(ref.name) ? [[role, ref] as const] : [],
-    );
+    const directDeps = depRoles(post.deps).filter(([, ref]) => keep.has(ref.name));
     const direct = Object.fromEntries(directDeps);
     const directNames = directDeps.map(([, ref]) => ref.name);
     const seen = new Set<string>();
@@ -51,7 +50,7 @@ export function selectNodes(graph: Graph<Ports>, names: string[]): Graph<Ports> 
       .filter((d) => !directNames.includes(d));
     const deps = {
       ...direct,
-      ...Object.fromEntries(through.map((d) => [`only:${d}`, settled({ name: d })])),
+      ...Object.fromEntries(through.map((d) => [`only:${d}`, settled(nodeRefNamed(d))])),
     };
     post.addTo(out, name, deps);
     recordPost(out, name, { ...post, deps });

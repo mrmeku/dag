@@ -11,7 +11,7 @@ Set Theme "Catppuccin Mocha"
 Set TypingSpeed 40ms
 
 Hide
-Type "export PS1='$ ' DAG_OUTPUT_STYLE=live D=$(mktemp -d) M=$PWD/docs/media; mkdir -p $D/scripts $D/bin $D/node_modules/.bin; ln -s $M/demo-workflow.ts $D/scripts/ci.ts; ln -s $PWD/src/cli.ts $D/node_modules/.bin/dag; for t in npm tsc eslint vitest; do ln -s $M/fake-tool.sh $D/bin/$t; done; export PATH=$D/bin:$PATH; cd $D; git init -qb main; git commit -q --allow-empty -m init; clear"
+Type "export PS1='$ ' DAG_OUTPUT_STYLE=live D=$(mktemp -d) M=$PWD/docs/media; mkdir -p $D/scripts $D/src $D/bin $D/node_modules/.bin; echo '{}' > $D/package-lock.json; echo '{}' > $D/tsconfig.json; echo 'export {};' > $D/src/index.ts; ln -s $M/demo-workflow.ts $D/scripts/ci.ts; ln -s $PWD/src/cli.ts $D/node_modules/.bin/dag; for t in npm tsc eslint vitest; do ln -s $M/fake-tool.sh $D/bin/$t; done; export PATH=$D/bin:$PATH; cd $D; git init -qb main; git commit -q --allow-empty -m init; clear"
 Enter
 Show
 

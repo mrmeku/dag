@@ -61,8 +61,8 @@ The action has its own copy of `@mrmeku/dagworkflows`. Thus the workflow file lo
 
 | Code | `run`                                       | `post`                                   |
 | ---- | ------------------------------------------- | ---------------------------------------- |
-| 0    | All steps succeeded or came from the cache. | All post steps that it ran succeeded.    |
-| 1    | A step did not succeed.                     | A post step that it ran did not succeed. |
+| 0    | All tasks succeeded or came from the cache. | All post steps that it ran succeeded.    |
+| 1    | A task did not succeed.                     | A post step that it ran did not succeed. |
 | 130  | The run was cancelled.                      |                                          |
 
 The action uses the same codes.
@@ -73,11 +73,11 @@ The action uses the same codes.
 
 | Path                      | Content                                                                                                                                  |
 | ------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------- |
-| `.dag/cas/`               | The outputs of each step, by cache key. Cache this directory between runs.                                                               |
-| `.dag/cas.logs/<key>.log` | The log of each step, next to the CAS and not in it. Never cache it.                                                                     |
-| `.dag/cas/last-run.json`  | The time of each step in the last run. The footer and the step summary compare with it.                                                  |
-| `.dag/history/`           | The history of each run: each step that finished, with the run's lock. `dag post`, the action's `post` entry and the next run read them. |
-| `.dag/logs/`              | Local runs only: the log of each step, while it runs.                                                                                    |
+| `.dag/cas/`               | The outputs of each task, by cache key. Cache this directory between runs.                                                               |
+| `.dag/cas.logs/<key>.log` | The log of each task, next to the CAS and not in it. Never cache it.                                                                     |
+| `.dag/cas/last-run.json`  | The time of each task in the last run. The footer and the step summary compare with it.                                                  |
+| `.dag/history/`           | The history of each run: each task that finished, with the run's lock. `dag post`, the action's `post` entry and the next run read them. |
+| `.dag/logs/`              | Local runs only: the log of each task, while it runs.                                                                                    |
 | `.dag/failures.md`        | Local runs only: the report of the failures.                                                                                             |
 | `.dag/summary.md`         | Local runs only: the step summary that GitHub would show.                                                                                |
 

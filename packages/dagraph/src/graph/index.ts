@@ -1,4 +1,5 @@
 export { Graph, addNode, closure, graphNodes, type GraphNode } from "./graph.ts";
+export { checkInputs } from "./inputs.ts";
 export {
   dep,
   file,
@@ -8,6 +9,8 @@ export {
   maybe,
   namedOutput,
   nodeInputs,
+  nodeRefNamed,
+  notAString,
   requiredDeps,
   settled,
   soleOutput,
@@ -15,7 +18,10 @@ export {
 export type {
   ActionContext,
   Dep,
+  DepRecord,
+  DepRefs,
   DepSpecs,
+  DepSpecsOf,
   FileHandle,
   FileInput,
   Handles,
@@ -27,6 +33,7 @@ export type {
   NodeInputsSpec,
   NodeParams,
   NodeRef,
+  NotAString,
   OutputRef,
   Outputs,
   SettledDep,

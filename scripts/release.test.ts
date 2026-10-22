@@ -2,13 +2,14 @@ import { Graph, namedOutput, soleOutput } from "@mrmeku/dagraph";
 import {
   createMemoryActionsCache,
   createTestPorts,
+  createWorkflow,
   okExec,
   type Ports,
 } from "@mrmeku/dagworkflows";
 import assert from "node:assert/strict";
 import { basename } from "node:path";
 import { describe, test } from "node:test";
-import { commandOf, processEach } from "./process-each.ts";
+import { processEach } from "./process-each.ts";
 import release from "./release.ts";
 
 describe("release workflow", () => {
@@ -22,26 +23,25 @@ describe("release workflow", () => {
         actionsCache,
         exec: {
           run: async (cmd, opts) => {
-            const out = opts?.env?.["DAG_OUT"];
-            assert.ok(out, "the step's DAG_OUT");
-            const [, script, pkg, version] = cmd;
-            if (script === "scripts/pack.ts") {
-              assert.ok(pkg, "the package pack.ts packs");
-              await fs.writeText(`${out}/mrmeku-${pkg}-${version}.tgz`, pkg);
-            }
-            if (cmd[1] === "build")
-              for (const file of ["main.js", "post.js"]) await fs.writeText(`${out}/${file}`, file);
+            const [, script, pkg, version, dir] = cmd;
+            if (script === "scripts/pack.ts" && pkg)
+              await fs.writeText(`${dir}/mrmeku-${pkg}-${version}.tgz`, pkg);
+            if (script === "build")
+              for (const file of ["main.js", "post.js"])
+                await fs.writeText(`${cmd[cmd.indexOf("--outdir") + 1]}/${file}`, file);
             return okExec.run(cmd, opts);
           },
         },
       });
       const graph = new Graph<Ports>();
-      const out = await release.implementation(graph, ports, await ports.host.context());
+      const out = await createWorkflow(graph, ports, await ports.host.context()).compose(release);
       const processed = await processEach(graph, ports);
       const resultOf = (name: string) => processed.get(name)?.result;
-      const cmdOf = async (name: string) => (await commandOf(ports, resultOf(name)))?.cmd;
       // What a step ran, its deps' outputs resolved to their paths in the CAS.
-      const ran = (name: string) => processed.get(name)?.commands[0];
+      const ran = (name: string) =>
+        processed
+          .get(name)
+          ?.commands[0]?.map((arg) => arg.replace(/^\/cas\/\w+\/tmp-[\w-]+$/, "<outputDir>"));
       const output = (name: string, key: string) => {
         const result = resultOf(name);
         assert.ok(result?.status === "done", `${name} is done`);
@@ -54,7 +54,6 @@ describe("release workflow", () => {
         ...out,
         processed,
         resultOf,
-        cmdOf,
         ran,
         output,
         restored: restored?.status === "done" && (await parsed(soleOutput(restored.outputs))),
@@ -80,7 +79,7 @@ describe("release workflow", () => {
         names: tagged.nodes.map((n) => n.name).sort(),
         restored: [tagged.restored, branch.restored],
         saved: [tagged.saved, branch.saved],
-        packCmd: await tagged.cmdOf("pack:dagraph"),
+        packCmd: tagged.ran("pack:dagraph"),
         packOutputs:
           pack?.status === "done" &&
           Object.entries(pack.outputs).map(([output, path]) => [output, basename(String(path))]),
@@ -129,11 +128,8 @@ describe("release workflow", () => {
           [["dag-release-1.2.3-abc1234def", [".dag/cas"]]],
           [["dag-release-0.0.0-dev.abc1234-abc1234def", [".dag/cas"]]],
         ],
-        packCmd: ["bun", "scripts/pack.ts", "dagraph", "1.2.3", "$DAG_OUT"],
-        packOutputs: [
-          ["result", "result.json"],
-          ["tarball", "mrmeku-dagworkflows-1.2.3.tgz"],
-        ],
+        packCmd: ["bun", "scripts/pack.ts", "dagraph", "1.2.3", "<outputDir>"],
+        packOutputs: [["tarball", "mrmeku-dagworkflows-1.2.3.tgz"]],
         packInputs: true,
         publishCmd: [
           "npm",

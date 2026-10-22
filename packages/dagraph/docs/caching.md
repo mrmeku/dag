@@ -120,7 +120,7 @@ A constant fingerprint, `() => ""`, makes a node wait for a dependency but keeps
 
 ## Run again
 
-`execute`'s `force` option is `true` or `false`. `true` runs every node of the execution, also when it is in the cache, and writes the new entries. `execute` refuses a `force` that is not `true` or `false`, and a `cacheOnly` option.
+`execute`'s `force` option is `true` or `false`. `true` runs every node of the execution, also when it is in the cache, and writes the new entries.
 
 To force some nodes and not others, or to look nodes up without running them (`cacheOnly`), use an executor that chooses for each node. See [Executors](executors.md#choose-for-each-node). The dependents of a forced node run again only if its outputs changed.
 

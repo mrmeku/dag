@@ -1,9 +1,9 @@
 import { Graph } from "@mrmeku/dagraph";
 import assert from "node:assert/strict";
 import { describe, test } from "node:test";
+import { run } from "./commands.ts";
 import type { Ports } from "./ports.ts";
 import { selectNodes } from "./select.ts";
-import { run } from "./steps.ts";
 
 describe("selectNodes", () => {
   test("keeps the requested nodes and their transitive deps only", () => {

@@ -1,3 +1,4 @@
+import { settled } from "@mrmeku/dagraph";
 import assert from "node:assert/strict";
 import { describe, test } from "node:test";
 import type { ExecResult } from "../ports.ts";
@@ -37,7 +38,7 @@ describe("GitHub renderer", () => {
         const slow = workflow.run({
           name: "slow",
           cmd: ["slow"],
-          deps: { lint: workflow.settled(lint) },
+          deps: { lint: settled(lint) },
           cacheable: false,
         });
         workflow.run({ name: "after", cmd: ["after"], deps: { slow } });
@@ -66,7 +67,10 @@ describe("GitHub renderer", () => {
         log: [
           { title: "ci.ts · 3 nodes", lines: ["lint", "slow", "after"] },
           "▷ lint",
-          { title: "✖︎ lint (1.0s)", lines: ["src/a.ts: error", "── error ──", "lint exited 1"] },
+          {
+            title: "✖︎ lint (1.0s)",
+            lines: ["src/a.ts: error", "── error ──", "lint exited 1"],
+          },
           "▷ slow",
           { title: "◼︎ slow (cancelled)", lines: ["compiling"] },
           "◼︎ after: cancelled",

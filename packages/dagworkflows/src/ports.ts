@@ -19,7 +19,8 @@ export interface ExecResult {
  * `env` is merged over the inherited environment, and an `undefined` value removes a variable.
  * When `signal` fires the command is interrupted (SIGINT, then SIGTERM, then SIGKILL after the
  * grace periods in config.ts) and resolves with its exit status as usual. `onOutput` receives
- * `output` as it arrives, chunk by chunk.
+ * `output` as it arrives, chunk by chunk. A program that cannot start resolves with code -1 and
+ * `spawn <program> <error code>` as both `stderr` and `output`: `spawn bash ENOENT`.
  */
 export interface Exec {
   run: (
@@ -121,5 +122,5 @@ export interface Ports {
    * The process's environment: `process.env` in the CLI and the action. Nothing in this package
    * reads it; createExec merges a command's `env` over `process.env` itself.
    */
-  env: Readonly<Record<string, string | undefined>>;
+  env: Readonly<NodeJS.ProcessEnv>;
 }

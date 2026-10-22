@@ -5,9 +5,10 @@ import {
   Graph,
   orchestrate,
   processNode,
+  requiredDeps,
   throttledScheduler,
+  type ExecuteOptions,
   type Result,
-  type ThrottledSchedulerOptions,
 } from "@mrmeku/dagraph";
 import type { EventEmitter } from "node:events";
 import { resolve } from "node:path";
@@ -27,7 +28,7 @@ import type { CiContext, Ports } from "./ports.ts";
 import { finishPass } from "./reporter.ts";
 import { selectNodes } from "./select.ts";
 import { postNodes } from "./steps.ts";
-import type { SummaryRenderer } from "./summary.ts";
+import type { WorkflowDef } from "./workflow.ts";
 
 /** An implementation adds nodes to the graph; the ref/event come in `ctx` for conditionals. */
 export type Implementation<R = unknown> = (
@@ -36,26 +37,24 @@ export type Implementation<R = unknown> = (
   ctx: CiContext,
 ) => Promise<R>;
 
-export interface RunOptions {
-  implementation: Implementation;
-  /** The workflow file as given: named in the summary's heading and in the log's reproduce line. */
-  workflowFile?: string;
-  ports: Ports;
-  casBaseDir: string;
-  /** The directory where each run writes its history; the post pass reads them. */
-  historyDir?: string;
-  force?: boolean;
-  only?: string[];
-  schedulerOptions?: ThrottledSchedulerOptions;
-  /** The step summary's renderers, top to bottom; the post pass draws its owed steps with the same. */
-  summary?: readonly SummaryRenderer[];
-  /** Cancels the run: waiting nodes settle as cancelled, running commands are interrupted. */
-  signal?: AbortSignal;
-  /** The command that reruns the workflow; RERUN_COMMAND and the file by default. */
-  rerunCommand?: string;
-  /** What the passes report to: the GitHub renderer on `ports.host` unless given. */
-  store?: RunStore;
-}
+/**
+ * A run's options: its workflow's `implementation`, `schedulerOptions` and `summary` (the post pass
+ * draws with the same), `execute`'s `force` and `signal`, and these.
+ */
+export type RunOptions = Pick<ExecuteOptions, "force" | "signal"> &
+  Pick<WorkflowDef, "implementation" | "schedulerOptions" | "summary"> & {
+    /** The workflow file as given: named in the summary's heading and in the log's reproduce line. */
+    workflowFile?: string;
+    ports: Ports;
+    casBaseDir: string;
+    /** The directory where each run writes its history; the post pass reads them. */
+    historyDir?: string;
+    only?: string[];
+    /** The command that reruns the workflow; RERUN_COMMAND and the file by default. */
+    rerunCommand?: string;
+    /** What the passes report to: the GitHub renderer on `ports.host` unless given. */
+    store?: RunStore;
+  };
 
 type PostOptions = Omit<RunOptions, "force" | "signal">;
 
@@ -98,7 +97,7 @@ function owedPosts(graph: Graph<Ports>, history: RunHistory): Set<string> {
   for (const node of graph.describe()) {
     const status = history[node.name]?.status;
     const pending = status === undefined || status === "cancelled";
-    const required = node.deps.filter((d) => !node.settledDeps?.includes(d));
+    const required = requiredDeps(node);
     if (posts.has(node.name) && pending && required.every((d) => finished(d) || owed.has(d)))
       owed.add(node.name);
   }

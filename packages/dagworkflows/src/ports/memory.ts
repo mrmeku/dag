@@ -86,14 +86,11 @@ export function createMemoryLockfile(): MemoryLockfile {
 
 /** Ports built from doubles: the one fixture every dagworkflows test starts from. */
 export function createTestPorts(
-  opts: {
+  opts: Partial<Pick<Ports, "exec" | "clock" | "env">> & {
     files?: Record<string, string>;
-    exec?: Exec;
-    clock?: Clock;
     actionsCache?: MemoryActionsCache;
     actionsArtifact?: MemoryActionsArtifact;
     context?: Partial<CiContext>;
-    env?: Record<string, string | undefined>;
   } = {},
 ): {
   ports: Ports;

@@ -1,12 +1,20 @@
 // The toolkit's own type for `UploadArtifactSpec.options`, so a published declaration can name it.
 export type { UploadArtifactOptions } from "@actions/artifact";
 export {
+  file,
+  settled,
+  type NodeRef,
+  type OutputRef,
+  type SettledOutputRef,
+  type SettledRef,
+} from "@mrmeku/dagraph";
+export type { PostSpec, RunShellSpec, RunSpec } from "./commands.ts";
+export {
   DEFAULT_CAS_DIR,
   DEFAULT_EXCLUDES,
   DEFAULT_HISTORY_DIR,
   DEFAULT_SUMMARY_PATH,
 } from "./config.ts";
-export { defineStep } from "./define-step.ts";
 export {
   createRunHistory,
   readRunHistory,
@@ -80,15 +88,9 @@ export {
   hashFiles,
   logPath,
   postNodes,
-  refToken,
   type CommandCause,
-  type OutputRef,
-  type PostSpec,
   type RestoreCacheRef,
   type RestoreCacheSpec,
-  type RunOutputs,
-  type RunRef,
-  type RunSpec,
   type UploadArtifactSpec,
 } from "./steps.ts";
 export {
@@ -102,6 +104,7 @@ export {
   type RunReport,
   type SummaryRenderer,
 } from "./summary.ts";
+export type { TaskSpec } from "./task.ts";
 export {
   createWorkflow,
   defineWorkflow,

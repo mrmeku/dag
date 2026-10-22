@@ -31,19 +31,42 @@ export const FILE_HANDLE: unique symbol = Symbol.for("@mrmeku/dagraph/FileHandle
 export const DEP: unique symbol = Symbol.for("@mrmeku/dagraph/Dep");
 export const NODE_INPUTS: unique symbol = Symbol.for("@mrmeku/dagraph/NodeInputs");
 
+/**
+ * A value that is never part of a string. It is typed as a symbol, which TypeScript refuses in a
+ * template string, with `+`, and where a string goes.
+ */
+export type NotAString = { toString: never; valueOf: never } & symbol;
+
+/**
+ * `value` itself, made a value that is never part of a string: each conversion to a string throws
+ * `refusal`, and its type is NotAString, so TypeScript refuses it in a template string or with `+`.
+ */
+export function notAString<T extends object>(value: T, refusal: string): T & NotAString {
+  const refuse = () => {
+    throw new TypeError(refusal);
+  };
+  for (const key of ["toString", "valueOf", "toJSON", Symbol.toPrimitive])
+    Object.defineProperty(value, key, { value: refuse });
+  // eslint-disable-next-line @typescript-eslint/consistent-type-assertions -- NotAString types an object as a symbol, which no object is
+  return value as T & NotAString;
+}
+
+/** Whether `name` is a key as code writes it bare, so a fix can show `{ name }`. */
+export const isIdentifier = (name: string) => /^[A-Za-z_$][\w$]*$/.test(name);
+
 /** Handle to a node, returned by `addNode`. `T` is its action's output type. */
-export interface NodeRef<T extends Outputs = Outputs> {
+export type NodeRef<T extends Outputs = Outputs> = {
   readonly name: string;
   readonly settled?: false;
   readonly _T?: T;
-}
+} & NotAString;
 
 /** A dep its node runs without when it does not succeed, as `Promise.allSettled` waits. */
-export interface SettledRef<T extends Outputs = Outputs> {
+export type SettledRef<T extends Outputs = Outputs> = {
   readonly name: string;
   readonly settled: true;
   readonly _T?: T;
-}
+} & NotAString;
 
 /**
  * A ref to one output of a required dep, which a node's `inputs` function receives by the dep's
@@ -52,27 +75,27 @@ export interface SettledRef<T extends Outputs = Outputs> {
  * role it points through and the output's name. `S` is the scope of the call that received it:
  * the ref goes only in what that call returns, so another node's ref does not compile.
  */
-export interface OutputRef<T extends string | string[] = string | string[], S = unknown> {
+export type OutputRef<T extends string | string[] = string | string[], S = unknown> = {
   readonly [OUTPUT_REF]: true;
   readonly node: string;
   readonly output: string;
   readonly settled: false;
   readonly _T?: T;
   readonly _scope?: S;
-}
+} & NotAString;
 
 /**
  * A ref to one output of a `settled` dep, which resolves to `undefined` when the dep did not
  * succeed. It never stands where an `OutputRef` is declared.
  */
-export interface SettledOutputRef<T extends string | string[] = string | string[], S = unknown> {
+export type SettledOutputRef<T extends string | string[] = string | string[], S = unknown> = {
   readonly [OUTPUT_REF]: true;
   readonly node: string;
   readonly output: string;
   readonly settled: true;
   readonly _T?: T;
   readonly _scope?: S;
-}
+} & NotAString;
 
 type OutputRefs<T, S, Settled extends boolean> = [T] extends [Record<string, string | string[]>]
   ? {
@@ -98,9 +121,7 @@ type RefsOf<R, S> =
       : R;
 
 /** A file input: its path, as given, and its content's hash join the key. */
-export interface FileInput {
-  readonly [FILE_INPUT]: string;
-}
+export type FileInput = { readonly [FILE_INPUT]: string } & NotAString;
 
 /**
  * A value input: a string, a finite number, a boolean, `null`, or an array or a plain record of
@@ -144,16 +165,13 @@ export type InputRecord<S = never> = {
   readonly [name: string]: InputValue<S> | FileInput | undefined;
 };
 
-// TypeScript refuses a symbol in a template string, with +, or where a string goes.
-type StandsWhole = { toString: never; valueOf: never } & symbol;
-
 /**
  * A file an action reads: a `file()` input, or an output of a dep. Where it lives is the engine's.
  *
  * - Hand a tool its path: `ports.images.resize(depOutputs.source.path, out)`.
  * - Read it with `text()`, or with `json(isMeta)`, where `isMeta` is a type guard.
- * - It stands whole: TypeScript refuses it in a template string or with `+`, and `String` and
- *   `JSON.stringify` throw. A string takes its `path`: `` `--input=${source.path}` ``.
+ * - It is never part of a string: TypeScript refuses it in a template string or with `+`, and
+ *   `String` and `JSON.stringify` throw. A string takes its `path`: `` `--input=${source.path}` ``.
  * - Tell a handle apart with `isFileHandle`, never with `typeof`: its type is a symbol's, but it
  *   is an object.
  */
@@ -169,7 +187,7 @@ export type FileHandle = {
   text(): Promise<string>;
   /** Its contents as JSON, checked by `is`; a file `is` refuses throws, naming the file. */
   json<T>(is: (value: unknown) => value is T): Promise<T>;
-} & StandsWhole;
+} & NotAString;
 
 /**
  * Outputs as an action reads them: each path a `FileHandle`, a list or a record as such, and a
@@ -185,9 +203,20 @@ export type Handles<T> = T extends string
         ? undefined
         : never;
 
+const nodeRefusal = (name: string, settled = false) =>
+  `node "${name}" can't be part of a string. Put it in deps` +
+  (!isIdentifier(name)
+    ? "."
+    : settled
+      ? `: deps: { ${name}: settled(${name}) }.`
+      : `: deps: { ${name} }.`);
+
 export function nodeRef<T extends Outputs>(name: string): NodeRef<T> {
-  return { name };
+  return notAString({ name }, nodeRefusal(name));
 }
+
+/** A ref to the node named `name`, its outputs untyped, for a dep on a node known by name alone. */
+export const nodeRefNamed = (name: string): NodeRef => nodeRef(name);
 
 /**
  * A dep as an action declares it in `deps`, by role: the outputs its node returns. An action is
@@ -242,7 +271,7 @@ export function settled<T extends Outputs>(): SettledDep<T>;
 export function settled(of?: NodeRef | Dep): SettledRef | SettledDep {
   return of === undefined || DEP in of
     ? { [DEP]: true, settled: true }
-    : { name: of.name, settled: true };
+    : notAString({ name: of.name, settled: true as const }, nodeRefusal(of.name, true));
 }
 
 /**
@@ -287,12 +316,18 @@ export function depRefs<D, S>(deps: DepRecord | undefined): DepRefs<D, S> {
   const refs = Object.fromEntries(
     Object.entries(deps ?? {}).flatMap(([role, dep]) => {
       if (!dep) return [];
-      const ref = (output: string) => ({
-        [OUTPUT_REF]: true,
-        node: dep.name,
-        output,
-        settled: dep.settled === true,
-      });
+      const ref = (output: string) => {
+        const shown = `${role}.${output}`;
+        const fix =
+          isIdentifier(role) && isIdentifier(output)
+            ? `: [..., ${shown}] or { ${output}: ${shown} }`
+            : "";
+        return notAString(
+          { [OUTPUT_REF]: true, node: dep.name, output, settled: dep.settled === true },
+          `${shown} can't be part of a string: its path exists only once "${dep.name}" has run. ` +
+            `Make it its own array item or property${fix}.`,
+        );
+      };
       const get = (_: object, output: string | symbol) =>
         typeof output === "string" ? ref(output) : undefined;
       // A spread or a value that holds the record would list no outputs, so it fails instead.
@@ -310,7 +345,11 @@ export function depRefs<D, S>(deps: DepRecord | undefined): DepRefs<D, S> {
 
 /** A file input, read by the action as a handle on the file. */
 export function file(path: string): FileInput {
-  return { [FILE_INPUT]: path };
+  return notAString(
+    { [FILE_INPUT]: path },
+    `file("${path}") can't be part of a string. Make it its own input: ` +
+      `inputs: { "${path}": file("${path}") }.`,
+  );
 }
 
 const branded = (value: unknown, brand: symbol) =>
@@ -396,6 +435,16 @@ export type NodeDeps<D> = Flat<
   }
 >;
 
+type DepOf<R> =
+  R extends SettledRef<infer T> ? SettledDep<T> : R extends NodeRef<infer T> ? Dep<T> : undefined;
+
+/**
+ * The deps an action declares for the deps `D` a node gives, `NodeDeps` the other way: a `Dep` for
+ * each `NodeRef`, a `SettledDep` for each `SettledRef`, and `maybe` for a role that may be
+ * `undefined`. For an action defined for one node, which declares the deps that node gives.
+ */
+export type DepSpecsOf<D extends DepRecord> = { [K in keyof D]: DepOf<D[K]> };
+
 /**
  * The action's own inputs, which no node declares again. Where they are a record typed by an index
  * signature, their names are not in the type, so `addNode` refuses a repeat when the node is added.
@@ -468,6 +517,7 @@ export interface Node<Meta = unknown> {
   timeoutMs?: number;
 }
 
+/** The deps a node runs only once they succeed: its deps less its `settled` ones. */
 export function requiredDeps(node: Node): string[] {
   return node.deps.filter((d) => !node.settledDeps?.includes(d));
 }

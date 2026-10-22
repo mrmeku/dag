@@ -99,7 +99,7 @@ This `RunNode` looks each node up before it sends it to work, so a hit takes no 
 
 ## Choose for each node
 
-`execute` takes `force` as `true` or `false`, for every node, and takes no `cacheOnly`: it refuses a function for `force`, and any `cacheOnly`. A choice for each node is an executor's. Its `RunNode` gives each node its own `force` or `cacheOnly`:
+`execute` takes `force` as `true` or `false`, for every node, and takes no `cacheOnly`. A choice for each node is an executor's. Its `RunNode` gives each node its own `force` or `cacheOnly`:
 
 ```typescript
 const heal = (graph, context, degraded: Set<string>) =>

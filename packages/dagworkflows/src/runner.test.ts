@@ -1,10 +1,10 @@
-import { Graph, type MemoryDagFs } from "@mrmeku/dagraph";
+import { settled, type MemoryDagFs } from "@mrmeku/dagraph";
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
 import { describe, test } from "node:test";
 import { STATUS_ICON } from "./config.ts";
 import { readRunHistory } from "./history.ts";
-import type { Exec, Ports } from "./ports.ts";
+import type { Exec } from "./ports.ts";
 import { createMemoryActionsCache } from "./ports/actions-cache.ts";
 import {
   createMemoryLockfile,
@@ -14,7 +14,7 @@ import {
 } from "./ports/memory.ts";
 import { runJob, runPost, runWorkflow } from "./runner.ts";
 import { renderStatus, renderTimeline } from "./summary.ts";
-import { createWorkflow, defineWorkflow } from "./workflow.ts";
+import { defineWorkflow } from "./workflow.ts";
 
 const CAS = "/cas";
 
@@ -35,16 +35,6 @@ const parsed = async (fs: MemoryDagFs, path: string): Promise<unknown> =>
   JSON.parse(await fs.readText(path));
 
 type RunOptions = Parameters<Exec["run"]>[1];
-const envOf = (opts: RunOptions) => {
-  const env = opts?.env;
-  assert.ok(env, "env for the command");
-  return env;
-};
-const outDirOf = (opts: RunOptions) => {
-  const out = envOf(opts)["DAG_OUT"];
-  assert.ok(out, "DAG_OUT");
-  return out;
-};
 const signalOf = (opts: RunOptions) => {
   const signal = opts?.signal;
   assert.ok(signal, "signal for the command");
@@ -61,8 +51,9 @@ describe("cancel, then post", () => {
     const exec: Exec = {
       run: async (cmd, opts) => {
         calls.push(cmd);
-        if (cmd[0] === "db" && cmd[1] === "start") await fs.writeText(`${outDirOf(opts)}/pid`, "7");
-        if (cmd[0] !== "slow") return { code: 0, stdout: "", stderr: "", output: "", ok: true };
+        const [program, verb, path] = cmd;
+        if (program === "db" && verb === "start" && path) await fs.writeText(path, "7");
+        if (program !== "slow") return { code: 0, stdout: "", stderr: "", output: "", ok: true };
         return new Promise((resolve) =>
           signalOf(opts).addEventListener("abort", () =>
             resolve({
@@ -88,7 +79,7 @@ describe("cancel, then post", () => {
         });
         const db = workflow.run({
           name: "up:db",
-          cmd: ["db", "start"],
+          cmd: ({ out }) => ["db", "start", out.pid],
           outputs: { pid: "pid" },
           cacheable: false,
         });
@@ -108,13 +99,13 @@ describe("cancel, then post", () => {
         workflow.saveCache({
           name: "save:bun",
           cache: bun,
-          deps: { fast: workflow.settled(fast), slow: workflow.settled(slow) },
+          deps: { fast: settled(fast), slow: settled(slow) },
         });
         workflow.post({
           name: "down:db",
           main: db,
-          cmd: ["db", "stop", db.outputs.pid],
-          deps: { after: workflow.settled(after) },
+          cmd: ({ main }) => ["db", "stop", main.pid],
+          deps: { after: settled(after) },
         });
       },
     });
@@ -243,7 +234,7 @@ describe("runJob", () => {
           name: "save",
           main: fast,
           cmd: ["save"],
-          deps: { slow: workflow.settled(slow) },
+          deps: { slow: settled(slow) },
         });
         workflow.post({ name: "notify", main: fast, cmd: ["notify"], deps: {} });
       },
@@ -317,16 +308,12 @@ describe("a run killed before its post pass", () => {
     let killed = true;
     const controller = new AbortController();
     ports.exec = {
-      run: async (cmd, opts) => {
-        if (cmd[1] === "start") await fs.writeText(`${outDirOf(opts)}/pid`, String(++pid));
-        if (cmd[1] === "stop") {
-          const [, , pidFile] = cmd;
-          assert.ok(pidFile, "pid file");
-          stopped.push(await fs.readText(pidFile));
-        }
-        if (cmd[0] === "slow" && killed) controller.abort();
+      run: async ([program, verb, path]) => {
+        if (verb === "start" && path) await fs.writeText(path, String(++pid));
+        if (verb === "stop" && path) stopped.push(await fs.readText(path));
+        if (program === "slow" && killed) controller.abort();
         // The report fails the first time it runs, in the post steps owed.
-        const ok = cmd[0] !== "report" || reports++ > 0;
+        const ok = program !== "report" || reports++ > 0;
         return { code: ok ? 0 : 1, stdout: "", stderr: "", output: "", ok };
       },
     };
@@ -334,7 +321,7 @@ describe("a run killed before its post pass", () => {
       implementation: (workflow) => {
         const db = workflow.run({
           name: "up:db",
-          cmd: ["db", "start"],
+          cmd: ({ out }) => ["db", "start", out.pid],
           outputs: { pid: "pid" },
           cacheable: false,
         });
@@ -342,8 +329,8 @@ describe("a run killed before its post pass", () => {
         const down = workflow.post({
           name: "down:db",
           main: db,
-          cmd: ["db", "stop", db.outputs.pid],
-          deps: { slow: workflow.settled(slow) },
+          cmd: ({ main }) => ["db", "stop", main.pid],
+          deps: { slow: settled(slow) },
         });
         workflow.post({ name: "report:db", main: down, cmd: ["report"], deps: {} });
         workflow.run({ name: "lint", cmd: ["lint"], cacheable: false });
@@ -371,8 +358,8 @@ describe("a run killed before its post pass", () => {
           "post · 2 of 3 post steps owed",
           "▷ down:db",
           "▷ report:db",
-          "▷ up:db (last run 3.0s)",
-          "▷ lint (last run 1.0s)",
+          "▷ up:db (last run 2.0s)",
+          "▷ lint (last run 2.0s)",
           "▷ slow",
           "▷ down:db",
           "▷ down:lint",
@@ -462,7 +449,7 @@ describe("--only", () => {
           name: "down:db",
           main: db,
           cmd: ["db", "stop"],
-          deps: { requireAll: workflow.settled(requireAll) },
+          deps: { requireAll: settled(requireAll) },
         });
       },
     }).implementation;
@@ -510,7 +497,7 @@ describe("--only", () => {
           name: "down:db",
           main: db,
           cmd: ["db", "stop"],
-          deps: { e2e: workflow.settled(e2e), lint: workflow.settled(lint) },
+          deps: { e2e: settled(e2e), lint: settled(lint) },
         });
         workflow.post({ name: "down:lint", main: lint, cmd: ["lint", "clean"], deps: {} });
       },
@@ -573,7 +560,7 @@ describe("two runs at once", () => {
           name: "down:db",
           main: db,
           cmd: ["db", "stop"],
-          deps: { e2e: workflow.settled(e2e) },
+          deps: { e2e: settled(e2e) },
         });
       },
     }).implementation;
@@ -611,7 +598,7 @@ describe("a history's lock", () => {
           name: "down:db",
           main: db,
           cmd: ["db", "stop"],
-          deps: { e2e: workflow.settled(e2e) },
+          deps: { e2e: settled(e2e) },
         });
       },
     }).implementation;
@@ -663,7 +650,7 @@ describe("a history of another workflow", () => {
           name: "down:a",
           main: cas,
           cmd: ["a", "cleanup"],
-          deps: { check: workflow.settled(check) },
+          deps: { check: settled(check) },
         });
       },
     }).implementation;
@@ -708,12 +695,18 @@ describe("a history of another workflow", () => {
       implementation: (workflow) => {
         const db = workflow.run({ name: "up:db", cmd: ["db", "start"], cacheable: false });
         workflow.run({ name: "e2e", cmd: ["e2e"], deps: { db }, cacheable: false });
-        const dump = workflow.run({ name: "dump", cmd: ["dump"], cacheable: false });
+        const dump = workflow.run({
+          name: "dump",
+          cmd: ["dump"],
+          outputs: { dir: "dir" },
+          cacheable: false,
+        });
         const down = workflow.post({
           name: "down:db",
           main: db,
-          cmd: ["rm", "-rf", `${dump.outputs.result}/tmp`],
-          deps: { dump: workflow.settled(dump) },
+          cmd: ["clean"],
+          env: ({ dump }) => ({ DUMP: dump.dir }),
+          deps: { dump: settled(dump) },
         });
         workflow.post({ name: "report", main: down, cmd: ["report"], deps: {} });
       },
@@ -754,14 +747,10 @@ describe("a killed --only run", () => {
     let killed = true;
     const controller = new AbortController();
     ports.exec = {
-      run: async (cmd, opts) => {
-        if (cmd[1] === "start") await fs.writeText(`${outDirOf(opts)}/pid`, String(++pid));
-        if (cmd[1] === "stop") {
-          const [, , pidFile] = cmd;
-          assert.ok(pidFile, "pid file");
-          stopped.push(await fs.readText(pidFile));
-        }
-        if (cmd[0] === "e2e" && killed) controller.abort();
+      run: async ([program, verb, path]) => {
+        if (verb === "start" && path) await fs.writeText(path, String(++pid));
+        if (verb === "stop" && path) stopped.push(await fs.readText(path));
+        if (program === "e2e" && killed) controller.abort();
         return { code: 0, stdout: "", stderr: "", output: "", ok: true };
       },
     };
@@ -769,7 +758,7 @@ describe("a killed --only run", () => {
       implementation: (workflow) => {
         const db = workflow.run({
           name: "up:db",
-          cmd: ["db", "start"],
+          cmd: ({ out }) => ["db", "start", out.pid],
           outputs: { pid: "pid" },
           cacheable: false,
         });
@@ -778,7 +767,7 @@ describe("a killed --only run", () => {
         workflow.post({
           name: "down:db",
           main: db,
-          cmd: ["db", "stop", db.outputs.pid],
+          cmd: ({ main }) => ["db", "stop", main.pid],
           deps: { seed },
         });
       },
@@ -797,11 +786,12 @@ describe("logs", () => {
     const aWrote = Promise.withResolvers<void>();
     const bHalf = Promise.withResolvers<void>();
     const bResume = Promise.withResolvers<void>();
-    const outs: string[] = [];
-    // Run A writes its log first; then B's log write stops halfway while A's reporter reads.
+    let execs = 0;
+    let logs = 0;
+    // Run A puts its log in place first; then B's log write stops halfway while A's reporter reads.
     ports.exec = {
-      run: async (_cmd, opts) => {
-        const run = outs.push(outDirOf(opts)) === 1 ? "A" : "B";
+      run: async () => {
+        const run = ++execs === 1 ? "A" : "B";
         if (run === "B") await aWrote.promise;
         return { code: 0, stdout: "", stderr: "", output: `${run} output\n`, ok: true };
       },
@@ -813,11 +803,15 @@ describe("logs", () => {
           await fs.writeText(path, content.slice(0, 4));
           bHalf.resolve();
           await bResume.promise;
-        } else if (path === `${outs[0]}/result.json`) {
+        }
+        return fs.writeText(path, content);
+      },
+      rename: async (from, to) => {
+        await fs.rename(from, to);
+        if (to.endsWith(".log") && ++logs === 1) {
           aWrote.resolve();
           await bHalf.promise;
         }
-        return fs.writeText(path, content);
       },
     };
     const implementation = defineWorkflow({
@@ -890,7 +884,8 @@ describe("a step's time", () => {
       schedulerOptions: { concurrencyLimits: { one: 1 } },
       summary: [renderStatus, renderTimeline],
       implementation: (workflow) => {
-        for (const name of ["a", "b", "c"]) workflow.run({ name, cmd: [name], group: "one" });
+        for (const name of ["a", "b", "c"])
+          workflow.run({ name, cmd: [name], concurrencyGroup: "one" });
       },
     });
     assert.ok(def.schedulerOptions && def.summary, "scheduler options and summary");
@@ -985,7 +980,7 @@ describe("cancel during a save", () => {
   });
 });
 
-describe("timeoutMinutes", () => {
+describe("timeoutMs", () => {
   test("a step that outlives its timeout fails in the runner's words with a timed_out check, whatever it exits with; it is never cached, and the timeout is not in the key", async () => {
     const { ports, rec } = createTestPorts();
     // `hang` runs until interrupted, then exits 0 with what it printed, as a trapped SIGINT does.
@@ -1005,28 +1000,21 @@ describe("timeoutMinutes", () => {
             )
           : okExec.run(cmd, opts),
     };
-    const implementationFor = (lintMinutes: number) =>
+    // Inputs make them cacheable, so the second run can hit the cache.
+    const inputs = { rules: "strict" };
+    const implementationFor = (lintMs: number) =>
       defineWorkflow({
         implementation: (workflow) => {
-          const test = workflow.run({ name: "test", cmd: ["hang"], timeoutMinutes: 0.0005 });
-          workflow.run({ name: "lint", cmd: ["ok"], timeoutMinutes: lintMinutes });
-          workflow.run({ name: "report", cmd: ["ok"], deps: { test: workflow.settled(test) } });
+          const test = workflow.run({ name: "test", cmd: ["hang"], inputs, timeoutMs: 30 });
+          workflow.run({ name: "lint", cmd: ["ok"], inputs, timeoutMs: lintMs });
+          workflow.run({ name: "report", cmd: ["ok"], inputs, deps: { test: settled(test) } });
         },
       }).implementation;
     const common = { ports, casBaseDir: CAS, historyDir: HISTORY_DIR };
-    const first = await runWorkflow({ ...common, implementation: implementationFor(10) });
-    const second = await runWorkflow({ ...common, implementation: implementationFor(20) });
+    const first = await runWorkflow({ ...common, implementation: implementationFor(600_000) });
+    const second = await runWorkflow({ ...common, implementation: implementationFor(1_200_000) });
     const status = (rs: { name: string; status: string }[]) =>
       Object.fromEntries(rs.map((r) => [r.name, r.status]));
-    const facade = createWorkflow(new Graph<Ports>(), ports, await ports.host.context());
-    const rejected = [0, -1, Number.NaN, 40_000].filter((timeoutMinutes) => {
-      try {
-        facade.run({ name: `t${timeoutMinutes}`, cmd: ["ok"], timeoutMinutes });
-        return false;
-      } catch (e) {
-        return e instanceof RangeError;
-      }
-    });
     const message = "The action 'test' has timed out after 30ms.";
     assert.deepEqual(
       {
@@ -1037,7 +1025,6 @@ describe("timeoutMinutes", () => {
           .filter((c) => c.name === "test" && c.status === "completed")
           .map((c) => [c.conclusion, c.summary]),
         log: groupLines(rec.log, `${STATUS_ICON.failed} test`),
-        rejected,
       },
       {
         first: { test: "failed", lint: "done", report: "done" },
@@ -1051,7 +1038,6 @@ describe("timeoutMinutes", () => {
           ["timed_out", message],
         ],
         log: ["partial", "── error ──", message],
-        rejected: [0, -1, Number.NaN, 40_000],
       },
     );
   });
@@ -1067,11 +1053,10 @@ describe("secrets", () => {
       GITHUB_ACTIONS: "true",
     };
     const { ports, fs } = createTestPorts({ env });
-    const seen: Array<Record<string, string | undefined>> = [];
+    const seen: Array<Record<string, string | undefined> | undefined> = [];
     ports.exec = {
       run: async (_cmd, opts) => {
-        const { DAG_OUT: _, ...rest } = envOf(opts);
-        seen.push(rest);
+        seen.push(opts?.env);
         const output = "token npm-s3cret\n";
         return { code: 0, stdout: output, stderr: "", output, ok: true };
       },
