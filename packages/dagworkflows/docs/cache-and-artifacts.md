@@ -1,6 +1,6 @@
 # Cache and artifacts
 
-`workflow.restoreCache`, `workflow.saveCache` and `workflow.uploadArtifact` are the GitHub actions `actions/cache/restore`, `actions/cache/save` and `actions/upload-artifact`, as tasks in the graph. They take the same inputs as these actions. They run each time, and dagworkflows never caches their results.
+`workflow.restoreCache`, `workflow.saveCache` and `workflow.uploadArtifact` are the GitHub actions `actions/cache/restore`, `actions/cache/save` and `actions/upload-artifact`, as tasks in the graph. They take the same inputs as these actions. The restore and the upload run each time, and dagworkflows never caches their results. The save comes from the cache when its `path`, its `key` and the outputs of the tasks that it waits for did not change.
 
 Without a GitHub cache or artifact service, for example on your laptop, these tasks do nothing:
 

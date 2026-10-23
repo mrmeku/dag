@@ -170,8 +170,8 @@ describe("cancel, then post", () => {
           "▷ slow",
           "◼\uFE0E cancelled, 4 nodes not run · run · built 3 · cached 0 · failed 0 · skipped 0 · cancelled 4 · wall 9.0s",
           "post · 2 of 2 post steps owed",
-          "▷ save:bun",
           "▷ down:db",
+          "▷ save:bun",
           "✔\uFE0E all 2 nodes succeeded · run · post · built 2 · cached 0 · failed 0 · skipped 0 · wall 3.0s",
         ],
         // The workflow's own section, in both passes; the post pass draws its owed steps alone.
@@ -1102,7 +1102,7 @@ describe("a step's time", () => {
 });
 
 describe("cancel during a save", () => {
-  test("a save the cancel lands on finishes in the run, and the post pass does not save again", async () => {
+  test("a save the cancel lands on finishes in the run, and the post pass asks again, which the service refuses for a key it has", async () => {
     const controller = new AbortController();
     const service = createMemoryActionsCache();
     const { ports } = createTestPorts({ actionsCache: service });
@@ -1134,8 +1134,47 @@ describe("cancel during a save", () => {
       {
         run: { "restore:cas": "done", "save:cas": "cancelled" },
         post: { "save:cas": "done" },
-        saves: 1,
+        saves: 2,
         saved: ["cas-1"],
+      },
+    );
+  });
+});
+
+describe("a run killed after its save finished", () => {
+  test("owes the save, and the post pass gets it from the cache and does not save again", async () => {
+    const service = createMemoryActionsCache();
+    const { ports, fs } = createTestPorts({ actionsCache: service });
+    let saves = 0;
+    const save = service.saveCache;
+    service.saveCache = async (paths, key) => (saves++, save(paths, key));
+    const implementation = defineWorkflow({
+      implementation: (workflow) => {
+        const cas = workflow.restoreCache({ name: "restore:cas", path: [".cas"], key: "cas-1" });
+        workflow.saveCache({ name: "save:cas", cache: cas });
+      },
+    }).implementation;
+    const common = { implementation, ports, casBaseDir: CAS, historyDir: HISTORY_DIR };
+    const run = await runWorkflow(common);
+    // The history of a run killed once the save wrote its entry, before its result was recorded.
+    const restored = run.results.find((r) => r.name === "restore:cas");
+    await fs.writeText(
+      `${HISTORY_DIR}/killed.json`,
+      JSON.stringify({
+        workflow: "",
+        started: ["restore:cas", "save:cas"],
+        results: { "restore:cas": restored },
+      }),
+    );
+    const post = await runPost(common);
+    const status = (rs: { name: string; status: string }[]) =>
+      Object.fromEntries(rs.map((r) => [r.name, r.status]));
+    assert.deepEqual(
+      { run: status(run.results), post: status(post.results), saves },
+      {
+        run: { "restore:cas": "done", "save:cas": "done" },
+        post: { "save:cas": "cached" },
+        saves: 1,
       },
     );
   });

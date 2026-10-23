@@ -222,6 +222,7 @@ workflow.task({
 
 The cache key of a task is a hash of these items:
 
+- its kind: `run` for a `cmd` command, `run-shell` for a `shell` command, the task's name for an `action` task, and a kind of its own for each other function, as `save-cache`,
 - each input, by name,
 - for a command, its `cmd` or `shell`, `cwd` and `env`,
 - the role and file name of each declared output,
@@ -229,24 +230,9 @@ The cache key of a task is a hash of these items:
 
 If the CAS has an entry for the key, the task does not run. dagworkflows uses the stored outputs. The order of `deps` and `inputs` does not change the key.
 
-The task's name is not in the key: it is the task's address, for `--only`, the logs and the check runs. Thus a renamed task does not run again, and two commands that run the same command on the same inputs and dependencies share one entry, and one log.
+A command's name is not in its key: it is the command's address, for `--only`, the logs and the check runs. Thus a renamed command does not run again, and two commands that run the same command on the same inputs and dependencies share one entry, and one log.
 
-A task's function is not in its key. Thus dagworkflows refuses two cached tasks that declare the same inputs, the same dependencies in the same roles, the same outputs and `invalidateOn` for the same roles, but two action functions. Two `invalidateOn` functions count as one, since they can return the same string. The second one would get the first one's result for work that never ran. This occurs when a loop adds tasks and the function reads the loop's variable. Put the variable in `inputs`:
-
-```typescript
-for (const os of ["linux", "macos"]) {
-  workflow.task({
-    name: `manifest:${os}`,
-    inputs: { version: "manifest-v1", os },
-    outputs: { manifest: "manifest.json" },
-    action: async ({ inputs, out, ports }) => {
-      await ports.fs.writeText(out.manifest, JSON.stringify({ os: inputs.os }));
-    },
-  });
-}
-```
-
-Tasks that share one function object do the same work. They can declare the same, and share one entry: two identical commands do this.
+An `action` task's function is not in its key, but its name is, as its kind. Thus a renamed `action` task runs again once, and two `action` tasks never share an entry, since their names differ.
 
 If a task runs again but writes the same outputs, its dependents do not run again. Thus a change that does not change a task's outputs stops at that task.
 

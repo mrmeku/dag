@@ -14,7 +14,7 @@
 
 You got jobs. Jobs got dependencies. Somebody's gotta keep track of who owes what to who. dagraph runs file-producing work as a graph, and it skips every job whose answer is already on disk. Three things make it worth your while:
 
-- **Nobody does the same job twice.** Each job gets a cache key from what it declares: its inputs and the content of its dependencies' outputs. If the cache has a result for that key and its files are unchanged, the job does not run. Two jobs that declare the same work share one result. A job that runs again and makes the same files stops there.
+- **Nobody does the same job twice.** Each job gets a cache key from what it declares: its kind, its inputs and the content of its dependencies' outputs. If the cache has a result for that key and its files are unchanged, the job does not run. Two jobs of one kind that declare the same work share one result. A job that runs again and makes the same files stops there.
 - **Jobs start as soon as they can.** A job starts when its dependencies finish, within the limits you set. A cache hit never waits in line for a busy group.
 - **The compiler enforces the graph shape.** Each dependency carries its job's output type. Connect the wrong job, or forget an input, and TypeScript reports it before anything runs.
 
@@ -116,7 +116,7 @@ report cached
 
 - **Typed dependencies.** A job says which jobs it reads from, and its types come from what it says and what it returns. Wire the wrong job into a slot, or forget one, and the compiler tells you before anything runs. [Graphs](https://github.com/mrmeku/dag/blob/main/packages/dagraph/docs/graphs.md)
 - **Named inputs.** A job declares what decides its output from outside the graph: a `file()`, or any JSON value, each under a name. Hand it a `Map` or a `Date`, and the compiler hands it back. [Graphs](https://github.com/mrmeku/dag/blob/main/packages/dagraph/docs/graphs.md#inputs)
-- **A content-addressed cache.** A job runs again only when its inputs or its dependencies' outputs change. Its name is its address, never its key. Before it trusts a cached answer, da graph hashes the files again. [Caching](https://github.com/mrmeku/dag/blob/main/packages/dagraph/docs/caching.md)
+- **A content-addressed cache.** A job runs again only when its kind, its inputs or its dependencies' outputs change. Its name is its address, never its key. Before it trusts a cached answer, da graph hashes the files again. [Caching](https://github.com/mrmeku/dag/blob/main/packages/dagraph/docs/caching.md)
 - **Early cutoff.** A job that runs again and makes the same files does not send its dependents back to work.
 - **Settled dependencies.** A job can run without a dependency that failed, and runs again once that dependency comes through. [Graphs](https://github.com/mrmeku/dag/blob/main/packages/dagraph/docs/graphs.md#settled-dependencies)
 - **Limits.** Cap how many jobs run at once, in total and for each group, or write your own scheduler. [Execution](https://github.com/mrmeku/dag/blob/main/packages/dagraph/docs/execution.md#schedulers)
@@ -136,7 +136,7 @@ Every job in da graph is a node. A node reads its inputs and its dependencies' f
 | Dependency | A node whose outputs another node reads, under a role. Put its `NodeRef` in `deps`.                                     |
 | Input      | Something outside the graph that decides a node's output: a `file()` or a JSON value, under a name.                     |
 | Output     | The file paths that a node's action returns, written to its own output directory.                                       |
-| Action key | A hash of the node's inputs by name and its dependencies' content by role. Nothing else.                                |
+| Action key | A hash of the node's kind, its inputs by name and its dependencies' content by role. Nothing else.                      |
 | CAS        | The content-addressed store: each node's outputs under `<casBaseDir>/<action key>/out-<content hash>`.                  |
 
 Before a node runs, da graph calculates its action key. If the cache has an entry for the key and the files still hash the same, the node does not run.

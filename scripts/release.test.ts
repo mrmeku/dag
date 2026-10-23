@@ -13,11 +13,15 @@ import { describe, test } from "node:test";
 import { processEach } from "./process-each.ts";
 import release from "./release.ts";
 
+const BASH = ["bash", "--noprofile", "--norc", "-eo", "pipefail", "-c"];
+
 describe("release workflow", () => {
   test("a tag releases its version, any other ref dry-runs; packs are outputs, publishes are receipts after require-all, the engine before the runner", async () => {
     const build = async (ref: string) => {
       // An earlier attempt of this release, and main's CAS before it.
       const actionsCache = createMemoryActionsCache(["dag-release-1.2.3-0", "dag-main-1"]);
+      // The $TARBALL each shell line got.
+      const tarballs = new Map<string | undefined, string | undefined>();
       // pack and build:action write the files they declare.
       const { ports, fs, actionsArtifact } = createTestPorts({
         context: { ref, sha: "abc1234def" },
@@ -30,6 +34,7 @@ describe("release workflow", () => {
             if (script === "build")
               for (const file of ["main.js", "post.js"])
                 await fs.writeText(`${cmd[cmd.indexOf("--outdir") + 1]}/${file}`, file);
+            tarballs.set(cmd.at(-1), opts?.env?.["TARBALL"]);
             return okExec.run(cmd, opts);
           },
         },
@@ -57,6 +62,7 @@ describe("release workflow", () => {
         processed,
         resultOf,
         ran,
+        tarballOf: (name: string) => tarballs.get(ran(name)?.at(-1)),
         output,
         restored: restored?.status === "done" && (await parsed(soleOutput(restored.outputs))),
         saved: [...actionsCache.entries].slice(2),
@@ -89,7 +95,9 @@ describe("release workflow", () => {
           .get("pack:dagworkflows")
           ?.files.includes("packages/dagworkflows/package.json"),
         publishCmd: tagged.ran("publish:dagraph"),
+        publishTarball: tagged.tarballOf("publish:dagraph"),
         dryRunPublishCmd: branch.ran("publish:dagraph"),
+        dryRunPublishTarball: branch.tarballOf("publish:dagraph"),
         publishDagworkflowsDeps: by("publish:dagworkflows").deps.sort(),
         publishDagraphDeps: by("publish:dagraph").deps.sort(),
         actionCmd: tagged.ran("release:action"),
@@ -136,23 +144,17 @@ describe("release workflow", () => {
         packCmd: ["bun", "scripts/pack.ts", "dagraph", "1.2.3", "<outputDir>"],
         packOutputs: [["tarball", "mrmeku-dagworkflows-1.2.3.tgz"]],
         packInputs: true,
+        // It asks npm first, so a version npm has already succeeds without a publish.
         publishCmd: [
-          "npm",
-          "publish",
-          tagged.output("pack:dagraph", "tarball"),
-          "--access",
-          "public",
+          ...BASH,
+          'npm view @mrmeku/dagraph@1.2.3 version || npm publish "$TARBALL" --access public',
         ],
+        publishTarball: tagged.output("pack:dagraph", "tarball"),
         dryRunPublishCmd: [
-          "npm",
-          "publish",
-          branch.output("pack:dagraph", "tarball"),
-          "--access",
-          "public",
-          "--tag",
-          "next",
-          "--dry-run",
+          ...BASH,
+          'npm view @mrmeku/dagraph@0.0.0-dev.abc1234 version || npm publish "$TARBALL" --access public --tag next --dry-run',
         ],
+        dryRunPublishTarball: branch.output("pack:dagraph", "tarball"),
         publishDagworkflowsDeps: ["pack:dagworkflows", "publish:dagraph", "require-all"],
         publishDagraphDeps: ["pack:dagraph", "require-all"],
         actionCmd: [
@@ -208,13 +210,7 @@ describe("release workflow", () => {
             "upload:dagworkflows",
           ],
         },
-        uncached: [
-          "restore:cas",
-          "upload:dagraph",
-          "upload:dagworkflows",
-          "upload:action",
-          "save:cas",
-        ],
+        uncached: ["restore:cas", "upload:dagraph", "upload:dagworkflows", "upload:action"],
         checksAfterRestore: true,
       },
     );

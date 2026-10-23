@@ -27,28 +27,18 @@ export function hashBytes(data: string | Uint8Array): string {
   return sha256.hex(data);
 }
 
-/** Per-execution memo for input file hashes, so many nodes declaring one file hash it once. */
-export type InputHashMemo = Map<string, Promise<string>>;
-
-export function hashInput(path: string, hashFile: HashFileFn, memo: InputHashMemo) {
-  let pending = memo.get(path);
-  if (!pending) {
-    pending = hashFile(path);
-    memo.set(path, pending);
-  }
-  return pending;
-}
-
 /** One input as keyed: a file's path and content hash, or a value's canonical JSON. */
 export type KeyedInput = ["file", string, string] | ["value", string];
 /** One dep role as keyed: its content hash, its fingerprint's hash, or the mark for missing. */
 export type KeyedDep = ["content", string] | ["fingerprint", string] | ["missing"];
 
 /**
- * The action key: SHA256 of each input by name and each dep by role, both sorted. Nothing else
- * joins it: not the node's name or its deps' names, its kind, its meta or its how-to-run fields.
+ * The action key: SHA256 of the action's kind, each input by name and each dep by role, both
+ * sorted. Nothing else joins it: not the node's name or its deps' names, its meta or its
+ * how-to-run fields.
  */
 export function computeActionKey(
+  kind: string,
   inputs: Record<string, KeyedInput>,
   deps: Record<string, KeyedDep>,
 ): string {
@@ -56,7 +46,7 @@ export function computeActionKey(
     Object.keys(record)
       .sort()
       .map((k) => [k, record[k]]);
-  return sha256.hex(JSON.stringify([sorted(inputs), sorted(deps)]));
+  return sha256.hex(JSON.stringify([kind, sorted(inputs), sorted(deps)]));
 }
 
 /** A path as its output directory sees it: what follows `<keyDir>/<the attempt's directory>/`. */

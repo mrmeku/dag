@@ -60,7 +60,7 @@ describe("ci workflow", () => {
         requireAllSettledDeps: 4,
         saveCas: {
           name: "save:cas",
-          kind: "save:cas",
+          kind: "save-cache",
           deps: [
             "restore:cas",
             "typecheck",
@@ -70,7 +70,6 @@ describe("ci workflow", () => {
             "require-all",
           ],
           settledDeps: ["typecheck", "lint", "test:dagraph", "test:dagworkflows", "require-all"],
-          cacheable: false,
         },
         uncached: ["restore:cas"],
         schedulerOptions: { maxParallelism: 4, concurrencyLimits: { test: 2 } },

@@ -131,6 +131,29 @@ describe("restoreCache + saveCache", () => {
       },
     );
   });
+
+  test("two saves whose restores both missed key their own path and key, so each logs its own key", async () => {
+    const { ports: p, fs } = createTestPorts({ actionsCache: createMemoryActionsCache() });
+    const graph = newGraph();
+    for (const name of ["a", "b"]) {
+      const cache = restoreCache(graph, { name: `restore:${name}`, path: [name], key: name });
+      saveCache(graph, { name: `save:${name}`, cache });
+    }
+    const saves = (await executeUnder(graph, p)).filter((r) => r.name.startsWith("save:"));
+    const logs = await Promise.all(
+      saves.map(async (r) => [r.name, await fs.readText(logPath(CAS, r.actionKey))] as const),
+    );
+    assert.deepEqual(
+      {
+        oneKey: new Set(saves.map((r) => r.actionKey)).size === 1,
+        logs: Object.fromEntries(logs),
+      },
+      {
+        oneKey: false,
+        logs: { "save:a": "Cache saved with key: a", "save:b": "Cache saved with key: b" },
+      },
+    );
+  });
 });
 
 describe("uploadArtifact", () => {

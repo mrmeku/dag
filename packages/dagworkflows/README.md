@@ -8,7 +8,7 @@
 [![CI](https://github.com/mrmeku/dag/actions/workflows/ci.yml/badge.svg)](https://github.com/mrmeku/dag/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/npm/l/@mrmeku/dagworkflows.svg)](https://github.com/mrmeku/dag/blob/main/LICENSE)
 
-<img src="https://raw.githubusercontent.com/mrmeku/dag/main/packages/dagworkflows/docs/media/demo.gif" width="720" alt="Two runs of npx --no dag run scripts/ci.ts. In the first run, six tasks run and lint fails. In the second run, four tasks come from the cache; install, which is never cached, and lint run again.">
+<img src="https://raw.githubusercontent.com/mrmeku/dag/main/packages/dagworkflows/docs/media/demo.gif" width="720" alt="Two runs of npx --no dag run scripts/ci.ts. In the first run, six tasks run and lint fails. In the second run, three tasks come from the cache; install and build, which are never cached, and lint run again.">
 
 </div>
 
@@ -124,7 +124,7 @@ export default defineWorkflow({
 ## Features
 
 - **A graph of tasks.** Tasks declare their dependencies. Independent tasks run in parallel, with a limit for the run and for each group. A task's work is a command (`cmd`), a bash string (`shell`) or a TypeScript function (`action`). [Workflows](https://github.com/mrmeku/dag/blob/main/packages/dagworkflows/docs/workflows.md)
-- **A content-addressed cache.** A task runs again only when its command, its inputs, or the outputs of its dependencies change. A task that declares no inputs runs each time, as a GitHub step does. [The cache key](https://github.com/mrmeku/dag/blob/main/packages/dagworkflows/docs/workflows.md#the-cache-key)
+- **A content-addressed cache.** A task runs again only when its command, its inputs, or the outputs of its dependencies change, or when a TypeScript task gets a new name. A task that declares no inputs runs each time, as a GitHub step does. [The cache key](https://github.com/mrmeku/dag/blob/main/packages/dagworkflows/docs/workflows.md#the-cache-key)
 - **Files between tasks.** A task writes output files, and other tasks read them through the dependencies that they declare. [Outputs](https://github.com/mrmeku/dag/blob/main/packages/dagworkflows/docs/workflows.md#outputs)
 - **GitHub's cache and artifacts as tasks.** `workflow.restoreCache`, `workflow.saveCache` and `workflow.uploadArtifact` are `actions/cache` and `actions/upload-artifact`. [Cache and artifacts](https://github.com/mrmeku/dag/blob/main/packages/dagworkflows/docs/cache-and-artifacts.md)
 - **GitHub's job lifecycle.** Post steps, timeouts and cancellation behave as they do on GitHub. [Lifecycle](https://github.com/mrmeku/dag/blob/main/packages/dagworkflows/docs/lifecycle.md)
@@ -143,7 +143,7 @@ dagworkflows runs a graph of tasks, and it caches the result of each task by the
 | Input      | Something outside the graph that a task reads: a file, or a value such as an environment variable's. Declare it in `inputs`. |
 | Output     | A file that a task writes to its output directory. Other tasks read it through their `deps`.                                 |
 | CAS        | The content-addressed store in `.dag/cas`. It holds the outputs of each task, by cache key.                                  |
-| Cache key  | A hash of the task's inputs, its command and `env`, and the content of its dependencies' outputs.                            |
+| Cache key  | A hash of the task's kind, its inputs, its command and `env`, and the content of its dependencies' outputs.                  |
 
 Before a task runs, dagworkflows calculates its cache key. If the CAS has an entry for the key, the task does not run. dagworkflows uses the stored outputs.
 

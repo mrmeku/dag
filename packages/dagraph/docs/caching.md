@@ -4,8 +4,9 @@ The engine does not run a node when the cache has a correct result for it. To fi
 
 ## The action key
 
-The action key is a SHA-256 hash of these items, each under the name or the role that the action reads it by:
+The action key is a SHA-256 hash of these items:
 
+- the action's `kind`, which names its logic;
 - each input, the action's and the node's own, by name: a file's path and the hash of its content, or a value as JSON with sorted keys, each [output ref](graphs.md#output-refs) as its role and output name;
 - each dependency, by role: the content hash of its outputs; or, under `invalidateOn`, the hash of its fingerprint; or, for a settled dependency that did not succeed, a mark for missing.
 
@@ -17,7 +18,7 @@ A node's content hash covers each output's name, each file's path relative to it
 
 The engine sorts the inputs by name and the dependencies by role. Thus their order does not change the key.
 
-Nothing else is part of the key: not the node's name or the names of its dependencies, not the action's `kind` or its function, not `meta`, not `cacheable`, `concurrencyGroup` or `timeoutMs`. Thus renaming a node changes no key, and swapping two dependencies between roles does.
+Nothing else is part of the key: not the node's name or the names of its dependencies, not the action's function, not `meta`, not `cacheable`, `concurrencyGroup` or `timeoutMs`. Thus renaming a node changes no key, and swapping two dependencies between roles does.
 
 The keys form a Merkle tree. A change to an input changes the key of the node, and the keys of all nodes downstream of it, until [early cutoff](#early-cutoff) stops it.
 
@@ -42,12 +43,12 @@ A version change invalidates each result of that action. If only some results ar
 
 ### Nodes that share a key
 
-Caching is content-addressed. Two nodes that declare the same inputs and the same dependency content have one key and share one entry, whatever their names. When one has run, the other gets its result. This is correct for deterministic work, and it is the reason that a value that tells two nodes apart must be an input.
+Caching is content-addressed. Two nodes of one kind that declare the same inputs and the same dependency content have one key and share one entry, whatever their names. When one has run, the other gets its result. This is correct for deterministic work, and it is the reason that a value that tells two nodes apart must be an input.
 
 One key can occur twice in one execution. Each node is processed as any other: one whose key has a verified entry gets it, and one whose key has none runs. When two such nodes miss together, both run:
 
 - Deterministic work makes the same files, and the two attempts publish one directory.
-- Nondeterministic work can make different files. Attempts of one key that run at the same time both keep their directories, and the later entry replaces the earlier one in the cache. Neither attempt removes the other's directory, so no dependent loses a file. The key's next attempt removes all the earlier directories.
+- Nondeterministic work can make different files. Attempts of one key that run at the same time both keep their directories, and the later entry replaces the earlier one in the cache. Neither attempt removes the other's directory, so no dependent loses a file.
 
 The engine does not process a key only once in each execution.
 
@@ -65,7 +66,7 @@ Each attempt of a node writes its outputs to an empty directory of its own, `<ca
 
 - The action sees the output directory as an absolute path. A returned path under it can be absolute or relative to the working directory. The engine compares paths in their normal form, so a path made with `path.join` matches. A returned path that is not under the output directory fails the node.
 - The entry and the result hold each path in the form of `casBaseDir`. Thus under a relative `casBaseDir`, they hold relative paths, and a CAS directory restored under another working directory still hits. A key built from a handle's absolute `path`, in a fingerprint or in an output's content, would make it miss.
-- When an attempt publishes, the engine removes the key's published directories that existed before the attempt's action ran, and keeps its own. Thus attempts of one key that run at the same time both keep their directories, and the key's next attempt removes all the earlier ones. No attempt removes the files of an attempt that runs beside it.
+- The engine never removes a published directory. Thus no attempt removes the files of another attempt. A key whose content changes, as after `force`, keeps its old directories until you delete them.
 - An attempt that does not succeed has its directory removed. An attempt that is killed outright leaves its `tmp-<uuid>` directory.
 
 `FsCache` writes its entry to `<baseDir>/<action key>/manifest.json`. You can give `FsCache` the same directory as `casBaseDir`. The output directory and the manifest do not collide.
@@ -87,7 +88,7 @@ To use your own storage, implement the `Cache` interface.
 
 ## Run a node each time
 
-`cacheable: false` stops the engine from reading or writing the cache for a node. The node runs in each execution. Use it for work that is not deterministic, or for state that no key can see, such as a tool's own state.
+`cacheable: false` stops the engine from reading or writing the cache for a node. The node runs in each execution. Use it for work that must run each time: a read of state that no key can see, such as the latest release list or a tool's own state, or an effect such as an upload. Work that is not deterministic can be cached: its entry keeps one of its results.
 
 The engine still calculates the node's key and hashes its outputs. Thus its dependents still use the cache by content.
 

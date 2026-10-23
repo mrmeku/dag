@@ -21,7 +21,7 @@ import {
 import { defineStep } from "./define-step.ts";
 import { errorMessage } from "./kernel/format.ts";
 import type { Ports } from "./ports.ts";
-import { logOf, writeLog } from "./step-records.ts";
+import { writeLog } from "./step-records.ts";
 import { depRoles } from "./task.ts";
 
 export { logPath, type CommandCause } from "./step-records.ts";
@@ -128,7 +128,7 @@ export function requireAll(
 ): NodeRef<string> {
   const roles = Object.keys(opts.deps).sort();
   const step = defineStep({
-    kind: opts.name ?? "require-all",
+    kind: "require-all",
     deps: anySettledRole,
     inputs: { version: "require-all:v1" },
     action: async ({ depOutputs, ports, outputDir }) => {
@@ -141,6 +141,7 @@ export function requireAll(
     },
   });
   return step.addNode(graph, {
+    name: opts.name ?? "require-all",
     deps: Object.fromEntries(Object.entries(opts.deps).map(([role, ref]) => [role, settled(ref)])),
   });
 }
@@ -166,7 +167,7 @@ export type RestoreCacheRef = NodeRef<string> & { spec: RestoreCacheSpec };
 export function restoreCache(graph: StepGraph, spec: RestoreCacheSpec): RestoreCacheRef {
   const restoreKeys = spec.restoreKeys ?? [];
   const step = defineStep({
-    kind: spec.name,
+    kind: "restore-cache",
     inputs: { version: "restore-cache:v1", path: spec.path, key: spec.key, restoreKeys },
     cacheable: false,
     action: async ({ ports, outputDir }) => {
@@ -183,7 +184,7 @@ export function restoreCache(graph: StepGraph, spec: RestoreCacheSpec): RestoreC
       return out;
     },
   });
-  return Object.assign(step.addNode(graph, {}), { spec });
+  return Object.assign(step.addNode(graph, { name: spec.name }), { spec });
 }
 
 /** A save's deps as its action declares them: the restore it saves for, and any other role. */
@@ -193,7 +194,8 @@ const cacheAndAnyRole: DepSpecs & { cache: Dep<string> } = { cache: dep<string>(
  * `actions/cache/save` as a post of its restore, with the `if: cache-hit != 'true'` every
  * example writes by hand. It waits for every node of the run downstream of the restore, whatever
  * they did; a required dep saves only when that node succeeded (`deps: { install }`), a settled
- * one whatever it did (`if: always()`). `save.json` holds what
+ * one whatever it did (`if: always()`). It is cached by its `path`, its `key` and its deps, so a
+ * post pass after a save that finished gets it from the cache. `save.json` holds what
  * `@actions/cache` returned, the entry's id or -1 when it did not save, or null when it was not
  * asked: a hit on the primary key, or a save the service refused, which is a warning, not a
  * failure. An invalid key is a workflow bug and fails the node.
@@ -202,32 +204,21 @@ export function saveCache(
   graph: StepGraph,
   opts: { name: string; cache: RestoreCacheRef; deps?: DepRecord & { cache?: never } & WaitRoles },
 ): PostRef<string> {
-  const { path, key } = opts.cache.spec;
   const step = defineStep({
-    kind: opts.name,
+    kind: "save-cache",
     deps: cacheAndAnyRole,
-    inputs: { version: "save-cache:v2" },
-    cacheable: false,
-    action: async ({ depOutputs, ports: p, outputDir }) => {
+    inputs: { version: "save-cache:v2", path: opts.cache.spec.path, key: opts.cache.spec.key },
+    action: async ({ inputs: { path, key }, depOutputs, ports: p, outputDir }) => {
       const matched: unknown = JSON.parse(await depOutputs.cache.text());
       const out = `${outputDir}/save.json`;
-      // The post pass reruns a save the cancel landed on in a new output dir. A copy of what it
-      // returned, beside the log where every attempt of the key finds it, keeps it from saving twice.
-      const record = logOf(outputDir).replace(/log$/, "save.json");
       const done = async (id: number | null, line: string) => {
         await p.fs.writeText(out, JSON.stringify(id));
-        await p.fs.writeText(record, JSON.stringify(id));
         await writeLog(p.fs, outputDir, line);
         return out;
       };
       if (matched === key) {
         return done(null, `Cache hit occurred on the primary key ${key}, not saving cache.`);
       }
-      const prior: unknown = (await p.fs.exists(record))
-        ? JSON.parse(await p.fs.readText(record))
-        : null;
-      if (typeof prior === "number" && prior >= 0)
-        return done(prior, `Cache saved with key: ${key}`);
       let id: number;
       try {
         id = await p.actionsCache.saveCache(path, key);
@@ -243,11 +234,12 @@ export function saveCache(
     },
   });
   const deps = { cache: opts.cache, ...opts.deps };
-  const ref = step.addNode(graph, { deps });
+  const ref = step.addNode(graph, { name: opts.name, deps });
   recordPost(graph, ref.name, {
     main: opts.cache.name,
     deps,
-    addTo: (other, deps) => void step.addNode(other, { deps: { ...deps, cache: opts.cache } }),
+    addTo: (other, deps) =>
+      void step.addNode(other, { name: opts.name, deps: { ...deps, cache: opts.cache } }),
   });
   return postRef(ref);
 }
@@ -311,7 +303,7 @@ export function uploadArtifact<D extends DepRecord>(
   // What `path` names, as the no-files message shows it; set when the node is added.
   let shown: string[] = [];
   const step = defineStep({
-    kind: spec.name,
+    kind: "upload-artifact",
     deps: anyRole,
     nodeInputs: nodeInputs<{ path: readonly PathItem<unknown>[] }>,
     inputs: {
@@ -363,6 +355,7 @@ export function uploadArtifact<D extends DepRecord>(
     },
   });
   return step.addNode(graph, {
+    name: spec.name,
     ...(spec.deps && { deps: spec.deps }),
     inputs: (refs) => {
       const path = typeof spec.path === "function" ? spec.path(refs) : spec.path;

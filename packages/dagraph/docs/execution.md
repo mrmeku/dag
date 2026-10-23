@@ -16,7 +16,7 @@ It takes three arguments:
 - **The execution context.** It holds the actions' ports, the cache, the file system and the CAS directory. It outlives any one execution.
 - **The options.** They control one execution: the scheduler, `onEvent`, `force` and the cancel `signal`.
 
-One call of `execute`, or of [`orchestrate`](executors.md), over one graph is an execution. Cancelling and limits are each for one execution. `execute` also hashes each input file once per execution, however many nodes declare it. Under `orchestrate`, each call of `processNode` hashes the files that its node declares.
+One call of `execute`, or of [`orchestrate`](executors.md), over one graph is an execution. Cancelling and limits are each for one execution. Under `execute` and `orchestrate`, each call of `processNode` hashes the files that its node declares.
 
 ## The execution context
 

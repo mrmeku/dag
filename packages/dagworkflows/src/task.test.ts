@@ -3,7 +3,6 @@ import {
   file,
   Graph,
   MemCache,
-  settled,
   type DepRecord,
   type InputRecord,
   type Result,
@@ -203,118 +202,22 @@ describe("a task", () => {
     }
   });
 
-  test("that declares the same inputs, deps in the same roles, outputs and invalidateOn as another cached task, with another function, is refused, naming both; one uncached, or with the same function, is not", () => {
-    const graph = new Graph<Ports>();
-    const pack = task(graph, {
-      name: "pack",
-      outputs: { tarball: "pkg.tgz" },
-      action: async () => {},
-    });
-    const manifest = (name: string, more: object) =>
-      refusal(() =>
-        task(graph, {
-          name,
-          outputs: { manifest: "manifest.json" },
-          action: async () => {},
-          ...more,
-        }),
-      );
-    // A matrix loop whose action would read os from the closure, not from inputs.
-    const loop = ["linux", "macos"].map((os) =>
-      manifest(`manifest:${os}`, { inputs: { version: "manifest-v1" } }),
-    );
-    const shared = async () => {};
-    const refused = (name: string, other: string) =>
-      `task "${name}" has the same inputs, deps, outputs and invalidateOn as task "${other}", so the two could share a cached result. Put a value its action reads in inputs: inputs: { version: "test-v1", os }, read as inputs.os.`;
+  test("keys its kind: identical cached cmd tasks share one entry, a renamed cmd task hits, and a renamed action task runs again", async () => {
+    const { ports } = createTestPorts({ exec: { run: async () => exited(0) } });
+    const cache = new MemCache();
+    const once = async (lint: string[], notes: string) => {
+      const graph = new Graph<Ports>();
+      for (const name of lint)
+        addCommand(graph, { name, cmd: ["lint"], inputs: { version: "lint-v1" } });
+      task(graph, { name: notes, inputs: { version: "notes-v1" }, action: ({ log }) => log("x") });
+      const results = await executeUnder(graph, ports, cache);
+      return Object.fromEntries(results.map((r) => [r.name, r.status]));
+    };
     assert.deepEqual(
-      {
-        loop,
-        osInInputs: manifest("manifest:os", { inputs: { version: "manifest-v1", os: "linux" } }),
-        otherFile: manifest("lockfile:a", { inputs: { lock: file("a.lock") } }),
-        sameFile: manifest("lockfile:b", { inputs: { lock: file("a.lock") } }),
-        otherOutputs: refusal(() =>
-          task(graph, {
-            name: "report",
-            inputs: { version: "manifest-v1" },
-            action: async () => {},
-          }),
-        ),
-        deps: [
-          manifest("dep:a", { inputs: { version: "v" }, deps: { pack } }),
-          manifest("dep:other-role", { inputs: { version: "v" }, deps: { tarball: pack } }),
-          // The engine keys a settled dep as a required one while both succeed.
-          manifest("dep:settled", { inputs: { version: "v" }, deps: { pack: settled(pack) } }),
-        ],
-        // Compared by the roles fingerprinted: two functions may return one string.
-        invalidateOn: [
-          manifest("fp:a", {
-            inputs: { version: "f" },
-            deps: { pack },
-            invalidateOn: { pack: () => "a" },
-          }),
-          manifest("fp:b", {
-            inputs: { version: "f" },
-            deps: { pack },
-            invalidateOn: { pack: () => "b" },
-          }),
-          manifest("fp:content", { inputs: { version: "f" }, deps: { pack } }),
-        ],
-        // The engine keys no fingerprint of a role left undefined.
-        invalidateOnAbsentDep: [
-          manifest("fp:absent:a", {
-            inputs: { version: "g" },
-            deps: { pack: undefined },
-            invalidateOn: { pack: () => "a" },
-          }),
-          manifest("fp:absent:b", { inputs: { version: "g" }, deps: { pack: undefined } }),
-        ],
-        sameFunction: [
-          manifest("shared:a", { inputs: { version: "s" }, action: shared }),
-          manifest("shared:b", { inputs: { version: "s" }, action: shared }),
-        ],
-        uncached: [
-          manifest("uncached:a", { inputs: { version: "u" }, cacheable: false }),
-          manifest("uncached:b", { inputs: { version: "u" }, cacheable: false }),
-        ],
-        noInputs: [manifest("none:a", {}), manifest("none:b", {})],
-        noInputsCached: [
-          manifest("cached:a", { cacheable: true }),
-          manifest("cached:b", { cacheable: true }),
-        ],
-        commands: [
-          refusal(() => addCommand(graph, { name: "lint:a", cmd: ["lint"], inputs: { v: 1 } })),
-          refusal(() => addCommand(graph, { name: "lint:b", cmd: ["lint"], inputs: { v: 1 } })),
-        ],
-      },
-      {
-        loop: ["accepted", refused("manifest:macos", "manifest:linux")],
-        osInInputs: "accepted",
-        otherFile: "accepted",
-        sameFile: refused("lockfile:b", "lockfile:a"),
-        otherOutputs: "accepted",
-        deps: ["accepted", "accepted", refused("dep:settled", "dep:a")],
-        invalidateOn: ["accepted", refused("fp:b", "fp:a"), "accepted"],
-        invalidateOnAbsentDep: ["accepted", refused("fp:absent:b", "fp:absent:a")],
-        sameFunction: ["accepted", "accepted"],
-        uncached: ["accepted", "accepted"],
-        noInputs: ["accepted", "accepted"],
-        noInputsCached: ["accepted", refused("cached:b", "cached:a")],
-        commands: ["accepted", "accepted"],
-      },
-    );
-  });
-
-  test("with another's name is refused by the engine as a duplicate name, before the duplicate declaration check", () => {
-    const graph = new Graph<Ports>();
-    const add = () =>
-      refusal(() =>
-        task(graph, { name: "notes", inputs: { version: "notes-v1" }, action: async () => {} }),
-      );
-    assert.deepEqual(
-      [add(), add()],
+      [await once(["lint"], "notes"), await once(["lint", "lint:copy"], "notes:renamed")],
       [
-        "accepted",
-        'Duplicate node name "notes". Names are unique in a graph: give the node a name of its own, or add it through graph.subgraph(prefix, meta).',
+        { lint: "done", notes: "done" },
+        { lint: "cached", "lint:copy": "cached", "notes:renamed": "done" },
       ],
     );
   });

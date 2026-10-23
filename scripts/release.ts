@@ -12,10 +12,12 @@
  *   both packages, so each pack reads both packages' sources. The engine is published before the
  *   runner that depends on it.
  * - publish: a receipt. Cached by the tarball it published and the command, so a re-run skips it;
- *   runs only after require-all. A dry run publishes with --dry-run: a different command, a
- *   different key, never confused with the real one. A prerelease version goes under the `next`
- *   dist-tag, which npm 11 insists on, so `latest` only ever moves to a release. npm
- *   authenticates through trusted publishing, which also attaches provenance.
+ *   runs only after require-all. It asks npm first and publishes only a version npm does not
+ *   have, so a run without its cache publishes nothing twice. A dry run publishes with
+ *   --dry-run: a different command, a different key, never confused with the real one. A
+ *   prerelease version goes under the `next` dist-tag, which npm 11 insists on, so `latest` only
+ *   ever moves to a release. npm authenticates through trusted publishing, which also attaches
+ *   provenance.
  * - action: the bundle (main and post entries) is an output of build:action; release:action
  *   pushes it to github.com/mrmeku/dagworkflows, the ref consumers use, and tags it.
  * - upload: each tarball and the bundle go up as artifacts of the run as soon as they are built,
@@ -95,15 +97,13 @@ export default defineWorkflow({
     const publish = (pkg: Pkg, after: { engine?: NodeRef }) =>
       workflow.task({
         name: `publish:${pkg}`,
-        cmd: ({ pack }) => [
-          "npm",
-          "publish",
-          pack.tarball,
-          "--access",
-          "public",
-          ...(version.includes("-") ? ["--tag", "next"] : []),
+        shell: [
+          `npm view @mrmeku/${pkg}@${version} version ||`,
+          'npm publish "$TARBALL" --access public',
+          ...(version.includes("-") ? ["--tag next"] : []),
           ...(dryRun ? ["--dry-run"] : []),
-        ],
+        ].join(" "),
+        env: ({ pack }) => ({ TARBALL: pack.tarball }),
         deps: { requireAll, pack: tarballs[pkg], ...after },
         cacheable: true,
       });

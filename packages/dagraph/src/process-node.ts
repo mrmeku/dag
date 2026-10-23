@@ -4,12 +4,10 @@ import {
   collectPaths,
   computeActionKey,
   hashBytes,
-  hashInput,
   hashOutputFiles,
   mapPaths,
   verifyOutputs,
   type HashFileFn,
-  type InputHashMemo,
   type KeyedDep,
   type KeyedInput,
 } from "./content-addressing.ts";
@@ -59,21 +57,14 @@ export const ungated = (): Promise<void> => Promise.resolve();
 /** The message of the error of a node that `cacheOnly` found no verified entry for. */
 export const NOT_CACHED = "not cached";
 
-/**
- * The input hash memo of each execution, by the execution context `execute` makes for it, so
- * the nodes of one execution that declare one file hash it once.
- */
-export const inputHashMemos = new WeakMap<object, InputHashMemo>();
-
 /** Removes an attempt's directory, best effort: whether it is gone never changes a result. */
 const discard = (fs: DagFs, dir: string) => fs.remove(dir).catch(() => {});
 
 /**
  * Move an attempt's directory to `published`, the key's directory for its content, which
- * nothing writes again, and return the outputs at their new paths and the directory that holds
- * them. When a concurrent attempt published the same content first, its copy is used and this
- * one dropped. When that copy no longer hashes to the content, the attempt's directory stays
- * where it is and keeps the outputs.
+ * nothing writes again, and return the outputs at their new paths. When a concurrent attempt
+ * published the same content first, its copy is used and this one dropped. When that copy no
+ * longer hashes to the content, the attempt's directory stays where it is and keeps the outputs.
  */
 async function publish(
   fs: DagFs,
@@ -81,17 +72,17 @@ async function publish(
   staging: string,
   outputs: Outputs,
   contentHash: string,
-): Promise<{ outputs: Outputs; dir: string }> {
+): Promise<Outputs> {
   const published = `${keyDir}/out-${contentHash}`;
   const moved = mapPaths(outputs, (path) => published + normalize(path).slice(staging.length));
   try {
     await fs.rename(staging, published);
   } catch {
     if (!(await verifyOutputs({ outputs: moved, contentHash }, fs.hashFile, keyDir)))
-      return { outputs, dir: staging };
+      return outputs;
     await discard(fs, staging);
   }
-  return { outputs: moved, dir: published };
+  return moved;
 }
 
 /** What the `invalidateOn` fingerprint of `role` returned, refused where it is not a string. */
@@ -103,14 +94,13 @@ function fingerprintString(role: string, value: unknown): string {
   );
 }
 
-/** The node's action key, from its inputs by name and its deps by role. */
+/** The node's action key, from its kind, its inputs by name and its deps by role. */
 async function actionKeyOf(
   { spec, roles, inputs }: GraphNode,
   entryOf: (dep: string) => CacheEntry | undefined,
   ports: unknown,
   hashFile: HashFileFn,
   handle: (path: string) => unknown,
-  memo: InputHashMemo,
 ): Promise<string> {
   const rolesOf = (dep: string) =>
     Object.keys(roles)
@@ -121,7 +111,7 @@ async function actionKeyOf(
   const keyedInputs: Record<string, KeyedInput> = {};
   for (const [name, value] of Object.entries(inputs)) {
     keyedInputs[name] = isFileInput(value)
-      ? ["file", value[FILE_INPUT], await hashInput(value[FILE_INPUT], hashFile, memo)]
+      ? ["file", value[FILE_INPUT], await hashFile(value[FILE_INPUT])]
       : ["value", canonical(value, refKey)];
   }
   const keyedDeps: Record<string, KeyedDep> = {};
@@ -139,7 +129,7 @@ async function actionKeyOf(
           ]
         : ["content", entry.contentHash];
   }
-  return computeActionKey(keyedInputs, keyedDeps);
+  return computeActionKey(spec.kind, keyedInputs, keyedDeps);
 }
 
 /**
@@ -170,8 +160,7 @@ export async function processNode<Ports, Meta>(
 
   let actionKey: string;
   try {
-    const memo = inputHashMemos.get(executionContext) ?? new Map<string, Promise<string>>();
-    actionKey = await actionKeyOf(found, entryOf, ports, fs.hashFile, handle, memo);
+    actionKey = await actionKeyOf(found, entryOf, ports, fs.hashFile, handle);
   } catch (e) {
     return { name, actionKey: "", status: "failed", error: errorOf(e), elapsed: 0 };
   }
@@ -209,12 +198,8 @@ export async function processNode<Ports, Meta>(
     await discard(fs, staging);
     return result;
   };
-  let earlier: string[];
   try {
     await fs.ensureDir(staging);
-    // The key's published directories before this attempt: once it publishes, they go. An
-    // attempt that runs beside this one publishes later, so this one never removes its files.
-    earlier = (await fs.readdir(keyDir)).filter((dir) => /^out(-|$)/.test(dir));
   } catch (e) {
     return dropped(notRun(e));
   }
@@ -280,10 +265,8 @@ export async function processNode<Ports, Meta>(
       (p) => `${staging}/${normalize(fs.resolve(p)).slice(under.length)}`,
     );
     const contentHash = await hashOutputFiles(returned, fs.hashFile, keyDir);
-    const { outputs, dir } = await publish(fs, keyDir, staging, returned, contentHash);
+    const outputs = await publish(fs, keyDir, staging, returned, contentHash);
     if (node.cacheable !== false) await cache.put(actionKey, { outputs, contentHash });
-    for (const old of earlier)
-      if (`${keyDir}/${old}` !== dir) await discard(fs, `${keyDir}/${old}`);
     return {
       name,
       actionKey,

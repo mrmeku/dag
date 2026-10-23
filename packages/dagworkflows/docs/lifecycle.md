@@ -33,7 +33,7 @@ Other `deps` are ordinary dependencies. `deps: { install }` runs the post step o
 
 These rules apply:
 
-- A post step runs each time. It takes no `inputs`, `cacheable` or `invalidateOn`, and dagworkflows never caches it.
+- A post step that `workflow.post` adds runs each time. It takes no `inputs`, `cacheable` or `invalidateOn`, and dagworkflows never caches it. A cache save is the one post step that comes from the cache. See [Cache and artifacts](cache-and-artifacts.md#actionscache).
 - No task depends on a post step. Only another post step takes it, as its `main`.
 - A post step never waits for the other post steps of its main, or for theirs.
 - Post steps run in the reverse order of their mains, as GitHub's do: when one main is upstream of another, as a cache restore is of `up:db`, the post steps of the downstream main run first.

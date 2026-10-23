@@ -11,6 +11,7 @@ export default defineWorkflow({
       cmd: ["tsc", "-p", "tsconfig.build.json"],
       deps: { install },
       inputs: src,
+      cacheable: false,
     });
     const typecheck = workflow.task({
       name: "typecheck",

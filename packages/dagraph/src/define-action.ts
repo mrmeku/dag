@@ -22,8 +22,9 @@ type Empty = Record<never, never>;
 
 /**
  * What `defineAction` takes. Its types come from its fields: the deps by `deps`, the inputs by
- * `nodeInputs` and `inputs`, and the outputs, `R`, by what `action` returns. Only the inputs and
- * the deps' content join a node's key; `deps` and `nodeInputs` declare, and each node gives.
+ * `nodeInputs` and `inputs`, and the outputs, `R`, by what `action` returns. Only the kind, the
+ * inputs and the deps' content join a node's key; `deps` and `nodeInputs` declare, and each node
+ * gives.
  */
 export interface ActionSpec<
   Ports,
@@ -33,7 +34,11 @@ export interface ActionSpec<
   I,
   Group extends string = never,
 > {
-  /** What kind of work it is, as Bazel's mnemonic: a label for display and routing, not keyed. */
+  /**
+   * What kind of work it is, as Bazel's mnemonic. It names the action's logic and joins the key,
+   * so actions of two kinds never share an entry. A factory of actions of one kind puts what
+   * differs between them in their inputs.
+   */
   kind: string;
   /**
    * The deps each node gives, by role. A role is the action that produces it, `{ fetch }`, or

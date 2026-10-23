@@ -8,7 +8,7 @@ A Bun workspace of two packages. This directory is exported as is to the public 
 
 ### Cache constraints
 
-Action key = hash(each input by name: a file's path and content hash, or a value as JSON + each dep by role: its content hash, its `invalidateOn` fingerprint, or missing for a `settled` dep that failed). Neither a node's name nor its kind is keyed: bump a version input when an action's logic changes. `--force` is a one-off retry. `cacheable: false` opts a node out. Deps are keyed by role, so reordering `deps` changes nothing. A node that re-executes to identical output does not invalidate its dependents.
+Action key = hash(the action's kind + each input by name: a file's path and content hash, or a value as JSON + each dep by role: its content hash, its `invalidateOn` fingerprint, or missing for a `settled` dep that failed). The kind names the action's logic, but the function is not keyed: bump a version input when an action's logic changes. A node's name is not keyed. `--force` is a one-off retry. `cacheable: false` opts a node out. Deps are keyed by role, so reordering `deps` changes nothing. A node that re-executes to identical output does not invalidate its dependents.
 
 ### Testing
 

@@ -252,6 +252,42 @@ describe("a post", () => {
     );
   });
 
+  test("of an action has its name as its kind, so two on one main have keys and logs of their own; a post of a command has the kind post", async () => {
+    const { ports } = createTestPorts();
+    const { implementation } = defineWorkflow({
+      implementation: (workflow) => {
+        const db = workflow.task({ name: "up:db", cmd: ["db", "start"] });
+        workflow.post({ name: "down", main: db, action: ({ log }) => log("down") });
+        workflow.post({ name: "dump", main: db, action: ({ log }) => log("dump") });
+        workflow.post({ name: "stop", main: db, cmd: ["db", "stop"] });
+      },
+    });
+    const graph = new Graph<Ports>();
+    await implementation(graph, ports, await ports.host.context());
+    const { results } = await runWorkflow({
+      implementation,
+      ports,
+      casBaseDir: CAS,
+      historyDir: HISTORY_DIR,
+    });
+    const logOf = async (name: string) => {
+      const result = results.find((r) => r.name === name);
+      return result && (await ports.fs.readText(logPath(CAS, result.actionKey)));
+    };
+    assert.deepEqual(
+      {
+        kinds: Object.fromEntries(graph.describe().map((n) => [n.name, n.kind])),
+        down: await logOf("down"),
+        dump: await logOf("dump"),
+      },
+      {
+        kinds: { "up:db": "run", down: "down", dump: "dump", stop: "post" },
+        down: "down\n",
+        dump: "dump\n",
+      },
+    );
+  });
+
   test("is refused, with the others, when posts would wait for each other", async () => {
     const { ports } = createTestPorts();
     const { implementation } = defineWorkflow({

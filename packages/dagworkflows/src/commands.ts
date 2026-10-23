@@ -254,14 +254,15 @@ function commandInputs<D extends DepRecord, O extends string>(
 }
 
 /**
- * Adds a command, a task whose work is `cmd` or `shell`, to `graph`. `where` and `deps` are
- * `addTask`'s.
+ * Adds a command, a task whose work is `cmd` or `shell`, to `graph`. `where`, `deps` and `kind`
+ * are `addTask`'s: `run` or `run-shell` by default, since its key holds its line, `cwd` and `env`.
  */
 export function addCommand<D extends DepRecord, O extends string = never>(
   graph: Graph<Ports>,
   spec: CommandFields<string, D, O> & Work<D, O>,
   where = `task "${spec.name}"`,
   deps: DepRecord | undefined = spec.deps,
+  kind = spec.shell === undefined ? "run" : "run-shell",
 ): NodeRef<Record<O, string>> {
   const { cmd: _cmd, shell: _shell, env: _env, cwd: _cwd, inputs: authored = {}, ...rest } = spec;
   return addTask<D, O, CommandInputs>(
@@ -275,5 +276,6 @@ export function addCommand<D extends DepRecord, O extends string = never>(
     },
     where,
     deps,
+    kind,
   );
 }

@@ -1,5 +1,4 @@
 import {
-  checkInputs,
   nodeInputs,
   type ActionContext,
   type ActionSpec,
@@ -13,7 +12,6 @@ import {
   type SettledRef,
 } from "@mrmeku/dagraph";
 import { isAbsolute } from "node:path";
-import { isDeepStrictEqual } from "node:util";
 import { defineStep } from "./define-step.ts";
 import type { Exec, ExecResult, Ports } from "./ports.ts";
 import { warningLine, writeLog, type CommandCause } from "./step-records.ts";
@@ -95,12 +93,10 @@ export type OutputsField<O extends string> = [O] extends [never]
 /**
  * What `workflow.task` takes for a node whose work is `action`, a TypeScript function, and
  * neither `cmd` nor `shell`.
- * - Its key is its `inputs`, its deps by role and its `outputs`, never its `action`. A value the
- *   action reads goes in `inputs`: `inputs: { version: "manifest-v1", os }`, then `inputs.os`.
- *   Bump the version when the action changes.
- * - Two cached tasks with the same inputs, deps, outputs and `invalidateOn` roles must share one
- *   `action` function, or they are refused: give a loop's tasks what differs as an input, as `os`
- *   above.
+ * - Its key is its name, its `inputs`, its deps by role and its `outputs`, never its `action`, so
+ *   a renamed task runs again. A value the action reads goes in `inputs`:
+ *   `inputs: { version: "manifest-v1", os }`, then `inputs.os`. Bump the version when the action
+ *   changes.
  * - It is cached only when it declares inputs, unless it sets `cacheable`.
  */
 export type ActionTaskSpec<
@@ -126,45 +122,6 @@ export function byRole<O extends string, V>(
   );
   // eslint-disable-next-line @typescript-eslint/consistent-type-assertions -- a record over the roles of O, which exist only in the types; a spec without outputs has O never, and its {} is right
   return mapped as Record<O, V>;
-}
-
-const cachedTasks = new WeakMap<
-  Graph<Ports>,
-  { name: string; declared: unknown; action: unknown }[]
->();
-
-/**
- * Refuses a cached task that declares what an earlier one did, as the engine keys it, with
- * another action function: the engine would give it the earlier one's result. A fingerprinted
- * role counts as one whatever its function, which may return what the other's does.
- */
-function refuseDuplicate<D extends DepRecord, O extends string, I extends InputRecord<unknown>>(
-  graph: Graph<Ports>,
-  where: string,
-  task: Pick<TaskFields<string, D, O, I>, "name" | "outputs" | "invalidateOn" | "action">,
-  deps: DepRecord | undefined,
-  inputs: I | undefined,
-) {
-  const declared = {
-    inputs: checkInputs(inputs, where),
-    deps: Object.fromEntries(depRoles(deps).map(([role, dep]) => [role, dep.name])),
-    outputs: task.outputs ?? {},
-    invalidateOn: depRoles(deps)
-      .map(([role]) => role)
-      .filter((role) => task.invalidateOn?.[role] !== undefined)
-      .sort(),
-  };
-  const earlier = cachedTasks.get(graph) ?? [];
-  const same = earlier.find(
-    (other) => other.action !== task.action && isDeepStrictEqual(other.declared, declared),
-  );
-  if (same)
-    throw new Error(
-      `${where} has the same inputs, deps, outputs and invalidateOn as task "${same.name}", so ` +
-        `the two could share a cached result. Put a value its action reads in inputs: ` +
-        `inputs: { version: "test-v1", os }, read as inputs.os.`,
-    );
-  cachedTasks.set(graph, [...earlier, { name: task.name, declared, action: task.action }]);
 }
 
 /** Runs `spec.action` with what a task gets, logging beside `outputDir`, then checks its outputs. */
@@ -230,7 +187,8 @@ async function runTask<D extends DepRecord, O extends string, I extends InputRec
 /**
  * Adds `spec` to `graph` as a node of an action defined for it alone. `where` names it in errors
  * as the call that added it: `task "lint"`. `deps`, when given, replaces the spec's: a post gives
- * its main beside its own, and a run adds it again with its waits.
+ * its main beside its own, and a run adds it again with its waits. `kind` names the logic the
+ * engine keys: the task's name for its own `action`, which nothing else identifies.
  */
 export function addTask<
   D extends DepRecord,
@@ -241,6 +199,7 @@ export function addTask<
   spec: TaskFields<string, D, O, I>,
   where = `task "${spec.name}"`,
   deps: DepRecord | undefined = spec.deps,
+  kind = spec.name,
 ): NodeRef<Record<O, string>> {
   const declaredOutputs: Record<string, string> = spec.outputs ?? {};
   for (const [role, file] of Object.entries(declaredOutputs)) {
@@ -257,7 +216,7 @@ export function addTask<
   const cacheable =
     spec.cacheable ?? Object.values(record ?? {}).some((value) => value !== undefined);
   const action = defineStep<Record<O, string>, DepSpecsOf<D>, I, DeclaredOutputs>({
-    kind: spec.name,
+    kind,
     nodeInputs: nodeInputs<I>,
     inputs: { declaredOutputs },
     cacheable,
@@ -272,9 +231,5 @@ export function addTask<
     ...(deps && { deps }),
     ...(spec.inputs && { inputs: spec.inputs }),
   } as unknown as NodeParams<DepSpecsOf<D>, I, DeclaredOutputs, undefined>;
-  const ref = action.addNode(graph, params);
-  // A command's inputs are a function, and its one action function is shared.
-  if (cacheable && typeof spec.inputs !== "function")
-    refuseDuplicate(graph, where, spec, deps, record);
-  return ref;
+  return action.addNode(graph, params);
 }

@@ -86,7 +86,13 @@ export function post<D extends DepRecord, O extends string = never, M extends Ma
     }
     const fields: CommandPostFields<string, D, O, M> & Work<D & MainDep<M>, O> = spec;
     const { main: _main, deps: _deps, ...command } = fields;
-    return addCommand<D & MainDep<M>, O>(target, { ...command, cacheable: false }, where, deps);
+    return addCommand<D & MainDep<M>, O>(
+      target,
+      { ...command, cacheable: false },
+      where,
+      deps,
+      "post",
+    );
   };
   const deps = { main, ...spec.deps };
   const ref = add(graph, deps);

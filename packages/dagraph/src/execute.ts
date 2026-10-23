@@ -1,6 +1,6 @@
 import type { Graph } from "./graph/index.ts";
 import { orchestrate, type RunNode, type Scheduler } from "./orchestrate.ts";
-import { inputHashMemos, processNode, type ExecutionContext } from "./process-node.ts";
+import { processNode, type ExecutionContext } from "./process-node.ts";
 import { unboundedScheduler } from "./schedulers.ts";
 import type { ExecEvent, Result } from "./types.ts";
 
@@ -20,8 +20,7 @@ export interface ExecuteOptions<Meta = unknown> {
 
 /**
  * Run a graph in one process: orchestration, and each node processed in the same process with
- * the same graph and `onEvent`. Each input file is hashed once per execution, however many
- * nodes declare it. Returns one result per node, in the order they settled.
+ * the same graph and `onEvent`. Returns one result per node, in the order they settled.
  */
 export function execute<Ports, Meta>(
   graph: Graph<Ports, Meta>,
@@ -29,10 +28,8 @@ export function execute<Ports, Meta>(
   options: ExecuteOptions<Meta> = {},
 ): Promise<Result[]> {
   const { force = false, onEvent, scheduler = unboundedScheduler(), signal } = options;
-  const execution = { ...executionContext };
-  inputHashMemos.set(execution, new Map());
   const run: RunNode<Meta> = (node, depEntries, acquire) =>
-    processNode(graph, node.name, depEntries, execution, {
+    processNode(graph, node.name, depEntries, executionContext, {
       force,
       acquire,
       ...(signal && { signal }),

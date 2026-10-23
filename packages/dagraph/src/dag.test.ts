@@ -295,7 +295,7 @@ describe("execute", () => {
 });
 
 describe("the action key", () => {
-  test("inputs and deps alone identify an action: not its kind, function or how-to-run fields, nor the node's name or meta", async () => {
+  test("the kind, inputs and deps identify an action: not its function or how-to-run fields, nor the node's name or meta", async () => {
     const { ctx, fs } = setup();
     const make = (kind: string, content: string, group?: Group) =>
       defineActionWithPorts({
@@ -307,17 +307,26 @@ describe("the action key", () => {
     const first = new Graph<Ports, { video: string }>();
     make("one", "made by one").addNode(first, { name: "a", meta: { video: "x" } });
     const second = new Graph<Ports, { video: string }>();
-    make("two", "made by two", "heavy").addNode(second.subgraph("v", { video: "y" }), {
+    make("one", "made again", "heavy").addNode(second.subgraph("v", { video: "y" }), {
       name: "b",
     });
+    const third = new Graph<Ports, { video: string }>();
+    make("two", "made by two").addNode(third, { name: "a", meta: { video: "x" } });
     const [one] = await execute(first, ctx);
-    const [two] = await execute(second, ctx);
-    assert.ok(one && two, "each graph settles its node");
+    const [again] = await execute(second, ctx);
+    const [two] = await execute(third, ctx);
+    assert.ok(one && again && two, "each graph settles its node");
     expect({
       one: one.status,
-      two: [two.name, two.status, two.actionKey === one.actionKey],
-      read: await fs.readText(outputsOf(two)),
-    }).toEqual({ one: "done", two: ["v:b", "cached", true], read: "made by one" });
+      again: [again.name, again.status, again.actionKey === one.actionKey],
+      two: [two.status, two.actionKey === one.actionKey],
+      read: [await fs.readText(outputsOf(again)), await fs.readText(outputsOf(two))],
+    }).toEqual({
+      one: "done",
+      again: ["v:b", "cached", true],
+      two: ["done", false],
+      read: ["made by one", "made by two"],
+    });
   });
 
   test("deps key by role: renaming nodes re-keys nothing, swapping deps between roles re-keys", async () => {
@@ -362,7 +371,7 @@ describe("the action key", () => {
     ]);
   });
 
-  test("a file input keys on its path and content, reads as a handle on the file, and is hashed once per execution", async () => {
+  test("a file input keys on its path and content, reads as a handle on the file, and is hashed by each node that declares it", async () => {
     const { ctx, fs } = setup();
     const hashed: string[] = [];
     const counting = {
@@ -392,11 +401,38 @@ describe("the action key", () => {
     const ran = { one: "done", two: "done", three: "done" } as const;
     expect({ first, firstHashed, same, edited, asValue }).toEqual({
       first: [ran, "/src/a.ts: a1"],
-      firstHashed: 1,
+      firstHashed: 3,
       same: [{ one: "cached", two: "cached", three: "cached" }, "/src/a.ts: a1"],
       edited: [ran, "/src/a.ts: a2"],
       asValue: [ran, '{"id":"one","src":"/src/a.ts"}'],
     });
+  });
+
+  test("a node keys a declared file as its dep wrote it, though a node before the dep hashed it in the same execution", async () => {
+    const { ctx, fs } = setup();
+    const reader = defineActionWithPorts({
+      kind: "reader",
+      deps: anyRole,
+      nodeInputs: nodeInputs<{ id: string; src: FileInput }>,
+      action: async (c) => write(c, "out", await c.inputs.src.text()),
+    });
+    const run = async (generated: string) => {
+      await fs.writeText("/src/gen.ts", "old");
+      const g = new Graph<Ports>();
+      const src = file("/src/gen.ts");
+      reader.addNode(g, { name: "early", inputs: { id: "early", src } });
+      const gen = task(g, "gen", {
+        cacheable: false,
+        run: async (c) => (await c.ports.fs.writeText("/src/gen.ts", generated), "written"),
+      });
+      reader.addNode(g, { name: "late", deps: { gen }, inputs: { id: "late", src } });
+      const late = (await execute(g, ctx)).find((r) => r.name === "late");
+      return [late?.status, await fs.readText(outputsOf(late))];
+    };
+    expect([await run("one"), await run("two")]).toEqual([
+      ["done", "one"],
+      ["done", "two"],
+    ]);
   });
 
   test("an output ref reads as a handle on the dep's published file and keys by role and output name, so an invalidateOn fingerprint still holds", async () => {
@@ -523,13 +559,14 @@ describe("refs and outputs in the key", () => {
 
   test("a ref from the inputs function keys as the same ref written from its node did", async () => {
     const { ctx } = setup();
-    // The keys these nodes had when their refs were written as p.outputs.main (25a5ee4).
+    // The keys these nodes had when their refs were written as p.outputs.main (25a5ee4), but
+    // for their kind, which joined the key later.
     expect({
       leftMain: await keyOfUse(ctx, ["p", "q"], leftAndRight("left", "main")),
       twoRoles: await keyOfUse(ctx, ["p", "q"], twoRoles("main", "same")),
     }).toEqual({
-      leftMain: "4437984847a09b2e0b1b44733e9abf13951c0adc74eb6ab8b7f6a921b03a5f44",
-      twoRoles: "c9037e4e25ebbb96342b1d3c091c61192ff72c6db978a715c8d693ff1e43fc9d",
+      leftMain: "c710877ccdc0d9d7753c81e51b8dd94f08613a87f5b6deddf6fe479af52e2716",
+      twoRoles: "c81359adb4c07b9d4907f9027904d9724856e2bd6d1d0c5408b80f70c7667916",
     });
   });
 
@@ -839,31 +876,7 @@ describe("the CAS", () => {
     expect({ during, after: await cache.get("k") }).toEqual({ during: old, after: next });
   });
 
-  test("a key that re-executes to new content removes the dir its old entry named, a legacy {key}/out included", async () => {
-    const { ctx, fs, cache } = setup((fs) => new FsCache("/cas", fs));
-    let content = "one";
-    const run = async (force: boolean) => {
-      const g = new Graph<Ports>();
-      task(g, "m", { run: () => content });
-      return succeeded((await execute(g, ctx, { force }))[0]);
-    };
-    const first = await run(false);
-    const dir = `/cas/${first.actionKey}`;
-    // The layout before out-{contentHash}: the entry names {key}/out.
-    await fs.remove(`${dir}/out-${first.contentHash}`);
-    await fs.writeText(`${dir}/out/out`, "one");
-    await cache.put(first.actionKey, { outputs: `${dir}/out/out`, contentHash: first.contentHash });
-    content = "two";
-    await run(true);
-    content = "three";
-    const last = await run(true);
-    expect([...fs.files.keys()].sort()).toEqual([
-      `${dir}/manifest.json`,
-      `${dir}/out-${last.contentHash}/out`,
-    ]);
-  });
-
-  test("attempts of one key at once never remove each other's files, and the key's next attempt keeps only its own", async () => {
+  test("two attempts of one key both keep their published files, and a key's older directories stay after a new attempt publishes", async () => {
     const { ctx, fs, cache } = setup((fs) => new FsCache("/cas", fs));
     let calls = 0;
     const chapters = defineActionWithPorts({
@@ -908,8 +921,11 @@ describe("the CAS", () => {
     const next = by(await execute(build(["v1"]), ctx, { force: true }));
     const dirsOf = async (node: string) => {
       const r = succeeded(next[`v1:${node}`]);
-      const dirs = (await fs.readdir(`/cas/${r.actionKey}`)).sort();
-      return dirs.map((d) => (d === `out-${r.contentHash}` ? "out-<its own>" : d));
+      const dirs = await fs.readdir(`/cas/${r.actionKey}`);
+      const own = `out-${r.contentHash}`;
+      return dirs
+        .map((d) => (d === own ? "out-<its own>" : d.startsWith("out-") ? "out-<earlier>" : d))
+        .sort();
     };
     expect({
       together,
@@ -925,8 +941,8 @@ describe("the CAS", () => {
         uploaded: [true, true],
       },
       chapters: ["manifest.json", "out-<its own>"],
-      clean: ["manifest.json", "out-<its own>"],
-      upload: ["out-<its own>"],
+      clean: ["manifest.json", "out-<earlier>", "out-<earlier>", "out-<its own>"],
+      upload: ["out-<earlier>", "out-<earlier>", "out-<its own>"],
     });
   });
 
@@ -1170,24 +1186,6 @@ describe("cacheable: false", () => {
       second: statuses(second),
       stored: await cache.get(probe.actionKey),
     }).toEqual({ second: { probe: "done", report: "cached" }, stored: undefined });
-  });
-
-  test("keeps only the output dir of its latest attempt, a legacy {key}/out included", async () => {
-    const { ctx, fs } = setup((fs) => new FsCache("/cas", fs));
-    let content = "one";
-    const run = async () => {
-      const g = new Graph<Ports>();
-      task(g, "upload", { cacheable: false, run: () => content });
-      return succeeded((await execute(g, ctx))[0]);
-    };
-    const first = await run();
-    const dir = `/cas/${first.actionKey}`;
-    await fs.writeText(`${dir}/out/id.json`, "legacy");
-    content = "two";
-    await run();
-    content = "three";
-    const last = await run();
-    expect([...fs.files.keys()].sort()).toEqual([`${dir}/out-${last.contentHash}/out`]);
   });
 });
 

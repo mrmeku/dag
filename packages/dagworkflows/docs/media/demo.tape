@@ -22,4 +22,4 @@ Sleep 12s
 Type "npx --no dag run scripts/ci.ts"
 Sleep 300ms
 Enter
-Sleep 5s
+Sleep 7s

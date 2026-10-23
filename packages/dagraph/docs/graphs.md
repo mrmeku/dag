@@ -14,7 +14,7 @@ An action is a kind of work. `defineAction` takes these fields:
 
 | Field              | Meaning                                                                                                                        |
 | ------------------ | ------------------------------------------------------------------------------------------------------------------------------ |
-| `kind`             | What kind of work it is, as Bazel's mnemonic. A label for display and routing. It is not part of the key.                      |
+| `kind`             | What kind of work it is, as Bazel's mnemonic. It names the action's logic, and it is part of the key.                          |
 | `deps`             | Optional. The [dependencies](#dependencies) that each node gives, by role, and what each one returns.                          |
 | `nodeInputs`       | Optional. The [inputs](#inputs) that each node gives when it is added, by name and type: `nodeInputs<{ width: number }>`.      |
 | `inputs`           | Optional. The [inputs](#inputs) that every node of the action has, such as a version that names the action's logic.            |
@@ -49,7 +49,7 @@ const resize = defineActionWithPorts({
 ```
 
 > [!IMPORTANT]
-> Neither the action's function nor its `kind` is part of the key. Two actions that declare the same inputs and dependencies share one cache entry. Give each action a version input that names the action and its revision, such as `"resize-v1"`, and change it when the logic changes. A bare `{ version: 2 }` copied between two actions over the same dependencies can serve one action the files of the other.
+> The action's function is not part of the key, but its `kind` is. Two actions of different kinds never share a cache entry, and two actions of one kind that declare the same inputs and dependencies do. Give each action a version input that names its revision, such as `"resize-v1"`, and change it when the logic changes. A function that makes many actions of one kind puts what differs between them in their inputs.
 
 ### The action context
 
@@ -195,7 +195,7 @@ for (const id of imageIds) {
 
 These nodes have the names `<id>:fetch` and `<id>:resize`. A subgraph can contain subgraphs. `subgraph(prefix)` without `meta` gives its nodes the `meta` of the graph it was made from. A subgraph holds the nodes under its prefix and every node they depend on, so `execute(graph.subgraph(id))` runs only those.
 
-A name is an address only. It is not part of any key. Two nodes that declare the same work have the same key and share one entry. So a value that tells two nodes apart must be an input, not only a part of the name. In the example, each `fetch` has its own `url` input.
+A name is an address only. It is not part of any key. Two nodes of one kind that declare the same work have the same key and share one entry. So a value that tells two nodes apart must be an input, not only a part of the name. In the example, each `fetch` has its own `url` input.
 
 ### Metadata
 
@@ -285,7 +285,7 @@ These rules apply:
 - A value is JSON: a string, a finite number, a boolean, `null`, or an array or a plain record of these. Its type is `InputValue`. A value that is not JSON does not compile; the table below gives the right form. A property that is `undefined` is dropped.
 - `file()` is its own input. It is never part of a value or of a string, as a [ref](#output-refs) is not, and its conversion to a string throws.
 - An input is never another node. What comes from a node is a dependency.
-- The engine hashes each file path as you give it. `execute` hashes each file once per execution, also when many nodes declare it. `processNode`, called alone, hashes the files of its one node. A file that cannot be read fails the node before it gets a key.
+- The engine hashes each file path as you give it. Each node hashes the files that it declares when it calculates its key, so it keys each file as it is when the node runs. A node that reads a file that another node writes needs a dependency on that node. A file that cannot be read fails the node before it gets a key.
 
 | Does not compile                        | Write instead                                                   |
 | --------------------------------------- | --------------------------------------------------------------- |

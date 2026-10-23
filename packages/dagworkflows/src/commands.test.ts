@@ -154,7 +154,7 @@ describe("a command", () => {
     );
   });
 
-  test("keys a cmd and a shell task as workflow.run and workflow.runShell keyed the same command, so their cache entries still hit", async () => {
+  test("keys a cmd and a shell task by their kinds, run and run-shell, beside what workflow.run and workflow.runShell keyed", async () => {
     const { ports, fs } = createTestPorts({
       files: { "src/a.ts": "a" },
       exec: {
@@ -199,12 +199,13 @@ describe("a command", () => {
       cwd: "sub",
     });
     const results = await executeUnder(graph, ports);
-    // What main's workflow.run and workflow.runShell gave the same graph.
+    // What main's workflow.run and workflow.runShell keyed for the same graph, with each node's
+    // kind.
     assert.deepEqual(Object.fromEntries(results.map((r) => [r.name, [r.status, r.actionKey]])), {
-      tests: ["failed", "645ea960b6b52dd64b4e037443ba29f82ed43d1afe9fc069afd4ba8ccfa9a535"],
-      pack: ["done", "4596f3025fd0f5ea536796c5e1a8f906ed0cce9e562eb22df97c050ca8c473b6"],
-      publish: ["failed", "de111e3628f6767fc16efa61a8ae0c8893229b6f3e48622964d96a2e3b54ce42"],
-      size: ["done", "fce48642e2d0c9b2afcbe955dd951e727acfc81c2af0ceda69d2b780b81fcca2"],
+      tests: ["failed", "9c9d43ced0349e6966f09c288a2223d060fa452d1d579f9b64071f74a325b03d"],
+      pack: ["done", "c9450dd8d43e15f5fe3febeaceffdc526c3928f1e291a2e1bd5e1c71ab17cfb3"],
+      publish: ["failed", "29ebfa34b19ce8a8bf7aecabadba0200fa0fcb6a92bb98f754de43ba468e0bd8"],
+      size: ["done", "96e923f2db21b20cd65e32ba103d773746858c2af1d22876e60434d63fde4306"],
     });
   });
 

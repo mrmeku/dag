@@ -1,9 +1,9 @@
-import { Graph } from "@mrmeku/dagraph";
+import { Graph, type Outputs } from "@mrmeku/dagraph";
 import assert from "node:assert/strict";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { describe, test } from "node:test";
-import { settled, type OutputRef } from "./index.ts";
+import { logPath, runWorkflow, settled, type OutputRef } from "./index.ts";
 import type { Ports } from "./ports.ts";
 import { createTestPorts } from "./ports/memory.ts";
 import { createWorkflow, defineWorkflow, type Workflow } from "./workflow.ts";
@@ -121,6 +121,115 @@ describe("defineWorkflow", () => {
       // @ts-expect-error a composed workflow whose group this one does not declare
       implementation: (workflow) => workflow.compose(browsers),
     });
+  });
+});
+
+describe("two of every node the facade adds", () => {
+  test("that differ in their work each have a key, a log and outputs of their own", async () => {
+    // A command prints its last argument, so its log shows which command ran.
+    const { ports, fs, actionsCache } = createTestPorts({
+      exec: {
+        run: async (argv) => {
+          const output = `${argv.at(-1) ?? ""}\n`;
+          return { code: 0, stdout: output, stderr: "", output, ok: true };
+        },
+      },
+    });
+    const { implementation } = defineWorkflow({
+      implementation: (workflow) => {
+        const db = workflow.task({ name: "db", cmd: ["echo", "db up"] });
+        for (const x of ["a", "b"]) {
+          const cache = workflow.restoreCache({
+            name: `restore:${x}`,
+            path: [x],
+            key: `${x}-1`,
+            restoreKeys: [`${x}-`],
+          });
+          workflow.saveCache({ name: `save:${x}`, cache });
+          const cmd = workflow.task({ name: `cmd:${x}`, cmd: ["echo", `cmd ${x}`] });
+          workflow.task({ name: `shell:${x}`, shell: `echo shell ${x}` });
+          const action = workflow.task({
+            name: `action:${x}`,
+            outputs: { note: "note.txt" },
+            action: async ({ out, ports: p, log }) => {
+              log(`action ${x}`);
+              await p.fs.writeText(out.note, x);
+            },
+          });
+          workflow.uploadArtifact({
+            name: `upload:${x}`,
+            artifact: x,
+            deps: { action },
+            path: ({ action }) => [action.note],
+          });
+          workflow.requireAll({ name: `require:${x}`, deps: { [x]: cmd } });
+          workflow.post({ name: `down:${x}`, main: db, action: ({ log }) => log(`down ${x}`) });
+          workflow.post({ name: `stop:${x}`, main: db, cmd: ["echo", `stop ${x}`] });
+          workflow.post({ name: `clean:${x}`, main: db, shell: `echo clean ${x}` });
+        }
+      },
+    });
+    const { results } = await runWorkflow({
+      implementation,
+      ports,
+      casBaseDir: "/cas",
+      historyDir: "/state/history",
+    });
+    const read = async (outputs: Outputs): Promise<unknown> =>
+      typeof outputs === "string"
+        ? JSON.parse(await fs.readText(outputs))
+        : Object.fromEntries(
+            await Promise.all(
+              Object.entries(outputs).map(async ([role, path]) => [
+                role,
+                typeof path === "string" ? await fs.readText(path) : path,
+              ]),
+            ),
+          );
+    const nodes = Object.fromEntries(
+      await Promise.all(
+        results.map(async (result): Promise<[string, unknown]> => {
+          const log = logPath("/cas", result.actionKey);
+          return [
+            result.name,
+            {
+              status: result.status,
+              ownKey: results.filter((other) => other.actionKey === result.actionKey).length === 1,
+              log: (await fs.exists(log)) ? await fs.readText(log) : null,
+              outputs: result.status === "done" ? await read(result.outputs) : null,
+            },
+          ];
+        }),
+      ),
+    );
+    const node = (log: string | null, outputs: unknown) => ({
+      status: "done",
+      ownKey: true,
+      log,
+      outputs,
+    });
+    const pair = (x: string, id: number) => ({
+      [`restore:${x}`]: node(`Cache not found for input keys: ${x}-1, ${x}-`, null),
+      [`save:${x}`]: node(`Cache saved with key: ${x}-1`, id),
+      [`cmd:${x}`]: node(`cmd ${x}\n`, {}),
+      [`shell:${x}`]: node(`echo shell ${x}\n`, {}),
+      [`action:${x}`]: node(`action ${x}\n`, { note: x }),
+      [`upload:${x}`]: node(
+        `Artifact ${x} has been successfully uploaded! Final size is 1 bytes. Artifact ID is ${id}`,
+        { id, size: 1 },
+      ),
+      [`require:${x}`]: node(null, { present: [x], missing: [] }),
+      [`down:${x}`]: node(`down ${x}\n`, {}),
+      [`stop:${x}`]: node(`stop ${x}\n`, {}),
+      [`clean:${x}`]: node(`echo clean ${x}\n`, {}),
+    });
+    assert.deepEqual(
+      { nodes, saved: Object.fromEntries(actionsCache.entries) },
+      {
+        nodes: { db: node("db up\n", {}), ...pair("a", 1), ...pair("b", 2) },
+        saved: { "a-1": ["a"], "b-1": ["b"] },
+      },
+    );
   });
 });
 
