@@ -9,7 +9,6 @@ import {
   type ExecuteOptions,
   type Result,
 } from "@mrmeku/dagraph";
-import type { EventEmitter } from "node:events";
 import { resolve } from "node:path";
 import { DEFAULT_HISTORY_DIR, RERUN_COMMAND } from "./config.ts";
 import { createGithubStore } from "./github/renderer.ts";
@@ -332,7 +331,7 @@ async function postPass(
  */
 export async function runJob(
   opts: RunOptions,
-  processEvents: Pick<EventEmitter, "once" | "off">,
+  processEvents: Pick<NodeJS.EventEmitter, "once" | "off">,
 ): Promise<number> {
   const interrupt = () => opts.store?.interrupt();
   processEvents.once("exit", interrupt);

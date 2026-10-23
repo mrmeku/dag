@@ -1,6 +1,8 @@
 import type { NodeRef, Workflow } from "@mrmeku/dagworkflows";
 
 const TOOLCHAIN = ["package.json", "bun.lock", "tsconfig.json"];
+// A version no release uses: a pack check packs each package as a release would.
+const PACK_VERSION = "0.0.0-ci";
 const ENGINE = "packages/dagraph/src/**";
 // What scripts/reference-doc.test.ts compares, beside the sources it reads.
 const REFERENCE_SOURCES = [
@@ -9,9 +11,35 @@ const REFERENCE_SOURCES = [
   ".prettierrc",
 ];
 
+/** Each package packed as a release packs it, so a change that breaks packing fails CI. */
+export async function addPackChecks(
+  workflow: Workflow<"test">,
+  after: NodeRef,
+): Promise<Record<string, NodeRef>> {
+  const sources = await workflow.glob(
+    "packages/*/src/**",
+    "packages/*/package.json",
+    "packages/*/README.md",
+    "tsconfig.build.json",
+    "scripts/pack.ts",
+    ...TOOLCHAIN,
+  );
+  const pack = (pkg: "dagraph" | "dagworkflows") =>
+    workflow.task({
+      name: `pack:${pkg}`,
+      cmd: ({ outputDir }) => ["bun", "scripts/pack.ts", pkg, PACK_VERSION, outputDir],
+      outputs: { tarball: `mrmeku-${pkg}-${PACK_VERSION}.tgz` },
+      inputs: sources,
+      deps: { after },
+      invalidateOn: { after: () => "" },
+    });
+  return { "pack:dagraph": pack("dagraph"), "pack:dagworkflows": pack("dagworkflows") };
+}
+
 export async function addChecks(
   workflow: Workflow<"test">,
   after: NodeRef,
+  others: Record<string, NodeRef> = {},
 ): Promise<NodeRef<string>> {
   // Each check orders after the CAS restore but reads nothing from it.
   const afterRestore = { deps: { after }, invalidateOn: { after: () => "" } };
@@ -59,6 +87,7 @@ export async function addChecks(
       lint,
       "test:dagraph": testDagraph,
       "test:dagworkflows": testDagworkflows,
+      ...others,
     },
   });
 }

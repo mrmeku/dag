@@ -5,7 +5,7 @@
  * only on main, so pull requests read main's entry and never evict it.
  */
 import { defineWorkflow } from "@mrmeku/dagworkflows";
-import { addChecks } from "./checks.ts";
+import { addChecks, addPackChecks } from "./checks.ts";
 
 export default defineWorkflow({
   schedulerOptions: { maxParallelism: 4, concurrencyLimits: { test: 2 } },
@@ -16,7 +16,7 @@ export default defineWorkflow({
       key: `dag-main-${workflow.ctx.sha}`,
       restoreKeys: ["dag-main-"],
     });
-    const requireAll = await addChecks(workflow, cas);
+    const requireAll = await addChecks(workflow, cas, await addPackChecks(workflow, cas));
     if (workflow.ctx.ref === "refs/heads/main") {
       workflow.saveCache({ name: "save:cas", cache: cas });
     }
