@@ -44,6 +44,9 @@ export type Scheduler = <Meta>(ctx: SchedulerContext<Meta>) => Promise<void>;
  * nodes as data: it tracks which are ready, admits them through the scheduler, hands each its
  * deps' entries, and propagates a failure. It does no I/O, hashes nothing and never sees an
  * action, so it runs in a sandbox such as Temporal's workflow.
+ *
+ * A throw of `onEvent` stops nothing: once the nodes settle, `orchestrate` rejects with the first
+ * error that it threw.
  */
 export async function orchestrate<Meta>(
   nodes: Iterable<Node<Meta>>,
@@ -65,6 +68,14 @@ export async function orchestrate<Meta>(
   let resumeLoop: () => void = () => {};
   const wake = () => resumeLoop();
   signal?.addEventListener("abort", wake, { once: true });
+  let listenerError: { thrown: unknown } | undefined;
+  const emit = (event: ExecEvent<Meta>) => {
+    try {
+      onEvent?.(event);
+    } catch (thrown) {
+      listenerError ??= { thrown };
+    }
+  };
   /** Resolves the scheduler's `run` for the place each node holds. */
   const places = new Map<string, () => void>();
   const releasePlace = (name: string) => {
@@ -77,7 +88,7 @@ export async function orchestrate<Meta>(
   const meta = (node: Node<Meta>) => (node.meta === undefined ? {} : { meta: node.meta });
   const settle = (node: Node<Meta>, result: Result) => {
     state.settle(node, result);
-    onEvent?.({ type: "result", node: node.name, ...meta(node), result });
+    emit({ type: "result", node: node.name, ...meta(node), result });
     releasePlace(node.name);
     wake();
   };
@@ -130,7 +141,7 @@ export async function orchestrate<Meta>(
         settle(node, { name: node.name, actionKey: "", status: "dep-failed", dep });
         return place;
       }
-      onEvent?.({ type: "dispatch", node: node.name, ...meta(node) });
+      emit({ type: "dispatch", node: node.name, ...meta(node) });
       processing++;
       void run(node, state.depEntries(node), acquireFor(node))
         .catch((e: unknown): Result => {
@@ -161,6 +172,11 @@ export async function orchestrate<Meta>(
     },
   };
 
-  await schedule(ctx);
+  try {
+    await schedule(ctx);
+  } finally {
+    signal?.removeEventListener("abort", wake);
+  }
+  if (listenerError) throw listenerError.thrown;
   return [...state.results.values()];
 }

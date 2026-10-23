@@ -50,6 +50,15 @@ export interface ThrottledSchedulerOptions {
  */
 export function throttledScheduler(opts?: ThrottledSchedulerOptions): Scheduler {
   const { maxParallelism = Infinity, concurrencyLimits = {} } = opts ?? {};
+  const checkLimit = (field: string, limit: number) => {
+    if (limit !== Infinity && !(Number.isInteger(limit) && limit >= 1))
+      throw new RangeError(
+        `throttledScheduler: ${field} must be a whole number from 1, or Infinity, got ${limit}`,
+      );
+  };
+  checkLimit("maxParallelism", maxParallelism);
+  for (const [group, limit] of Object.entries(concurrencyLimits))
+    checkLimit(`concurrencyLimits.${group}`, limit);
   if (opts?.maxParallelism == null && opts?.concurrencyLimits == null) return unboundedScheduler();
 
   let inflight = 0;

@@ -80,6 +80,7 @@ An action reads each file through a `FileHandle`: a file input, an output of a d
 | `path`     | The file's absolute path while the action runs. Give it to a command or a library that takes a path.         |
 | `text()`   | The file's contents.                                                                                         |
 | `json(is)` | The file's contents as JSON, checked by the type guard `is`. A file that `is` refuses throws, with its path. |
+| `hash()`   | The SHA256 of the file's bytes. Use it to fingerprint a binary file.                                         |
 
 The handles have the shape of the outputs. `Handles<T>` gives their type for an output type `T`:
 
@@ -192,7 +193,7 @@ for (const id of imageIds) {
 }
 ```
 
-These nodes have the names `<id>:fetch` and `<id>:resize`. A subgraph can contain subgraphs. `subgraph(prefix)` without `meta` gives its nodes the `meta` of the graph it was made from.
+These nodes have the names `<id>:fetch` and `<id>:resize`. A subgraph can contain subgraphs. `subgraph(prefix)` without `meta` gives its nodes the `meta` of the graph it was made from. A subgraph holds the nodes under its prefix and every node they depend on, so `execute(graph.subgraph(id))` runs only those.
 
 A name is an address only. It is not part of any key. Two nodes that declare the same work have the same key and share one entry. So a value that tells two nodes apart must be an input, not only a part of the name. In the example, each `fetch` has its own `url` input.
 
@@ -225,10 +226,7 @@ const entry = defineActionWithPorts({
 });
 ```
 
-`NodeRef<T>` carries the output type of the node. If you give a node whose outputs are not what the role declares, the program does not compile. These do not compile either: a missing dependency, a role that the action does not declare in a `deps` literal, and a misspelt output in `depOutputs` or in a fingerprint.
-
-> [!IMPORTANT]
-> TypeScript refuses an extra property only in an object literal. A `deps` record that a variable holds can carry a role that the action does not declare, and that role joins the key. Write `deps` in the `addNode` call.
+`NodeRef<T>` carries the output type of the node. If you give a node whose outputs are not what the role declares, the program does not compile. These do not compile either: a missing dependency, a role that the action does not declare, and a misspelt output in `depOutputs` or in a fingerprint.
 
 The key holds each dependency by its role, never by its node's name. Thus renaming a node changes no key, and swapping two dependencies between roles does. `deps` in the action declares types and roles only. The dependencies, and the key, come from the node's `deps`.
 
@@ -283,7 +281,7 @@ These rules apply:
 
 - A node gives each input that `nodeInputs` declares, of its type. A missing one does not compile.
 - A node cannot declare an input again that its action declares. This does not compile. A record built at run time, as by `Object.fromEntries`, names no input in its type, so `addNode` refuses the repeat when the node is added.
-- A node can add inputs that its action never reads. They change its key all the same.
+- A node of an action without `nodeInputs`, or whose `nodeInputs` has an index signature, can add inputs that its action never reads. They change its key all the same.
 - A value is JSON: a string, a finite number, a boolean, `null`, or an array or a plain record of these. Its type is `InputValue`. A value that is not JSON does not compile; the table below gives the right form. A property that is `undefined` is dropped.
 - `file()` is its own input. It is never part of a value or of a string, as a [ref](#output-refs) is not, and its conversion to a string throws.
 - An input is never another node. What comes from a node is a dependency.
@@ -299,7 +297,7 @@ These rules apply:
 | `{ tools: { lock: file("bun.lock") } }` | `{ lock: file("bun.lock") }`                                    |
 | A node                                  | A dependency in `deps`, and a [ref](#output-refs) to its output |
 
-No type can see `NaN`, `Infinity`, or an object that is not plain, such as a class instance whose type is a record's. The engine refuses each where it is declared, with its path and what to give instead, for example `inputs.ratio is NaN, which is not JSON. Give a finite number, or null.`
+No type can see `NaN`, `Infinity`, or an object that is not plain, such as a class instance whose type is a record's. A narrower type can also hide a value, as a record typed `{ model: string }` can hold a function. Thus an input can hold a function, a symbol, a `bigint`, or `undefined` as an item of a list. The engine refuses each where it is declared, with its path and what to give instead, for example `inputs.ratio is NaN, which is not JSON. Give a finite number, or null.`
 
 If a node reads something that it does not declare, a change to it does not run the node again.
 
@@ -317,7 +315,7 @@ publish.addNode(graph, {
 });
 ```
 
-A ref of a required dependency is an `OutputRef<T>`, where `T` is the type of that output. A ref of a settled dependency is a `SettledOutputRef<T>`. A dependency whose outputs are not a record has no refs.
+A ref of a required dependency is an `OutputRef<T>`, where `T` is the type of that output. A ref of a settled dependency is a `SettledOutputRef<T>`. A dependency whose outputs are not a record has no refs. An output that some return of the dependency leaves out, or that an index signature names, has no ref. The action reads it from `depOutputs`.
 
 A ref can be in a value input: the input itself, an item of an array or a property. The action reads it as a [handle](#file-handles) on the dependency's published file, or a list of handles for a list output. A ref of a settled dependency that did not succeed reads as `undefined`.
 
@@ -347,10 +345,10 @@ Refs in values are for commands, whose command line is a value. An action that r
 
 The engine throws an error when a declaration is wrong:
 
-| Where          | Refused                                                                                                                                                                                                              |
-| -------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `defineAction` | A `timeoutMs` that is not a whole number from 1 to 2³¹−1, a value input that holds `NaN`, `Infinity` or an object that is not plain.                                                                                 |
-| `addNode`      | A duplicate name; an unknown dependency; an input that the action declares, in a record built at run time; a value input that holds `NaN`, `Infinity` or an object that is not plain; a list of a dependency's refs. |
+| Where          | Refused                                                                                                                                                                                                                                                                                                                       |
+| -------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `defineAction` | A `timeoutMs` that is not a whole number from 1 to 2³¹−1; a value input that holds `NaN`, `Infinity`, an object that is not plain, a function, a symbol, a `bigint` or `undefined` in a list.                                                                                                                                 |
+| `addNode`      | A duplicate name; an unknown dependency; a required role that is missing or `undefined`; an input that the action declares, in a record built at run time; a value input that holds `NaN`, `Infinity`, an object that is not plain, a function, a symbol, a `bigint` or `undefined` in a list; a list of a dependency's refs. |
 
 ## Inspect a graph
 

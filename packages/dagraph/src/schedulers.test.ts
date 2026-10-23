@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import assert from "node:assert/strict";
+import { getEventListeners } from "node:events";
 
 import { MemCache, type DagFs } from "./cache.ts";
 import { actionsFor } from "./define-action.ts";
@@ -173,6 +174,30 @@ describe("throttledScheduler", () => {
     await h.done;
     expect(grants).toEqual(["granted heavy_c", "granted heavy_a"]);
   });
+
+  test("refuses a limit that is not a whole number from 1, or Infinity, naming it", () => {
+    const refusal = (options: ThrottledSchedulerOptions) => {
+      try {
+        throttledScheduler(options);
+        return "accepted";
+      } catch (e) {
+        return e instanceof RangeError ? e.message : `not a RangeError: ${errorMessage(e)}`;
+      }
+    };
+    const refused = (field: string, got: number) =>
+      `throttledScheduler: ${field} must be a whole number from 1, or Infinity, got ${got}`;
+    expect({
+      zero: refusal({ maxParallelism: 0 }),
+      notANumber: refusal({ maxParallelism: Number.parseInt("four") }),
+      fraction: refusal({ concurrencyLimits: { whisper: 1, heavy: 1.5 } }),
+      wholeOrInfinite: refusal({ maxParallelism: Infinity, concurrencyLimits: { heavy: 1 } }),
+    }).toEqual({
+      zero: refused("maxParallelism", 0),
+      notANumber: refused("maxParallelism", NaN),
+      fraction: refused("concurrencyLimits.heavy", 1.5),
+      wholeOrInfinite: "accepted",
+    });
+  });
 });
 
 describe("orchestrate", () => {
@@ -193,6 +218,32 @@ describe("orchestrate", () => {
     expect(refused).toBe(
       'orchestrate: nodes depend on nodes it was not given: "a" needs "x"; "c" needs "y", "z"',
     );
+  });
+
+  test("an onEvent that throws stops nothing: the nodes settle, then orchestrate rejects with its first error, and leaves no listener on the signal", async () => {
+    const ran: string[] = [];
+    const controller = new AbortController();
+    const outcome = await orchestrate(
+      [node("a"), node("b", undefined, ["a"])],
+      (n) => {
+        ran.push(n.name);
+        return done(n);
+      },
+      unboundedScheduler(),
+      (event) => {
+        if (event.type === "dispatch" && event.node === "a") throw new Error("dispatch of a");
+        if (event.type === "result" && event.node === "b") throw new Error("result of b");
+      },
+      controller.signal,
+    ).then(
+      () => "resolved",
+      (e: unknown) => errorMessage(e),
+    );
+    expect({
+      outcome,
+      ran,
+      listeners: getEventListeners(controller.signal, "abort").length,
+    }).toEqual({ outcome: "dispatch of a", ran: ["a", "b"], listeners: 0 });
   });
 
   test("a RunNode that rejects settles its node failed, its cause kept as JSON, or cancelled once the execution is cancelled", async () => {

@@ -25,14 +25,16 @@ interface GraphState<Meta> {
   meta: Meta | undefined;
 }
 
-let stateOf: <Meta>(graph: Graph<unknown, Meta>) => GraphState<Meta>;
+let stateOf: <Ports, Meta>(graph: Graph<Ports, Meta>) => GraphState<Meta>;
 
 /**
  * Nodes and their deps, typed by the ports their actions need and the metadata its nodes carry.
  * `addNode` adds a node; `describe()` is the one view of a graph.
  */
 export class Graph<Ports = unknown, Meta = undefined> {
-  declare readonly _ports?: Ports;
+  // Each marker takes and returns its type, so a graph is never typed by other ports or meta.
+  declare readonly _ports?: (ports: Ports) => Ports;
+  declare readonly _meta?: (meta: Meta) => Meta;
   #state: GraphState<Meta> = { nodes: new Map(), prefix: "", meta: undefined };
 
   static {
@@ -42,6 +44,7 @@ export class Graph<Ports = unknown, Meta = undefined> {
   /**
    * A view of this graph that prefixes `prefix:` to the name of each node added through it and
    * gives each its `meta`, unless the node gives its own. Without `meta`, its parent's applies.
+   * It holds the nodes under its prefix and every node they depend on.
    */
   subgraph(prefix: string, meta?: Meta): Graph<Ports, Meta> {
     const parent = this.#state;
@@ -56,7 +59,7 @@ export class Graph<Ports = unknown, Meta = undefined> {
 
   /** Each node as data, in the order they were added. */
   describe(): Node<Meta>[] {
-    return [...this.#state.nodes.values()].map(({ node }) => ({
+    return [...graphNodes(this).values()].map(({ node }) => ({
       ...node,
       deps: [...node.deps],
       ...(node.settledDeps && { settledDeps: [...node.settledDeps] }),
@@ -64,13 +67,35 @@ export class Graph<Ports = unknown, Meta = undefined> {
   }
 }
 
-export const graphNodes = <Meta>(
-  graph: Graph<unknown, Meta>,
-): ReadonlyMap<string, GraphNode<Meta>> => stateOf(graph).nodes;
+/** The named nodes and every node they depend on, in the order they were added. */
+function withDeps<Meta>(nodes: ReadonlyMap<string, GraphNode<Meta>>, names: Iterable<string>) {
+  const kept = new Set<string>();
+  const visit = (name: string) => {
+    if (kept.has(name)) return;
+    const found = nodes.get(name);
+    if (!found) throw new Error(`closure: the graph holds no node "${name}"`);
+    kept.add(name);
+    found.node.deps.forEach(visit);
+  };
+  for (const name of names) visit(name);
+  return new Map([...nodes].filter(([name]) => kept.has(name)));
+}
+
+/** A graph's nodes; a subgraph's are those under its prefix and every node they depend on. */
+export const graphNodes = <Ports, Meta>(
+  graph: Graph<Ports, Meta>,
+): ReadonlyMap<string, GraphNode<Meta>> => {
+  const { nodes, prefix } = stateOf(graph);
+  if (!prefix) return nodes;
+  return withDeps(
+    nodes,
+    [...nodes.keys()].filter((name) => name.startsWith(`${prefix}:`)),
+  );
+};
 
 /** Add a node: its `params` as declared, and its own inputs, as given or as its function returns them. */
-export function addNode<R extends Outputs, Meta>(
-  graph: Graph<unknown, Meta>,
+export function addNode<R extends Outputs, Ports, Meta>(
+  graph: Graph<Ports, Meta>,
   spec: ErasedSpec,
   params: { name?: string; meta?: Meta; deps?: DepRecord | undefined },
   inputsOf: () => InputRecord<unknown> | undefined,
@@ -85,6 +110,13 @@ export function addNode<R extends Outputs, Meta>(
         `own, or add it through graph.subgraph(prefix, meta).`,
     );
 
+  const given = params.deps ?? {};
+  for (const role of spec.requiredRoles)
+    if (!(Object.hasOwn(given, role) && given[role]))
+      throw new Error(
+        `${where}: deps.${role} is ${Object.hasOwn(given, role) ? "undefined" : "missing"}, but ` +
+          `its action "${spec.kind}" requires it. Add that node first and give its ref.`,
+      );
   const roles = Object.entries(params.deps ?? {}).flatMap(([role, ref]) =>
     ref ? [[role, ref] as const] : [],
   );
@@ -133,20 +165,9 @@ export function addNode<R extends Outputs, Meta>(
  */
 export function closure<Ports, Meta>(
   graph: Graph<Ports, Meta>,
-  names: Iterable<string>,
+  names: Iterable<string> & object,
 ): Graph<Ports, Meta> {
-  const { nodes } = stateOf(graph);
-  const kept = new Set<string>();
-  const visit = (name: string) => {
-    if (kept.has(name)) return;
-    const found = nodes.get(name);
-    if (!found) throw new Error(`closure: the graph holds no node "${name}"`);
-    kept.add(name);
-    found.node.deps.forEach(visit);
-  };
-  for (const name of names) visit(name);
   const result = new Graph<Ports, Meta>();
-  const target = stateOf(result).nodes;
-  for (const [name, n] of nodes) if (kept.has(name)) target.set(name, n);
+  stateOf(result).nodes = withDeps(graphNodes(graph), names);
   return result;
 }

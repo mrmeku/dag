@@ -158,6 +158,8 @@ await execute(graph, context, {
 
 With this stream you can make a progress view, a log file for each node or a live status, with no change to the actions. The engine renders nothing.
 
+If `onEvent` throws on a `dispatch` or a `result`, the execution continues to its end. Then it rejects with the first error that `onEvent` threw.
+
 A `failed` result holds the error's `name`, its `message` and its `cause`, converted as [Results](#results) tells. Thus a listener can tell why a node failed, for example a command's exit code, without reading the node's files.
 
 ## Timeouts and cancellation

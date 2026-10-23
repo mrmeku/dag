@@ -41,13 +41,20 @@ export interface ProcessNodeOptions<Meta> {
   /** The execution's cancel. A node it stops settles `cancelled`, whatever its action returns. */
   signal?: AbortSignal;
   /**
-   * The gate of the node's concurrency group, awaited on a miss before the action runs. It
-   * rejects only once the execution is cancelled, so a rejection settles the node `cancelled`.
+   * The gate of the node's concurrency group, awaited on a miss before the action runs: the
+   * `acquire` its `RunNode` gets, or `ungated` outside an orchestrator. It rejects only once the
+   * execution is cancelled, so a rejection settles the node `cancelled`.
    */
-  acquire?: () => Promise<void>;
+  acquire: () => Promise<void>;
   /** Receives the node's `start` and `output`, before its result returns. */
   onEvent?: (event: ExecEvent<Meta>) => void;
 }
+
+/**
+ * The gate of a node that waits for no slot, for `processNode` outside an orchestrator: a test, a
+ * script, or a worker whose orchestrator took the node's slot already.
+ */
+export const ungated = (): Promise<void> => Promise.resolve();
 
 /** The message of the error of a node that `cacheOnly` found no verified entry for. */
 export const NOT_CACHED = "not cached";
@@ -87,6 +94,15 @@ async function publish(
   return { outputs: moved, dir: published };
 }
 
+/** What the `invalidateOn` fingerprint of `role` returned, refused where it is not a string. */
+function fingerprintString(role: string, value: unknown): string {
+  if (typeof value === "string") return value;
+  throw new Error(
+    `invalidateOn.${role} returned ${value === null ? "null" : typeof value}, not a string. ` +
+      "JSON.stringify returns undefined for undefined: give it the value ?? null.",
+  );
+}
+
 /** The node's action key, from its inputs by name and its deps by role. */
 async function actionKeyOf(
   { spec, roles, inputs }: GraphNode,
@@ -115,7 +131,12 @@ async function actionKeyOf(
     keyedDeps[role] = !entry
       ? ["missing"]
       : fingerprint
-        ? ["fingerprint", hashBytes(await fingerprint(mapPaths(entry.outputs, handle), ports))]
+        ? [
+            "fingerprint",
+            hashBytes(
+              fingerprintString(role, await fingerprint(mapPaths(entry.outputs, handle), ports)),
+            ),
+          ]
         : ["content", entry.contentHash];
   }
   return computeActionKey(keyedInputs, keyedDeps);
@@ -130,7 +151,7 @@ export async function processNode<Ports, Meta>(
   name: string,
   depEntries: Record<string, CacheEntry>,
   executionContext: ExecutionContext<NoInfer<Ports>>,
-  options: ProcessNodeOptions<Meta> = {},
+  options: ProcessNodeOptions<Meta>,
 ): Promise<Result> {
   const found = graphNodes(graph).get(name);
   if (!found)
@@ -177,7 +198,7 @@ export async function processNode<Ports, Meta>(
   const cancel = options.signal;
   const cancelled: Result = { name, actionKey, status: "cancelled" };
   try {
-    await options.acquire?.();
+    await options.acquire();
   } catch {
     return cancelled;
   }

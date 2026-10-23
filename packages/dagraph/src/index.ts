@@ -64,7 +64,7 @@ export {
   type SchedulerContext,
 } from "./orchestrate.ts";
 export { createMemoryDagFs, type MemoryDagFs } from "./ports/memory-fs.ts";
-export { NOT_CACHED, processNode, type ExecutionContext } from "./process-node.ts";
+export { NOT_CACHED, processNode, ungated, type ExecutionContext } from "./process-node.ts";
 export {
   throttledScheduler,
   unboundedScheduler,

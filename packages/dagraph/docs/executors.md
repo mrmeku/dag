@@ -87,6 +87,7 @@ return processNode(
   { ports, cache, fs, casBaseDir },
   {
     cacheOnly: request.cacheOnly ?? false,
+    acquire: ungated,
   },
 );
 ```

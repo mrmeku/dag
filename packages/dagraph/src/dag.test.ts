@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { cp, mkdir, mkdtemp, realpath, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join, relative } from "node:path";
@@ -7,6 +8,7 @@ import { dirname, join, relative } from "node:path";
 import { FsCache, MemCache, TieredCache, type Cache, type DagFs } from "./cache.ts";
 import { actionsFor } from "./define-action.ts";
 import { execute } from "./execute.ts";
+import { fileHandle } from "./file-handle.ts";
 import {
   dep,
   file,
@@ -438,6 +440,23 @@ describe("the action key", () => {
       { statuses: { pack: "done", publish: "cached" }, reads: false },
     ]);
   });
+
+  test("a fingerprint that returns no string fails the node, naming its role", async () => {
+    const { ctx } = setup();
+    const g = new Graph<Ports>();
+    const src = task(g, "src");
+    defineActionWithPorts({
+      kind: "keyed",
+      deps: { src: dep<string> },
+      invalidateOn: { src: () => JSON.stringify(undefined) },
+      action: async (c) => write(c, "out", "x"),
+    }).addNode(g, { deps: { src } });
+    const keyed = (await execute(g, ctx)).find((r) => r.name === "keyed");
+    expect(keyed?.status === "failed" && keyed.error.message).toBe(
+      "invalidateOn.src returned undefined, not a string. JSON.stringify returns undefined for " +
+        "undefined: give it the value ?? null.",
+    );
+  });
 });
 
 describe("refs and outputs in the key", () => {
@@ -675,6 +694,27 @@ describe("file handles", () => {
       value: { count: 3 },
       refused: `${namedOutput(outputs, "counted")} holds JSON that isWords refuses`,
       notJson: `${namedOutput(outputs, "prose")} holds no JSON`,
+    });
+  });
+
+  test("hash() gives the SHA256 of a file's bytes; text() refuses a file whose bytes are not UTF-8, and reads one that holds U+FFFD", async () => {
+    const utf8 = (text: string) => new TextEncoder().encode(text);
+    const files = {
+      "/thumb.jpg": Uint8Array.of(0xff, 0xd8, 0xff, 0xe0),
+      "/replaced.txt": utf8("a \uFFFD in UTF-8"),
+    };
+    const fs = createMemoryDagFs(files);
+    const read = async ([path, bytes]: [string, Uint8Array]) => {
+      const handle = fileHandle(fs, path);
+      const sha256 = createHash("sha256").update(bytes).digest("hex");
+      return [path, [(await handle.hash()) === sha256, await handle.text().catch(errorMessage)]];
+    };
+    expect(Object.fromEntries(await Promise.all(Object.entries(files).map(read)))).toEqual({
+      "/thumb.jpg": [
+        true,
+        "/thumb.jpg is not UTF-8 text: decoding it lost bytes. Hash its bytes with hash().",
+      ],
+      "/replaced.txt": [true, "a \uFFFD in UTF-8"],
     });
   });
 

@@ -3,6 +3,7 @@ import { checkInputs } from "./graph/inputs.ts";
 import {
   DEP,
   depRefs,
+  requiredRoles,
   type ActionContext,
   type DepSpecs,
   type InputRecord,
@@ -43,7 +44,7 @@ export interface ActionSpec<
   deps?: D;
   /**
    * The inputs each node gives when it is added, by name and type, uncalled:
-   * `nodeInputs<{ url: string }>`. `N` is that record type.
+   * `nodeInputs<{ url: string }>`. `N` is that record type. Each node gives only these names.
    */
   nodeInputs?: NodeInputsSpec<N> | (() => NodeInputsSpec<N>);
   /** Inputs every node of the action has, such as a version that names the action's logic. */
@@ -71,6 +72,7 @@ export interface ErasedSpec extends Pick<
   "kind" | "cacheable" | "concurrencyGroup" | "timeoutMs"
 > {
   inputs: Record<string, unknown>;
+  requiredRoles: string[];
   action: (
     context: Omit<ActionContext, "inputs" | "depOutputs"> & {
       inputs: Record<string, unknown>;
@@ -83,16 +85,21 @@ export interface ErasedSpec extends Pick<
 /**
  * A kind of work, defined once. `addNode` adds one of its nodes to a graph and returns a ref to
  * it, a `NodeRef<R>`. `R` is its outputs, `D` its deps, `N` its node inputs and `I` its own inputs,
- * each as its spec declares them; `ND`, inferred from the node, is its deps where `D` takes any role.
+ * each as its spec declares them; `ND` and `NI`, inferred from the node, are the deps and the
+ * inputs it gives.
  */
 export interface Action<Ports, R extends Outputs, D = Empty, N = Empty, I = Empty> {
   /** An action is a dep: `deps: { fetch }` declares a role that a node of `fetch` fills. */
   readonly [DEP]: true;
   readonly _T?: R;
-  addNode<GraphPorts extends Ports, Meta, ND extends NodeDeps<D> = NodeDeps<D>>(
+  /** It takes its ports, so an action is never typed as one that needs fewer. */
+  readonly _ports?: (ports: Ports) => void;
+  // A property, not a method, so its params are compared strictly and an action is never typed
+  // as one that takes other deps or inputs.
+  readonly addNode: <GraphPorts extends Ports, Meta, ND extends NodeDeps<D> = NodeDeps<D>, NI = N>(
     graph: Graph<GraphPorts, Meta>,
-    params: NodeParams<D, N, I, Meta, ND>,
-  ): NodeRef<R>;
+    params: NodeParams<D, N, I, Meta, ND, NI>,
+  ) => NodeRef<R>;
 }
 
 /** The outputs of an action, a ref or a dep: `OutputOf<typeof fetch>`. */
@@ -101,9 +108,13 @@ export type OutputOf<T> = T extends { readonly _T?: infer R extends Outputs } ? 
 /** A ref to a node of an action: `NodeRefOf<typeof fetch>`. */
 export type NodeRefOf<T> = NodeRef<OutputOf<T>>;
 
-function define<Ports, R, D, N extends InputRecord<unknown>, I extends InputRecord>(
-  spec: ActionSpec<Ports, R, D, N, I, string>,
-): Action<Ports, Extract<R, Outputs>, D, N, I> {
+function define<
+  Ports,
+  R,
+  D extends DepSpecs,
+  N extends InputRecord<unknown>,
+  I extends InputRecord,
+>(spec: ActionSpec<Ports, R, D, N, I, string>): Action<Ports, Extract<R, Outputs>, D, N, I> {
   const where = `action "${spec.kind}"`;
   const t = spec.timeoutMs;
   if (t !== undefined && !(Number.isInteger(t) && t > 0 && t <= MAX_TIMEOUT_MS))
@@ -111,14 +122,18 @@ function define<Ports, R, D, N extends InputRecord<unknown>, I extends InputReco
       `${where}: timeoutMs must be a whole number of ms from 1 to ${MAX_TIMEOUT_MS}, got ${t}`,
     );
   // eslint-disable-next-line @typescript-eslint/consistent-type-assertions -- a graph holds actions of many types as data, which erases each context's inputs, dep outputs and ports
-  const checked = { ...spec, inputs: checkInputs(spec.inputs, where) } as unknown as ErasedSpec;
+  const checked = {
+    ...spec,
+    inputs: checkInputs(spec.inputs, where),
+    requiredRoles: requiredRoles(spec.deps ?? {}),
+  } as unknown as ErasedSpec;
   return {
     [DEP]: true,
-    addNode: <Meta, ND extends NodeDeps<D>>(
-      graph: Graph<Ports, Meta>,
-      params: NodeParams<D, N, I, Meta, ND>,
+    addNode: <GraphPorts extends Ports, Meta, ND extends NodeDeps<D>, NI>(
+      graph: Graph<GraphPorts, Meta>,
+      params: NodeParams<D, N, I, Meta, ND, NI>,
     ) =>
-      addNode<Extract<R, Outputs>, Meta>(graph, checked, params, () =>
+      addNode<Extract<R, Outputs>, GraphPorts, Meta>(graph, checked, params, () =>
         typeof params.inputs === "function" ? params.inputs(depRefs(params.deps)) : params.inputs,
       ),
   };

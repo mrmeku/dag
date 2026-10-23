@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test";
 import assert from "node:assert/strict";
 
 import { MemCache, type CacheEntry, type DagFs } from "./cache.ts";
-import { actionsFor, defineAction } from "./define-action.ts";
+import { actionsFor, defineAction, type Action } from "./define-action.ts";
 import { execute } from "./execute.ts";
 import {
   closure,
@@ -13,11 +13,13 @@ import {
   nodeInputs,
   settled,
   type DepSpecs,
+  type FileInput,
   type InputValue,
+  type NodeRef,
   type OutputRef,
 } from "./graph/index.ts";
 import { createMemoryDagFs } from "./ports/memory-fs.ts";
-import { processNode } from "./process-node.ts";
+import { processNode, ungated } from "./process-node.ts";
 import { isSucceeded } from "./types.ts";
 import { errorMessage } from "./utils.ts";
 
@@ -118,9 +120,27 @@ describe("declarations", () => {
     }
     // Its type is a record's, so only the run-time check sees the class.
     const prompt: { readonly text: string } = new Prompt("clean");
+    const optional = defineActionWithPorts({
+      kind: "optional",
+      deps: { dl: maybe(download), text: maybe<string> },
+      action: async () => "",
+    });
+    // Steps in the wrong order: the first reads a ref that the second assigns.
+    let later: NodeRef<{ audio: string }>;
+    const steps = [
+      () => captions.addNode(g, { name: "early", deps: { download: later } }),
+      () => (later = dl),
+    ];
+    // A narrower type hides each extra field, as a variable of a wider type does.
+    const hidden = (extra: Record<string, unknown>) => () => {
+      const style: { readonly model: string } = { model: "small", ...extra };
+      return feed.addNode(g, { name: "n", inputs: { style } });
+    };
     expect({
       duplicate: refusal(() => download.addNode(g, { inputs: { videoId: "v3" } })),
       unknownDep: refusal(() => captions.addNode(g, { deps: { download: other } })),
+      required: refusal(() => steps.forEach((step) => step())),
+      maybeLeftOut: refusal(() => optional.addNode(g, {})),
       // Built at run time, so its type names no input: only the run-time check sees the repeat.
       redeclared: refusal(() =>
         versioned.addNode(g, { name: "n", inputs: Object.fromEntries([["version", 2]]) }),
@@ -138,11 +158,18 @@ describe("declarations", () => {
       spread: refusal(() =>
         feed.addNode(g, { name: "s", deps: { dl }, inputs: ({ dl }) => ({ ...dl }) }),
       ),
+      function: refusal(hidden({ format: (s: string) => s.toUpperCase() })),
+      symbol: refusal(hidden({ tag: Symbol("loud") })),
+      bigint: refusal(hidden({ size: 10n })),
+      undefinedItem: refusal(hidden({ list: [1, undefined] })),
     }).toEqual({
       duplicate:
         'Duplicate node name "download". Names are unique in a graph: give the node a name of its own, or add it through graph.subgraph(prefix, meta).',
       unknownDep:
         'node "captions": deps.download is "v2:download", which this graph does not hold. Add that node first.',
+      required:
+        'node "early": deps.download is undefined, but its action "captions" requires it. Add that node first and give its ref.',
+      maybeLeftOut: "accepted",
       redeclared:
         'node "n": inputs.version is declared by its action "versioned". Give the node\'s input another name.',
       inherited: "accepted",
@@ -153,6 +180,13 @@ describe("declarations", () => {
         'node "n": inputs.v.prompt is a Prompt, which is not JSON. Give a plain object of its fields: { ...prompt }.',
       listed: 'node "l": the refs of dl cannot be listed: name each output, as dl.<output>',
       spread: 'node "s": the refs of dl cannot be listed: name each output, as dl.<output>',
+      function:
+        'node "n": inputs.style.format is a function, which is not JSON. Give the data it holds, as a record.',
+      symbol: 'node "n": inputs.style.tag is a symbol, which is not JSON. Give a string.',
+      bigint:
+        'node "n": inputs.style.size is a bigint, which is not JSON. Give a string: String(n).',
+      undefinedItem:
+        'node "n": inputs.style.list[1] is undefined, which is not JSON in a list. Give null, or no item.',
     });
   });
 
@@ -251,6 +285,29 @@ describe("graphs", () => {
     });
   });
 
+  test("a subgraph holds the nodes under its prefix and all they depend on; executing it runs only those", async () => {
+    const whole = channel(["v1", "v10"]);
+    const shared = download.addNode(whole, { name: "shared", inputs: { videoId: "shared" } });
+    captions.addNode(whole.subgraph("v1"), { name: "extra", deps: { download: shared } });
+    const v1 = whole.subgraph("v1");
+    const results = await execute(v1, setup().ctx);
+    expect({
+      names: v1.describe().map((n) => n.name),
+      statuses: Object.fromEntries(results.map((r) => [r.name, r.status])),
+      outside: refusal(() => closure(v1, ["v10:entry"])),
+    }).toEqual({
+      names: ["v1:download", "v1:captions", "v1:entry", "shared", "v1:extra"],
+      statuses: {
+        "v1:download": "done",
+        "v1:captions": "failed",
+        "v1:entry": "done",
+        shared: "done",
+        "v1:extra": "failed",
+      },
+      outside: 'closure: the graph holds no node "v10:entry"',
+    });
+  });
+
   test("processNode finds a node by name in any graph that declares it the same way, and refuses a name the graph does not hold", async () => {
     const { ctx } = setup();
     const results = await execute(channel(["v1", "v2"]), ctx);
@@ -262,8 +319,9 @@ describe("graphs", () => {
     };
     const oneVideo = new Graph<Ports, Meta>();
     addVideo(oneVideo, "v2");
-    const viaOneVideo = await processNode(oneVideo, "v2:download", {}, ctx);
-    const failedDep = await processNode(oneVideo, "v2:captions", {}, ctx);
+    const options = { acquire: ungated };
+    const viaOneVideo = await processNode(oneVideo, "v2:download", {}, ctx, options);
+    const failedDep = await processNode(oneVideo, "v2:captions", {}, ctx, options);
     const downloadEntry = entryOf("v2:download");
     assert.ok(downloadEntry, "v2:download's entry");
     const settledMissing = await processNode(
@@ -271,9 +329,10 @@ describe("graphs", () => {
       "v2:entry",
       { "v2:download": downloadEntry },
       ctx,
+      options,
     );
     let refused = "";
-    await processNode(oneVideo, "v1:download", {}, ctx).catch(
+    await processNode(oneVideo, "v1:download", {}, ctx, options).catch(
       (e: unknown) => (refused = errorMessage(e)),
     );
     const downloaded = results.find((r) => r.name === "v2:download");
@@ -382,15 +441,23 @@ export function wrongDeclarationsDoNotCompile() {
 
   // These compile.
   // A node may leave out a role declared maybe.
-  defineActionWithPorts({
+  const maybeDownload = defineActionWithPorts({
     kind: "m",
     deps: { dl: maybe(download) },
     action: async () => "",
-  }).addNode(g, { name: "left out" });
+  });
+  maybeDownload.addNode(g, { name: "left out" });
+  // Deps in a variable, each a role its action declares.
+  const captionsDeps = { download: dl };
+  captions.addNode(g, { name: "from a variable", deps: captionsDeps });
   // An action that takes any role takes the roles a node names.
   feed.addNode(g, { name: "named", deps: { dl, feedRef } });
-  // An action that needs no ports goes on a graph that gives none.
-  defineAction({ kind: "portless", action: async () => "" }).addNode(new Graph(), {});
+  // An action that needs no ports goes on a graph that gives none, and on one that gives some.
+  const portless = defineAction({ kind: "portless", action: async () => "" });
+  portless.addNode(new Graph(), {});
+  portless.addNode(g, {});
+  // An action goes where one that needs more ports is expected.
+  const needsPorts: Action<Ports, string>[] = [portless];
   // A returned template string is a path, so a role it declares takes any node that returns one.
   const written = defineActionWithPorts({
     kind: "written",
@@ -409,6 +476,45 @@ export function wrongDeclarationsDoNotCompile() {
   }).addNode(g, { inputs: { videoId: "v" } });
   // An input may take a name that every object has.
   cmd.addNode(g, { name: "named inputs", inputs: { constructor: "x", valueOf: 1 } });
+  // A node gives the inputs its action's nodeInputs declares, in a variable or a function's return.
+  const translate = defineActionWithPorts({
+    kind: "translate",
+    deps: { download },
+    nodeInputs: nodeInputs<{
+      videoId: string;
+      language?: string;
+      glossary?: FileInput;
+      audio?: OutputRef<string>;
+    }>,
+    inputs: { version: "translate-v1" },
+    action: async () => "",
+  });
+  const german = { videoId: "v1", language: "de" };
+  translate.addNode(g, { name: "t1", deps: { download: dl }, inputs: german });
+  translate.addNode(g, {
+    name: "t2",
+    deps: { download: dl },
+    inputs: ({ download }) => ({ videoId: "v1", audio: download.audio }),
+  });
+  // Either of two records, each with an optional input that the other leaves out.
+  const glossed = { videoId: "v1", glossary: file("glossary.txt") };
+  translate.addNode(g, {
+    name: "t3",
+    deps: { download: dl },
+    inputs: () => (Math.random() < 0.5 ? glossed : german),
+  });
+  // An action whose nodeInputs is an index signature takes any input.
+  defineActionWithPorts({
+    kind: "tagged",
+    nodeInputs: nodeInputs<Record<string, string>>,
+    action: async () => "",
+  }).addNode(g, { name: "tags", inputs: { anything: "x" } });
+  // A node gives the names of one member where nodeInputs is a union of records.
+  defineActionWithPorts({
+    kind: "source",
+    nodeInputs: nodeInputs<{ from: "youtube"; videoId: string } | { from: "disk"; path: string }>,
+    action: async () => "",
+  }).addNode(g, { name: "from disk", inputs: { from: "disk", path: "a.mp3" } });
   // A marker that names only a type goes uncalled, and called it means the same.
   defineActionWithPorts({
     kind: "called",
@@ -553,4 +659,58 @@ export function wrongDeclarationsDoNotCompile() {
   feed.addNode(new Graph(), {});
   // @ts-expect-error ports that do not satisfy the graph's
   void execute(g, { cache: new MemCache(), fs: createMemoryDagFs(), casBaseDir: "/cas" });
+  // @ts-expect-error a graph typed as one that needs no ports: <P extends Ports>(graph: Graph<P>)
+  const portlessGraph: Graph<unknown, Meta> = g;
+  // @ts-expect-error a graph typed as one whose nodes carry other meta
+  const otherMeta: Graph<Ports, Meta | { other: true }> = g;
+  // @ts-expect-error an action typed as one that needs no ports: its type is typeof written
+  const portlessAction: Action<unknown, string> = written;
+  // @ts-expect-error an action typed as one whose nodes give no inputs: download's give a videoId
+  const noInputs: Action<Ports, { audio: string }> = download;
+  void [needsPorts, portlessGraph, otherMeta, portlessAction, noInputs];
+  const extraRole = { download: dl, mirror: dl };
+  // @ts-expect-error an extra role in a variable, which no excess-property check sees
+  captions.addNode(g, { name: "v1", deps: extraRole });
+  // @ts-expect-error a misspelt maybe role: an index signature may hold any role
+  maybeDownload.addNode(g, { name: "v2", deps: Object.fromEntries([["dll", dl]]) });
+  const subs = defineActionWithPorts({
+    kind: "subtitles",
+    action: async ({ outputDir }): Promise<{ vtt: string; srt?: string }> => ({
+      vtt: `${outputDir}/a.vtt`,
+    }),
+  }).addNode(g, {});
+  // @ts-expect-error a ref to an output that a return may leave out: read it from depOutputs
+  cmd.addNode(g, { name: "srt", deps: { subs }, inputs: ({ subs }) => (void subs.srt, {}) });
+  const languages = defineActionWithPorts({
+    kind: "languages",
+    action: async ({ outputDir }) => {
+      const found: Record<string, string> = { en: `${outputDir}/en.vtt` };
+      return found;
+    },
+  }).addNode(g, {});
+  cmd.addNode(g, {
+    name: "fr",
+    deps: { languages },
+    // @ts-expect-error a ref to an output an index signature names: read it from depOutputs
+    inputs: ({ languages }) => (void languages.fr, {}),
+  });
+  // @ts-expect-error a bare name is a list of its characters: closure(g, ["v1:entry"])
+  void closure(g, "v1:entry");
+  // @ts-expect-error a processNode that drops its RunNode's acquire runs past its group's limit
+  void processNode(g, "v1:download", {}, setup().ctx, { force: true });
+  translate.addNode(g, {
+    name: "x1",
+    deps: { download: dl },
+    // @ts-expect-error a node input its action's nodeInputs does not declare: a misspelt language
+    inputs: { videoId: "v", langauge: "de" },
+  });
+  const misspelt = { videoId: "v", langauge: "de" };
+  // @ts-expect-error a misspelt node input in a variable, which no excess-property check sees
+  translate.addNode(g, { name: "x2", deps: { download: dl }, inputs: misspelt });
+  translate.addNode(g, {
+    name: "x3",
+    deps: { download: dl },
+    // @ts-expect-error a misspelt node input that its inputs function returns
+    inputs: () => ({ videoId: "v", langauge: "de" }),
+  });
 }

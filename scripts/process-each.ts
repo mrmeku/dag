@@ -7,6 +7,7 @@ import {
   isSucceeded,
   MemCache,
   processNode,
+  ungated,
   type CacheEntry,
   type Graph,
   type Result,
@@ -43,12 +44,8 @@ export async function processEach(
     const depEntries = Object.fromEntries(
       node.deps.flatMap((dep) => (entries[dep] ? [[dep, entries[dep]]] : [])),
     );
-    const result = await processNode(graph, node.name, depEntries, {
-      ports: { ...ports, fs, exec },
-      cache: new MemCache(),
-      fs,
-      casBaseDir: CAS,
-    });
+    const context = { ports: { ...ports, fs, exec }, cache: new MemCache(), fs, casBaseDir: CAS };
+    const result = await processNode(graph, node.name, depEntries, context, { acquire: ungated });
     if (isSucceeded(result))
       entries[node.name] = { outputs: result.outputs, contentHash: result.contentHash };
     processed.set(node.name, { result, files, commands });

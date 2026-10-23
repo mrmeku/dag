@@ -11,13 +11,35 @@ import {
 
 /**
  * A copy of a value input, `undefined` properties dropped. Its type is checked already; what no
- * type sees is refused by its path: `NaN`, `Infinity`, and an object that is not plain.
+ * type sees is refused by its path: `NaN`, `Infinity`, an object that is not plain, and a value
+ * that a narrower type hides: a function, a symbol, a bigint, and `undefined` in a list.
  */
 function jsonValue(value: unknown, path: string): unknown {
-  if (typeof value === "number" && !Number.isFinite(value))
-    throw new Error(`${path} is ${value}, which is not JSON. Give a finite number, or null.`);
+  switch (typeof value) {
+    case "string":
+    case "boolean":
+      return value;
+    case "number":
+      if (!Number.isFinite(value))
+        throw new Error(`${path} is ${value}, which is not JSON. Give a finite number, or null.`);
+      return value;
+    case "undefined":
+      throw new Error(`${path} is undefined, which is not JSON in a list. Give null, or no item.`);
+    case "bigint":
+      throw new Error(`${path} is a bigint, which is not JSON. Give a string: String(n).`);
+    case "symbol":
+      throw new Error(`${path} is a symbol, which is not JSON. Give a string.`);
+    case "function":
+      throw new Error(
+        `${path} is a function, which is not JSON. Give the data it holds, as a record.`,
+      );
+    case "object":
+      return value === null || isOutputRef(value) ? value : jsonObject(value, path);
+  }
+}
+
+function jsonObject(value: object, path: string): unknown {
   if (Array.isArray(value)) return value.map((item, i) => jsonValue(item, `${path}[${i}]`));
-  if (typeof value !== "object" || value === null || isOutputRef(value)) return value;
   if (!isPlainObject(value)) {
     const name = path.slice(path.lastIndexOf(".") + 1);
     // The types give every object a constructor; Object.create can make one without.

@@ -97,9 +97,12 @@ export type SettledOutputRef<T extends string | string[] = string | string[], S 
   readonly _scope?: S;
 } & NotAString;
 
+/** The output `K` where every return holds it, and an index signature does not name it. */
+type RequiredOutput<T, K extends keyof T> = Record<never, never> extends Pick<T, K> ? never : K;
+
 type OutputRefs<T, S, Settled extends boolean> = [T] extends [Record<string, string | string[]>]
   ? {
-      readonly [K in keyof T]: Settled extends true
+      readonly [K in keyof T as RequiredOutput<T, K>]: Settled extends true
         ? SettledOutputRef<T[K], S>
         : OutputRef<T[K], S>;
     }
@@ -110,6 +113,8 @@ type OutputRefs<T, S, Settled extends boolean> = [T] extends [Record<string, str
  * the dep's outputs, an `OutputRef` for a required dep and a `SettledOutputRef` for a `settled`
  * one. A dep whose outputs are not a record has no refs. The refs of a dep cannot be listed, as
  * by a spread, since its outputs' names exist only in the types: name each one, `pack.tarball`.
+ * An output that some return of the dep leaves out, or that an index signature names, has no ref:
+ * the action reads it from `depOutputs`, where it is `| undefined`.
  */
 export type DepRefs<D, S> = { readonly [K in keyof D]: RefsOf<D[K], S> };
 
@@ -144,7 +149,9 @@ export type FileInput = { readonly [FILE_INPUT]: string } & NotAString;
  *
  * No type sees these, so `defineAction` and `addNode` refuse them by their path, as
  * `inputs.ratio is NaN`: `NaN`, `Infinity`, and an object that is not plain, such as a class
- * instance typed as a record.
+ * instance typed as a record. A narrower type can also hide a value, as a record typed
+ * `{ model: string }` can hold a function. Both refuse such a value: a function, a symbol, a
+ * bigint, and `undefined` in a list.
  */
 export type InputValue<S = never> =
   | string
@@ -187,6 +194,8 @@ export type FileHandle = {
   text(): Promise<string>;
   /** Its contents as JSON, checked by `is`; a file `is` refuses throws, naming the file. */
   json<T>(is: (value: unknown) => value is T): Promise<T>;
+  /** The SHA256 of its bytes, as the engine hashes outputs: the fingerprint of a binary file. */
+  hash(): Promise<string>;
 } & NotAString;
 
 /**
@@ -274,6 +283,8 @@ export function settled(of?: NodeRef | Dep): SettledRef | SettledDep {
     : notAString({ name: of.name, settled: true as const }, nodeRefusal(of.name, true));
 }
 
+const MAYBE: unique symbol = Symbol.for("@mrmeku/dagraph/maybe");
+
 /**
  * Mark a role that a node may leave out: around the action that fills it, `deps: { summary:
  * maybe(summarize) }`, or uncalled, by its outputs, `deps: { summary: maybe<string> }`. Its
@@ -283,8 +294,16 @@ export function maybe<T extends Outputs>(dep: SettledDep<T>): SettledDep<T> | un
 export function maybe<T extends Outputs>(dep: Dep<T>): Dep<T> | undefined;
 export function maybe<T extends Outputs>(): Dep<T> | undefined;
 export function maybe(dep?: Dep | SettledDep): Dep | SettledDep | undefined {
-  return dep ?? { [DEP]: true };
+  const role = { [DEP]: true as const, [MAYBE]: true as const };
+  return dep?.settled ? { ...role, settled: true } : role;
 }
+
+/** The roles of `deps` that each node gives: each but one that `maybe` marks or that is `undefined`. */
+export const requiredRoles = (deps: DepSpecs): string[] =>
+  Object.entries(deps).flatMap(([role, declared]) => {
+    const spec = typeof declared === "function" ? declared() : declared;
+    return spec === undefined || MAYBE in spec ? [] : [role];
+  });
 
 /**
  * The inputs that each node of an action gives when it is added, by name and type, as its
@@ -449,24 +468,54 @@ export type DepSpecsOf<D extends DepRecord> = { [K in keyof D]: DepOf<D[K]> };
  * The action's own inputs, which no node declares again. Where they are a record typed by an index
  * signature, their names are not in the type, so `addNode` refuses a repeat when the node is added.
  */
-type NotRedeclared<I> = string extends keyof I ? unknown : { readonly [K in keyof I]?: never };
+type NotRedeclared<I> = string extends keyof I
+  ? unknown
+  : { readonly [K in keyof I]?: { readonly "is its action's own input: leave it out": K } };
+
+/** The names `nodeInputs` declares: where it is a union of records, each member's. */
+type InputNames<N> = N extends unknown ? keyof N : never;
+
+/** Whether a node may give any input but its action's own: `nodeInputs` names none, or any. */
+type TakesAnyInput<N> = [InputNames<N>] extends [never]
+  ? true
+  : string extends InputNames<N>
+    ? true
+    : false;
 
 /**
- * A node's own inputs: those its action's `nodeInputs` declares, and any but the action's own.
+ * A node's own inputs: those its action's `nodeInputs` declares, or any but the action's own.
  * One object type, not an intersection, so a name that `Object` has, as `constructor`, compiles.
  */
-type OwnInputs<N, I, S> = Flat<N & NotRedeclared<I> & InputRecord<S>>;
+type OwnInputs<N, I, S> =
+  TakesAnyInput<N> extends true
+    ? Flat<N & NotRedeclared<I> & InputRecord<S>>
+    : Flat<{ [K in keyof N]: N[K] & (InputValue<S> | FileInput | undefined) } & NotRedeclared<I>>;
+
+/**
+ * Each name of `NI`, the inputs a node gives, refused where `nodeInputs` does not declare it, also
+ * in a variable or a return, which no excess-property check sees. Each is optional: a returned
+ * union infers `NI` from one member.
+ */
+type InputChecks<NI, N, I> =
+  TakesAnyInput<N> extends true
+    ? unknown
+    : {
+        [K in keyof NI]?: K extends InputNames<N> | keyof NotRedeclared<I>
+          ? unknown
+          : { readonly "is no input its action's nodeInputs declares": K };
+      };
 
 /**
  * A node's own inputs, added to its action's: a record, or a function of the deps the node gives
  * that returns one. The function is the one way to put a ref in a value input, and it runs once,
  * when the node is added: `inputs: ({ pack }) => ({ argv: ["publish", pack.tarball] })`. `N` is
  * what the action's `nodeInputs` declares, `I` the action's own `inputs`, which no node declares
- * again, and `D` the deps whose refs the function gets.
+ * again, and `D` the deps whose refs the function gets. `NI`, inferred from the node, is the
+ * inputs it gives.
  */
-export type NodeInputs<N, I, D> =
-  | OwnInputs<N, I, never>
-  | (<S>(deps: DepRefs<D, S>) => OwnInputs<N, I, S>);
+export type NodeInputs<N, I, D, NI = N> =
+  | (OwnInputs<N, I, never> & InputChecks<NI, N, I>)
+  | (<S>(deps: DepRefs<D, S>) => OwnInputs<N, I, S> & InputChecks<NI, N, I>);
 
 /**
  * Whether an action's `deps` take a dep in any role, as a record typed `DepSpecs` does, rather than
@@ -481,22 +530,31 @@ type RefDeps<D, ND> = TakesAnyRole<D> extends true ? ND : NodeDeps<D>;
 type Param<K extends string, Needed, V> =
   Record<never, never> extends Needed ? { [P in K]?: V } : { [P in K]: V };
 
+/** A role `K` as a node gives it, refused by an object that names why. */
+type RoleCheck<K, D> = K extends keyof D
+  ? unknown
+  : { readonly "is no role its action declares": K };
+
+/** Each role of `ND`, the deps a node gives, checked also where no excess-property check sees. */
+type RoleChecks<ND, D> =
+  TakesAnyRole<D> extends true ? unknown : { [K in keyof ND]: RoleCheck<K, D> };
+
 /** A node's deps: none where its action declares no role, else the roles it declares. */
 type DepsParam<D, ND> = [keyof D] extends [never]
   ? { deps?: Record<string, never> }
-  : Param<"deps", NodeDeps<D>, RefDeps<D, ND>>;
+  : Param<"deps", NodeDeps<D>, ND & RoleChecks<ND, D>>;
 
 /**
  * What `addNode` takes: a name, deps, inputs and meta, and nothing else. The deps are the roles
  * the action's `deps` declare (`D`), and its inputs those its `nodeInputs` declare (`N`), with
- * none of its own `inputs` (`I`). `ND`, inferred from the node, is its deps where `D` takes any
- * role.
+ * none of its own `inputs` (`I`). `ND` and `NI`, inferred from the node, are the deps and the
+ * inputs it gives.
  */
-export type NodeParams<D, N, I, Meta, ND = NodeDeps<D>> = {
+export type NodeParams<D, N, I, Meta, ND = NodeDeps<D>, NI = N> = {
   name?: string;
   meta?: Meta;
 } & DepsParam<D, ND> &
-  Param<"inputs", N, NodeInputs<N, I, RefDeps<D, ND>>>;
+  Param<"inputs", N, NodeInputs<N, I, RefDeps<D, ND>, NI>>;
 
 /**
  * A node as data, from `graph.describe()`: no action, inputs or fingerprints, so it can cross
