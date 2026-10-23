@@ -6,7 +6,7 @@ import { resolve } from "node:path";
 import { afterEach, beforeEach, describe, mock, test, type TestContext } from "node:test";
 import { pathToFileURL } from "node:url";
 import { styleText } from "node:util";
-import { run } from "../commands.ts";
+import { addCommand } from "../commands.ts";
 import { LIVE_FRAME_MS, type OutputStyle } from "../config.ts";
 import { defineStep } from "../define-step.ts";
 import { errorMessage } from "../kernel/format.ts";
@@ -174,10 +174,10 @@ describe("local session, grouped style", () => {
     const { implementation } = defineWorkflow({
       implementation: (workflow) => {
         workflow.restoreCache({ name: "restore", path: [".dag/cas"], key: "k" });
-        const lint = workflow.run({ name: "lint", cmd: ["lint"], cacheable: false });
-        const up = workflow.run({ name: "../up", cmd: ["up"], cacheable: false });
-        const abs = workflow.run({ name: "/abs", cmd: ["up"], cacheable: false });
-        const colon = workflow.run({ name: ":", cmd: ["up"], cacheable: false });
+        const lint = workflow.task({ name: "lint", cmd: ["lint"], cacheable: false });
+        const up = workflow.task({ name: "../up", cmd: ["up"], cacheable: false });
+        const abs = workflow.task({ name: "/abs", cmd: ["up"], cacheable: false });
+        const colon = workflow.task({ name: ":", cmd: ["up"], cacheable: false });
         // After every other step, so its start line follows their groups.
         workflow.requireAll({ deps: { lint, up, abs, colon } });
       },
@@ -258,23 +258,23 @@ describe("local session, failures style", () => {
     });
     const { implementation } = defineWorkflow({
       implementation: (workflow) => {
-        const install = workflow.run({ name: "install", cmd: ["install"], cacheable: false });
-        const lint = workflow.run({
+        const install = workflow.task({ name: "install", cmd: ["install"], cacheable: false });
+        const lint = workflow.task({
           name: "lint",
           cmd: ["lint"],
           deps: { install },
           cacheable: false,
         });
-        const build = workflow.run({ name: "build", cmd: ["build", "--prod"], deps: { install } });
+        const build = workflow.task({ name: "build", cmd: ["build", "--prod"], deps: { install } });
         const requireAll = workflow.requireAll({ deps: { lint, build } });
-        workflow.run({ name: "deploy:site", cmd: ["deploy"], deps: { requireAll } });
-        workflow.run({
+        workflow.task({ name: "deploy:site", cmd: ["deploy"], deps: { requireAll } });
+        workflow.task({
           name: "upload",
           cmd: ["upload"],
           deps: { lint: settled(lint) },
           cacheable: false,
         });
-        workflow.run({
+        workflow.task({
           name: "pack",
           cmd: ["pack"],
           outputs: { tarball: "pkg.tgz" },
@@ -409,15 +409,15 @@ describe("local session, failures style", () => {
     });
     const { implementation } = defineWorkflow({
       implementation: (workflow) => {
-        const install = workflow.run({ name: "install", cmd: ["install"], cacheable: false });
+        const install = workflow.task({ name: "install", cmd: ["install"], cacheable: false });
         for (let i = 0; i < 30; i++) {
-          const test = workflow.run({
+          const test = workflow.task({
             name: `packages/pkg${i}:test`,
             cmd: ["test", String(i)],
             deps: { install },
             cacheable: false,
           });
-          workflow.run({ name: `packages/pkg${i}:build`, cmd: ["build"], deps: { test } });
+          workflow.task({ name: `packages/pkg${i}:build`, cmd: ["build"], deps: { test } });
         }
       },
     });
@@ -489,12 +489,12 @@ describe("local session, failures style", () => {
     });
     const { implementation } = defineWorkflow({
       implementation: (workflow) => {
-        const lint = workflow.run({ name: "lint docs", cmd: awk, cacheable: false });
-        workflow.run({ name: "build", cmd: ["build"], cacheable: false });
+        const lint = workflow.task({ name: "lint docs", cmd: awk, cacheable: false });
+        workflow.task({ name: "build", cmd: ["build"], cacheable: false });
         const requireAll = workflow.requireAll({ deps: { lint } });
-        const pages = workflow.run({ name: "pages", cmd: ["pages"], cacheable: false });
+        const pages = workflow.task({ name: "pages", cmd: ["pages"], cacheable: false });
         // Skipped only once `pages` is done, well after require-all failed.
-        workflow.run({ name: "deploy", cmd: ["deploy"], deps: { requireAll, pages } });
+        workflow.task({ name: "deploy", cmd: ["deploy"], deps: { requireAll, pages } });
       },
     });
     const session = localRun("failures", ports, { implementation });
@@ -665,7 +665,7 @@ describe("local session, failures style, at the edges", () => {
       {
         implementation: async (graph) => {
           for (const name of ["hang", "stuck"])
-            run(graph, { name, cmd: [name], timeoutMs: 6, cacheable: false });
+            addCommand(graph, { name, cmd: [name], timeoutMs: 6, cacheable: false });
           upload.addNode(graph, {});
         },
       },
@@ -824,8 +824,8 @@ describe("local session, failures style, at the edges", () => {
     });
     const { implementation } = defineWorkflow({
       implementation: (workflow) => {
-        const fast = workflow.run({ name: "fast", cmd: ["fast"], cacheable: false });
-        const slow = workflow.run({ name: "slow", cmd: ["slow"], cacheable: false });
+        const fast = workflow.task({ name: "fast", cmd: ["fast"], cacheable: false });
+        const slow = workflow.task({ name: "slow", cmd: ["slow"], cacheable: false });
         workflow.post({
           name: "save",
           main: fast,
@@ -894,8 +894,8 @@ describe("local session, failures style, at the edges", () => {
       implementation: (workflow) => {
         // The post pass builds the graph again, which this workflow cannot.
         if (builds++ > 0) throw new Error("second build");
-        const fast = workflow.run({ name: "fast", cmd: ["fast"], cacheable: false });
-        const slow = workflow.run({ name: "slow", cmd: ["slow"], cacheable: false });
+        const fast = workflow.task({ name: "fast", cmd: ["fast"], cacheable: false });
+        const slow = workflow.task({ name: "slow", cmd: ["slow"], cacheable: false });
         workflow.post({
           name: "save",
           main: fast,
@@ -1138,8 +1138,8 @@ describe("local session, live style", () => {
     });
     const { implementation } = defineWorkflow({
       implementation: (workflow) => {
-        const fast = workflow.run({ name: "fast", cmd: ["fast"], cacheable: false });
-        const slow = workflow.run({ name: "slow", cmd: ["slow"], cacheable: false });
+        const fast = workflow.task({ name: "fast", cmd: ["fast"], cacheable: false });
+        const slow = workflow.task({ name: "slow", cmd: ["slow"], cacheable: false });
         workflow.post({
           name: "teardown",
           main: fast,
@@ -1191,14 +1191,16 @@ describe("local session, live style", () => {
           "✔︎ fast     0.0s · 1 line",
           "◼︎ slow     cancelled after 31.0s",
           "summary: .dag/summary.md",
-          "post · 1 of 2 post steps owed",
+          // Owed, since its main ran, and skipped there: its required dep was cancelled.
+          "post · 2 of 2 post steps owed",
+          "⏭︎ save     skipped",
           "✔︎ teardown 0.0s · 1 line",
           "summary: .dag/summary.md",
           "",
           "◼︎ cancelled, 2 nodes not run · ci.ts · w",
           "all 31.0s",
           "built 2 · cached 0 · failed 0 · skipped ",
-          "0 · cancelled 2",
+          "1 · cancelled 1",
           "",
           "logs     .dag/logs/",
           "after the run",
@@ -1217,7 +1219,7 @@ describe("local session, live style", () => {
           "# Failures · ci.ts",
           "",
           "status: cancelled · started 1970-01-01T00:00:00.000Z · wall 31.0s",
-          "◼︎ cancelled, 2 nodes not run · built 2 · cached 0 · failed 0 · skipped 0 · cancelled 2",
+          "◼︎ cancelled, 2 nodes not run · built 2 · cached 0 · failed 0 · skipped 1 · cancelled 1",
           "",
           "No failures.",
           "",

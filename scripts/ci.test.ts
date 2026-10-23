@@ -1,17 +1,18 @@
 import { Graph } from "@mrmeku/dagraph";
-import { createTestPorts, createWorkflow, type Ports } from "@mrmeku/dagworkflows";
+import { createTestPorts, createWorkflow, selectNodes, type Ports } from "@mrmeku/dagworkflows";
 import assert from "node:assert/strict";
 import { describe, test } from "node:test";
 import ci from "./ci.ts";
 import { processEach } from "./process-each.ts";
 
 describe("ci workflow", () => {
-  test("the CAS restore first, checks that order after it and read only their files, the CAS save on main only", async () => {
+  test("the CAS restore first, checks that order after it and read only their files, the CAS save on main only, after every check", async () => {
     const build = async (ref: string) => {
       const { ports } = createTestPorts({ context: { ref } });
       const graph = new Graph<Ports>();
       await createWorkflow(graph, ports, await ports.host.context()).compose(ci);
-      return { nodes: graph.describe(), processed: await processEach(graph, ports) };
+      // The graph a run executes, where the save waits for every node that reads the CAS.
+      return { nodes: selectNodes(graph).describe(), processed: await processEach(graph, ports) };
     };
     const { nodes, processed } = await build("refs/pull/7/merge");
     const onMain = (await build("refs/heads/main")).nodes;
@@ -36,7 +37,7 @@ describe("ci workflow", () => {
         nobodyReadsReadme: nodes.every((n) => !reads(n.name, "README.md")),
         requireAllDeps: by("require-all")?.deps.sort(),
         requireAllSettledDeps: by("require-all")?.settledDeps?.length,
-        saveCas: onMain.find((n) => n.name === "save:cas")?.deps.sort(),
+        saveCas: onMain.find((n) => n.name === "save:cas"),
         uncached: nodes.filter((n) => n.cacheable === false).map((n) => n.name),
         schedulerOptions: ci.schedulerOptions,
       },
@@ -57,7 +58,20 @@ describe("ci workflow", () => {
         nobodyReadsReadme: true,
         requireAllDeps: ["lint", "test:dagraph", "test:dagworkflows", "typecheck"],
         requireAllSettledDeps: 4,
-        saveCas: ["require-all", "restore:cas"],
+        saveCas: {
+          name: "save:cas",
+          kind: "save:cas",
+          deps: [
+            "restore:cas",
+            "typecheck",
+            "lint",
+            "test:dagraph",
+            "test:dagworkflows",
+            "require-all",
+          ],
+          settledDeps: ["typecheck", "lint", "test:dagraph", "test:dagworkflows", "require-all"],
+          cacheable: false,
+        },
         uncached: ["restore:cas"],
         schedulerOptions: { maxParallelism: 4, concurrencyLimits: { test: 2 } },
       },

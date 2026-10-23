@@ -60,7 +60,7 @@ export type TaskContext<
   warn: (message: string) => void;
 };
 
-/** A task's fields; `TaskSpec` adds that `outputs` is required once `O` names an output. */
+/** A task's fields; `ActionTaskSpec` adds that `outputs` is required once `O` names an output. */
 export interface TaskFields<
   G extends string,
   D extends DepRecord,
@@ -93,7 +93,8 @@ export type OutputsField<O extends string> = [O] extends [never]
   : { outputs: Record<O, string> };
 
 /**
- * What `workflow.task` takes: a node whose work is a TypeScript function.
+ * What `workflow.task` takes for a node whose work is `action`, a TypeScript function, and
+ * neither `cmd` nor `shell`.
  * - Its key is its `inputs`, its deps by role and its `outputs`, never its `action`. A value the
  *   action reads goes in `inputs`: `inputs: { version: "manifest-v1", os }`, then `inputs.os`.
  *   Bump the version when the action changes.
@@ -102,13 +103,15 @@ export type OutputsField<O extends string> = [O] extends [never]
  *   above.
  * - It is cached only when it declares inputs, unless it sets `cacheable`.
  */
-export type TaskSpec<
+export type ActionTaskSpec<
   G extends string,
   D extends DepRecord,
   O extends string,
   I extends InputRecord = Record<never, never>,
 > = Omit<TaskFields<G, D, O, I>, "inputs"> & {
   inputs?: I & { [DECLARED_OUTPUTS]?: never };
+  cmd?: never;
+  shell?: never;
 } & OutputsField<O>;
 
 export const outputPath = (outputDir: string, file: string): string => `${outputDir}/${file}`;
@@ -226,8 +229,8 @@ async function runTask<D extends DepRecord, O extends string, I extends InputRec
 
 /**
  * Adds `spec` to `graph` as a node of an action defined for it alone. `where` names it in errors
- * as the method that added it: `run "lint"`. `deps`, when given, replaces the spec's: a post that
- * `--only` adds again gives the roles it keeps.
+ * as the call that added it: `task "lint"`. `deps`, when given, replaces the spec's: a post gives
+ * its main beside its own, and a run adds it again with its waits.
  */
 export function addTask<
   D extends DepRecord,
@@ -263,7 +266,7 @@ export function addTask<
     ...(spec.concurrencyGroup !== undefined && { concurrencyGroup: spec.concurrencyGroup }),
     action: (context) => runTask(spec, context),
   });
-  // eslint-disable-next-line @typescript-eslint/consistent-type-assertions -- the action is this node's alone, so it declares the deps and inputs the node gives: NodeDeps<DepSpecsOf<D>> is D, and the inputs are I, whose refs a command scopes by its own S; TypeScript sees neither for a generic D and I. A post that --only adds again keeps the roles its command reads and adds settled ones, which its action never reads.
+  // eslint-disable-next-line @typescript-eslint/consistent-type-assertions -- the action is this node's alone, so it declares the deps and inputs the node gives: NodeDeps<DepSpecsOf<D>> is D, and the inputs are I, whose refs a command scopes by its own S; TypeScript sees neither for a generic D and I. A post a run adds again keeps its roles and adds settled waits, which its action never reads.
   const params = {
     name: spec.name,
     ...(deps && { deps }),

@@ -7,8 +7,9 @@ import {
   type NodeRef,
   type ThrottledSchedulerOptions,
 } from "@mrmeku/dagraph";
-import { post, run, runShell, type PostSpec, type RunShellSpec, type RunSpec } from "./commands.ts";
+import { addCommand, type CmdTaskSpec, type ShellTaskSpec } from "./commands.ts";
 import type { CiContext, Ports } from "./ports.ts";
+import { post, type PostSpec } from "./post.ts";
 import type { Implementation } from "./runner.ts";
 import {
   glob,
@@ -17,12 +18,26 @@ import {
   restoreCache,
   saveCache,
   uploadArtifact,
+  type Main,
+  type PostRef,
   type RestoreCacheRef,
   type RestoreCacheSpec,
   type UploadArtifactSpec,
 } from "./steps.ts";
 import type { SummaryRenderer } from "./summary.ts";
-import { addTask, type TaskSpec } from "./task.ts";
+import { addTask, type ActionTaskSpec } from "./task.ts";
+
+/**
+ * What `workflow.task` takes: a node whose work is exactly one of `action`, a TypeScript function
+ * (`ActionTaskSpec`); `cmd`, an argv run with no shell (`CmdTaskSpec`); or `shell`, a string
+ * run under bash (`ShellTaskSpec`). Giving two does not compile.
+ */
+export type TaskSpec<
+  G extends string,
+  D extends DepRecord,
+  O extends string,
+  I extends InputRecord = Record<never, never>,
+> = ActionTaskSpec<G, D, O, I> | CmdTaskSpec<G, D, O> | ShellTaskSpec<G, D, O>;
 
 /** The concurrency groups that scheduler options declare, or `never` when they declare none. */
 export type GroupsOf<S> = S extends { concurrencyLimits: infer C }
@@ -47,7 +62,10 @@ export interface Workflow<G extends string = never> {
   glob: (...patterns: string[]) => Promise<Record<string, FileInput>>;
   /** The `hashFiles()` of a workflow file: one hash over the matched files' contents, for a cache key. */
   hash: (...patterns: string[]) => Promise<string>;
-  /** Adds a node whose work is a TypeScript function: see `TaskSpec`. */
+  /**
+   * Adds a node whose work is `action`, `cmd` or `shell`: see `TaskSpec`.
+   * `workflow.task({ name: "lint", cmd: ["bun", "run", "lint"], inputs: src })`.
+   */
   task: <
     D extends DepRecord = Record<never, never>,
     O extends string = never,
@@ -55,27 +73,26 @@ export interface Workflow<G extends string = never> {
   >(
     spec: TaskSpec<G, D, O, I>,
   ) => NodeRef<Record<O, string>>;
-  /** Adds a task that runs one program with no shell: see `RunSpec`. */
-  run: <D extends DepRecord = Record<never, never>, O extends string = never>(
-    spec: RunSpec<G, D, O>,
-  ) => NodeRef<Record<O, string>>;
-  /** Adds a task that runs a string under bash: see `RunShellSpec`. */
-  runShell: <D extends DepRecord = Record<never, never>, O extends string = never>(
-    spec: RunShellSpec<G, D, O>,
-  ) => NodeRef<Record<O, string>>;
   requireAll: (opts: Parameters<typeof requireAll>[1]) => NodeRef<string>;
-  /** Adds a command that runs after `main`: see `PostSpec`. */
+  /**
+   * Adds a task that runs after `main` and every node of the run downstream of it, still owed
+   * after a cancel: see `PostSpec`.
+   * `workflow.post({ name: "down:db", main: settled(db), cmd: ["docker", "rm", "-f", "db"] })`.
+   */
   post: <
     D extends DepRecord = Record<never, never>,
     O extends string = never,
-    M extends NodeRef = NodeRef,
+    M extends Main = Main,
   >(
     spec: PostSpec<G, D, O, M>,
-  ) => NodeRef<Record<O, string>>;
+  ) => PostRef<Record<O, string>>;
   /** `actions/cache/restore` as a node. */
   restoreCache: (spec: RestoreCacheSpec) => RestoreCacheRef;
-  /** `actions/cache/save` as its post step; `cache` is the restore node it saves for. */
-  saveCache: (opts: Parameters<typeof saveCache>[1]) => NodeRef<string>;
+  /**
+   * `actions/cache/save` as a post of `cache`, the restore it saves for: it waits for every node
+   * of the run downstream of the restore. `deps` are ordinary deps: `deps: { install }`.
+   */
+  saveCache: (opts: Parameters<typeof saveCache>[1]) => PostRef<string>;
   /** `actions/upload-artifact` as a node: globs and dep outputs up as one artifact of the run. */
   uploadArtifact: <D extends DepRecord = Record<never, never>>(
     spec: UploadArtifactSpec<D>,
@@ -100,9 +117,7 @@ export function createWorkflow<G extends string>(
     glob: async (...patterns) =>
       Object.fromEntries((await glob(patterns)).map((path) => [path, file(path)])),
     hash: (...patterns) => hashFiles(patterns),
-    task: (spec) => addTask(graph, spec),
-    run: (spec) => run(graph, spec),
-    runShell: (spec) => runShell(graph, spec),
+    task: (spec) => (spec.action === undefined ? addCommand(graph, spec) : addTask(graph, spec)),
     requireAll: (opts) => requireAll(graph, opts),
     post: (spec) => post(graph, spec),
     restoreCache: (spec) => restoreCache(graph, spec),

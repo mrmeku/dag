@@ -13,10 +13,9 @@ describe("defineWorkflow", () => {
     const def = defineWorkflow({
       schedulerOptions: { concurrencyLimits: { heavy: 1 } },
       implementation: (workflow) => {
-        const a = workflow.run({ name: "a", cmd: ["x"], concurrencyGroup: "heavy" });
+        const a = workflow.task({ name: "a", cmd: ["x"], concurrencyGroup: "heavy" });
         // @ts-expect-error "light" is not a declared concurrency group
-        const b = workflow.run({ name: "b", cmd: ["y"], concurrencyGroup: "light", deps: { a } });
-        // @ts-expect-error a post step says what it waits for; a graph has no end of job
+        const b = workflow.task({ name: "b", cmd: ["y"], concurrencyGroup: "light", deps: { a } });
         workflow.post({ name: "a:post", main: a, cmd: ["z"] });
         workflow.requireAll({ deps: { a, b } });
       },
@@ -45,8 +44,8 @@ describe("defineWorkflow", () => {
     const checks = defineWorkflow({
       schedulerOptions: { maxParallelism: 1, concurrencyLimits: { test: 1 } },
       implementation: (workflow) => ({
-        lint: workflow.run({ name: "lint", cmd: ["lint"] }),
-        unit: workflow.run({ name: "unit", cmd: ["test"], concurrencyGroup: "test" }),
+        lint: workflow.task({ name: "lint", cmd: ["lint"] }),
+        unit: workflow.task({ name: "unit", cmd: ["test"], concurrencyGroup: "test" }),
       }),
     });
     const ci = defineWorkflow({
@@ -99,9 +98,9 @@ describe("defineWorkflow", () => {
   // Checked by the typecheck: a call that does not compile fails it, as the @ts-expect-error does
   // if the call compiles. Building the graphs would repeat what the test above asserts.
   test("a builder typed Workflow takes the facade of any workflow; one that uses a group takes only a workflow that declares it, and compose takes only a workflow whose groups this one declares", () => {
-    const lint = (workflow: Workflow) => workflow.run({ name: "lint", cmd: ["lint"] });
+    const lint = (workflow: Workflow) => workflow.task({ name: "lint", cmd: ["lint"] });
     const compile = (workflow: Workflow<"mix">) =>
-      workflow.run({ name: "compile", cmd: ["mix"], concurrencyGroup: "mix" });
+      workflow.task({ name: "compile", cmd: ["mix"], concurrencyGroup: "mix" });
     const browsers = defineWorkflow({
       schedulerOptions: { concurrencyLimits: { browser: 1 } },
       implementation: () => {},
@@ -127,14 +126,14 @@ describe("defineWorkflow", () => {
 
 /** Typechecked, never run: each line marked @ts-expect-error must not compile. */
 export function wrongCommandsDoNotCompile(workflow: Workflow) {
-  const pack = workflow.run({ name: "pack", cmd: ["pack"], outputs: { tarball: "pkg.tgz" } });
-  const tests = workflow.run({ name: "tests", cmd: ["test"], outputs: { report: "junit.xml" } });
+  const pack = workflow.task({ name: "pack", cmd: ["pack"], outputs: { tarball: "pkg.tgz" } });
+  const tests = workflow.task({ name: "tests", cmd: ["test"], outputs: { report: "junit.xml" } });
   const maybe = tests.name === "never" ? pack : undefined;
   // @ts-expect-error a ref in a template string (TS2731)
-  workflow.run({ name: "a", deps: { pack }, cmd: ({ pack }) => [`--file=${pack.tarball}`] });
+  workflow.task({ name: "a", deps: { pack }, cmd: ({ pack }) => [`--file=${pack.tarball}`] });
   // @ts-expect-error a ref with + (TS2469)
-  workflow.run({ name: "b", deps: { pack }, cmd: ({ pack }) => ["--file=" + pack.tarball] });
-  workflow.run({
+  workflow.task({ name: "b", deps: { pack }, cmd: ({ pack }) => ["--file=" + pack.tarball] });
+  workflow.task({
     name: "c",
     deps: { pack },
     outputs: { x: "x.txt" },
@@ -151,53 +150,53 @@ export function wrongCommandsDoNotCompile(workflow: Workflow) {
     },
   });
   // @ts-expect-error a settled dep's output as an argument: not assignable
-  workflow.run({ name: "f", deps: { tests: settled(tests) }, cmd: ({ tests }) => [tests.report] });
-  workflow.runShell({
+  workflow.task({ name: "f", deps: { tests: settled(tests) }, cmd: ({ tests }) => [tests.report] });
+  workflow.task({
     name: "g",
     deps: { tests: settled(tests) },
-    cmd: 'if [ -n "$REPORT" ]; then cat "$REPORT"; fi',
+    shell: 'if [ -n "$REPORT" ]; then cat "$REPORT"; fi',
     env: ({ tests }) => ({ REPORT: tests.report }),
   });
   // @ts-expect-error a node in the plain form: a ref comes only from the function's argument
-  workflow.run({ name: "h", deps: { pack }, cmd: ["npm", "publish", pack] });
-  // @ts-expect-error a node's ref in runShell's string (TS2731)
-  workflow.runShell({ name: "k", deps: { pack }, cmd: `tar -xzf ${pack}` });
-  workflow.run({
+  workflow.task({ name: "h", deps: { pack }, cmd: ["npm", "publish", pack] });
+  // @ts-expect-error a node's ref in a shell string (TS2731)
+  workflow.task({ name: "k", deps: { pack }, shell: `tar -xzf ${pack}` });
+  workflow.task({
     name: "w1",
     outputs: { x: "x.txt" },
     cmd: ({ out }) => {
       // @ts-expect-error a command's own out, carried into another command
-      workflow.run({ name: "w2", cmd: () => ["cat", out.x] });
+      workflow.task({ name: "w2", cmd: () => ["cat", out.x] });
       return ["touch", out.x];
     },
   });
-  workflow.run({
+  workflow.task({
     name: "w3",
     deps: { pack },
     cmd: (refs) => {
       // @ts-expect-error a dep's ref, carried into another command
-      workflow.run({ name: "w4", deps: { pack }, cmd: () => ["cat", refs.pack.tarball] });
+      workflow.task({ name: "w4", deps: { pack }, cmd: () => ["cat", refs.pack.tarball] });
       return ["x"];
     },
   });
   let kept: OutputRef<string> | undefined;
-  workflow.run({ name: "w5", deps: { pack }, cmd: ({ pack }) => ((kept = pack.tarball), ["x"]) });
+  workflow.task({ name: "w5", deps: { pack }, cmd: ({ pack }) => ((kept = pack.tarball), ["x"]) });
   // @ts-expect-error a dep's ref kept in a variable and used by another command
-  workflow.run({ name: "w6", deps: { pack }, cmd: () => ["cat", kept ?? "x"] });
-  workflow.runShell({
+  workflow.task({ name: "w6", deps: { pack }, cmd: () => ["cat", kept ?? "x"] });
+  workflow.task({
     name: "k2",
     deps: { pack },
-    cmd: 'eval "$UNPACK"',
+    shell: 'eval "$UNPACK"',
     // @ts-expect-error a received ref inside a template string (TS2731)
     env: ({ pack }) => ({ UNPACK: `tar -xzf ${pack.tarball}` }),
   });
-  workflow.run({
+  workflow.task({
     name: "n",
     deps: { pack: maybe },
     // @ts-expect-error a dep that may be undefined, used without a check
     cmd: ({ pack }) => ["npm", "publish", pack.tarball],
   });
-  workflow.run({
+  workflow.task({
     name: "o",
     deps: { pack: maybe },
     cmd: ({ pack }) => ["npm", "publish", ...(pack ? [pack.tarball] : [])],
@@ -205,17 +204,83 @@ export function wrongCommandsDoNotCompile(workflow: Workflow) {
   // @ts-expect-error an output named in O but not declared in outputs, so out.notes would be no file
   workflow.task<Record<never, never>, "notes">({ name: "p", action: ({ out }) => void out.notes });
   // @ts-expect-error the same for a command
-  workflow.run<Record<never, never>, "x">({ name: "p2", cmd: ({ out }) => ["touch", out.x] });
+  workflow.task<Record<never, never>, "x">({ name: "p2", cmd: ({ out }) => ["touch", out.x] });
   // @ts-expect-error an input named declaredOutputs, which keys a task's outputs
   workflow.task({ name: "t", inputs: { declaredOutputs: "x" }, action: () => {} });
   // @ts-expect-error an input named command, which keys a command's cmd, cwd and env
-  workflow.run({ name: "u", inputs: { command: "x" }, cmd: ["x"] });
+  workflow.task({ name: "u", inputs: { command: "x" }, cmd: ["x"] });
   // @ts-expect-error a dep whose role is out
-  workflow.run({ name: "l", deps: { out: pack }, cmd: ["x"] });
+  workflow.task({ name: "l", deps: { out: pack }, cmd: ["x"] });
   // @ts-expect-error a dep whose role is outputDir
-  workflow.run({ name: "m", deps: { outputDir: pack }, cmd: ["x"] });
+  workflow.task({ name: "m", deps: { outputDir: pack }, cmd: ["x"] });
   // @ts-expect-error a post's dep whose role is out
   workflow.post({ name: "q", main: pack, deps: { out: tests }, cmd: ["x"] });
   // @ts-expect-error a post's dep whose role is main, which its functions get as main's outputs
   workflow.post({ name: "r", main: pack, deps: { main: tests }, cmd: ["x"] });
+}
+
+/** Typechecked, never run: each line marked @ts-expect-error must not compile. */
+export function wrongFormsAndPostsDoNotCompile(workflow: Workflow) {
+  const db = workflow.task({ name: "up:db", cmd: ["db", "start"], outputs: { id: "id" } });
+  // @ts-expect-error both action and cmd
+  workflow.task({ name: "a", action: () => {}, cmd: ["x"] });
+  // @ts-expect-error both action and shell
+  workflow.task({ name: "b", action: () => {}, shell: "x" });
+  // @ts-expect-error both cmd and shell
+  workflow.task({ name: "c", cmd: ["x"], shell: "x" });
+  // @ts-expect-error neither action, cmd nor shell
+  workflow.task({ name: "d" });
+  // @ts-expect-error a post with both cmd and shell
+  workflow.post({ name: "e", main: db, cmd: ["x"], shell: "x" });
+  // @ts-expect-error a post with inputs: it is never cached
+  workflow.post({ name: "f", main: db, cmd: ["x"], inputs: { version: "f-v1" } });
+  // @ts-expect-error a post with cacheable
+  workflow.post({ name: "g", main: db, cmd: ["x"], cacheable: true });
+  // @ts-expect-error a post with invalidateOn
+  workflow.post({ name: "h", main: db, cmd: ["x"], invalidateOn: { main: () => "" } });
+  // @ts-expect-error a post with no main
+  workflow.post({ name: "i", cmd: ["x"] });
+  const down = workflow.post({
+    name: "down:db",
+    main: settled(db),
+    shell: 'if [ -f "$ID" ]; then docker rm -f "$(cat "$ID")"; fi',
+    env: ({ main }) => ({ ID: main.id }),
+  });
+  // @ts-expect-error a settled main's output as an argument: it may be missing
+  workflow.post({ name: "j", main: settled(db), cmd: ({ main }) => ["db", "stop", main.id] });
+  workflow.post({ name: "k", main: db, cmd: ({ main }) => ["db", "stop", main.id] });
+  workflow.post({
+    name: "l",
+    main: settled(db),
+    action: async ({ depOutputs }) => void (await depOutputs.main?.id.text()),
+  });
+  workflow.post({
+    name: "m",
+    main: settled(db),
+    // @ts-expect-error under settled, an action's main may be undefined
+    action: async ({ depOutputs }) => void (await depOutputs.main.id.text()),
+  });
+  // A post of a post.
+  workflow.post({ name: "report", main: down, cmd: ["report"] });
+  // @ts-expect-error a post as a task's dep
+  workflow.task({ name: "n", deps: { down }, cmd: ["x"] });
+  // @ts-expect-error a post as another post's dep
+  workflow.post({ name: "o", main: db, deps: { down }, cmd: ["x"] });
+  // @ts-expect-error a post in requireAll
+  workflow.requireAll({ deps: { down } });
+  // @ts-expect-error a post as an upload's dep
+  workflow.uploadArtifact({ name: "p", artifact: "p", path: ["x"], deps: { down } });
+  // @ts-expect-error a post's dep in a role of its waits
+  workflow.post({ name: "q", main: db, deps: { "downstream:e2e": db }, cmd: ["x"] });
+  const cas = workflow.restoreCache({ name: "restore:cas", path: [".dag/cas"], key: "cas-1" });
+  const save = workflow.saveCache({ name: "save:cas", cache: cas });
+  // @ts-expect-error a save as a task's dep
+  workflow.task({ name: "r", deps: { save }, cmd: ["x"] });
+  // @ts-expect-error a save in requireAll
+  workflow.requireAll({ deps: { save } });
+  workflow.post({
+    name: "s",
+    main: save,
+    action: async ({ depOutputs, log }) => log(await depOutputs.main.text()),
+  });
 }

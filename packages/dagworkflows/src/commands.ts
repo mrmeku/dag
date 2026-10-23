@@ -11,7 +11,6 @@ import {
   type SettledOutputRef,
 } from "@mrmeku/dagraph";
 import type { Ports } from "./ports.ts";
-import { recordPost } from "./steps.ts";
 import {
   addTask,
   byRole,
@@ -39,14 +38,24 @@ type CommandRefs<D, O extends string, S> = DepRefs<D, S> & {
   readonly outputDir: OwnRef<S>;
 };
 
-type OwnRoles = { out?: never; outputDir?: never };
+export type OwnRoles = { out?: never; outputDir?: never };
 
 /** A ref to a dep's output, which a command reads as its path or paths. */
 type Ref<S> = OutputRef<string | string[], S>;
 type MaybeRef<S> = SettledOutputRef<string | string[], S>;
 
+/** A command's `env`: variables set over what it inherits, or a function of its refs that returns them. */
+type Env<D, O extends string> =
+  | Record<string, string>
+  | (<S>(refs: CommandRefs<D, O, S>) => Record<string, string | Ref<S> | MaybeRef<S> | OwnRef<S>>);
+
+/** A program and its arguments, or a function of the command's refs that returns them. */
+export type Argv<D, O extends string> =
+  | readonly string[]
+  | (<S>(refs: CommandRefs<D, O, S>) => readonly (string | Ref<S> | OwnRef<S>)[]);
+
 /**
- * What `workflow.run` and `workflow.runShell` take beside `cmd`.
+ * What a command, a task whose work is `cmd` or `shell`, takes beside its work.
  *
  * - Read a dep's output from the function's argument: `deps: { pack }, env: ({ pack }) => ({
  *   TARBALL: pack.tarball })`. A ref goes only in what that call returns.
@@ -58,84 +67,62 @@ type MaybeRef<S> = SettledOutputRef<string | string[], S>;
  * - A command that writes the working tree for another node, as `bun install` does, must run
  *   each time: it declares no inputs, or sets `cacheable: false` beside them.
  */
-interface CommandSpec<G extends string, D extends DepRecord, O extends string> extends Omit<
-  TaskFields<G, D, O>,
-  "deps" | "action" | "inputs"
-> {
+export interface CommandFields<
+  G extends string,
+  D extends DepRecord,
+  O extends string,
+> extends Omit<TaskFields<G, D, O>, "deps" | "action" | "inputs"> {
   deps?: D & OwnRoles;
   /** As a task's, and `command` is the command's own: it keys `cmd`, `cwd` and `env`. */
   inputs?: InputRecord & { declaredOutputs?: never; [COMMAND_INPUT]?: never };
   /** Where it runs, relative to the repository root. */
   cwd?: string;
   /** Set over the environment it inherits. */
-  env?:
-    | Record<string, string>
-    | (<S>(
-        refs: CommandRefs<D, O, S>,
-      ) => Record<string, string | Ref<S> | MaybeRef<S> | OwnRef<S>>);
+  env?: Env<D, O>;
+  action?: never;
 }
 
-/** A program and its arguments, or a function of the command's refs that returns them. */
-type Argv<D, O extends string> =
-  | readonly string[]
-  | (<S>(refs: CommandRefs<D, O, S>) => readonly (string | Ref<S> | OwnRef<S>)[]);
-
 /**
- * What `workflow.run` takes: one program and its arguments, run with no shell.
+ * What `workflow.task` takes for a node whose work is `cmd`: one program and its arguments, run
+ * with no shell, and neither `action` nor `shell`.
  *
  * - A ref is its own argument:
  *   `cmd: ({ outputDir }) => ["npm", "pack", "--pack-destination", outputDir]`.
- * - For `--file=` and a path, use `workflow.runShell`:
- *   `env: ({ pack }) => ({ FILE: pack.tarball }), cmd: 'tool --file="$FILE"'`.
+ * - For `--file=` and a path, use `shell`:
+ *   `env: ({ pack }) => ({ FILE: pack.tarball }), shell: 'tool --file="$FILE"'`.
  */
-export type RunSpec<G extends string, D extends DepRecord, O extends string> = CommandSpec<
+export type CmdTaskSpec<G extends string, D extends DepRecord, O extends string> = CommandFields<
   G,
   D,
   O
 > &
-  OutputsField<O> & { cmd: Argv<D, O> };
+  OutputsField<O> &
+  CmdWork<D, O>;
 
 /**
- * What `workflow.runShell` takes: one string, run under `bash --noprofile --norc -eo pipefail -c`
- * (GitHub's `shell: bash`), so a failing command or pipe stage fails the node.
+ * What `workflow.task` takes for a node whose work is `shell`: one string, run under
+ * `bash --noprofile --norc -eo pipefail -c` (GitHub's `shell: bash`), so a failing command or pipe
+ * stage fails the node; and neither `action` nor `cmd`.
  *
  * - Every ref, `outputDir` too, reaches the string only through `env`, read quoted:
- *   `env: ({ assets }) => ({ BUNDLE: assets.bundle }), cmd: 'gzip -c "$BUNDLE" | wc -c'`.
+ *   `env: ({ assets }) => ({ BUNDLE: assets.bundle }), shell: 'gzip -c "$BUNDLE" | wc -c'`.
  * - A `settled` dep's output in `env` is unset when the dep did not succeed, so test it:
- *   `env: ({ tests }) => ({ REPORT: tests.report }), cmd: 'if [ -n "$REPORT" ]; then cat "$REPORT"; fi'`.
+ *   `env: ({ tests }) => ({ REPORT: tests.report }), shell: 'if [ -n "$REPORT" ]; then cat "$REPORT"; fi'`.
  */
-export type RunShellSpec<G extends string, D extends DepRecord, O extends string> = CommandSpec<
+export type ShellTaskSpec<G extends string, D extends DepRecord, O extends string> = CommandFields<
   G,
   D,
   O
 > &
-  OutputsField<O> & { cmd: string };
+  OutputsField<O> &
+  ShellWork;
 
-/**
- * What `workflow.post` takes: a command that runs after `main` succeeds, even after a cancel, as
- * a GitHub action's `post:` does. It is never cached.
- *
- * - It waits only for the `deps` it names, `{}` for none; to wait for `tests` whatever its
- *   outcome, `deps: { tests: settled(tests) }`.
- * - Its functions get `main`'s outputs as `main`: `cmd: ({ main }) => ["db", "stop", main.pid]`.
- */
-export type PostSpec<
-  G extends string,
-  D extends DepRecord,
-  O extends string,
-  M extends NodeRef,
-> = PostFields<G, D, O, M> & OutputsField<O>;
-
-interface PostFields<
-  G extends string,
-  D extends DepRecord,
-  O extends string,
-  M extends NodeRef,
-> extends Omit<CommandSpec<G, D & { main: M }, O>, "cacheable" | "deps" | "invalidateOn"> {
-  cmd: Argv<D & { main: M }, O>;
-  main: M;
-  deps: D & OwnRoles & { main?: never };
-}
+/** A command's work as `cmd`, an argv, and so no `shell`. */
+export type CmdWork<D, O extends string> = { cmd: Argv<D, O>; shell?: never };
+/** A command's work as `shell`, a string, and so no `cmd`. */
+export type ShellWork = { shell: string; cmd?: never };
+/** A command's work as the facade reads it: `cmd` or `shell`. */
+export type Work<D, O extends string> = CmdWork<D, O> | ShellWork;
 
 /** An argument as the command's key holds it: a dep's output by its ref, its own by file. */
 type Argument<S> = string | OwnKey | { dep: Ref<S> };
@@ -154,7 +141,7 @@ type CommandContext<D extends DepRecord, O extends string> = TaskContext<D, O, C
 type ResolvedCommand = CommandContext<DepRecord, string>["inputs"][typeof COMMAND_INPUT];
 type ResolvedArgument = Exclude<ResolvedCommand["cmd"], string>[number];
 
-/** Where a command's function got its refs: `run`'s `cmd`, its `env`, or `runShell`'s `env`. */
+/** Where a command's function got its refs: `cmd`, a `cmd` task's `env`, or a `shell` task's. */
 type Place = "cmd" | "env" | "shell env";
 
 /**
@@ -172,14 +159,12 @@ function ownRef<S>(shown: string, key: OwnKey, place: Place): OwnRef<S> {
   return notAString({ [OWN_REF]: key }, `${shown} can't be part of a string. Make it ${fix}.`);
 }
 
-/** An argument or env value as its command keys it, naming each dep it reads in `named`. */
+/** An argument or env value as its command keys it. */
 function keyed<R extends Ref<unknown> | MaybeRef<unknown>, S>(
   value: string | OwnRef<S> | R,
-  named: Set<string>,
 ): string | OwnKey | { dep: R } {
   if (typeof value === "string") return value;
   if (OWN_REF in value) return value[OWN_REF];
-  named.add(value.node);
   return { dep: value };
 }
 
@@ -229,11 +214,11 @@ async function runCommand<D extends DepRecord, O extends string>({
 
 /**
  * A command's inputs, a function of its deps' refs as the engine gives them: its line, cwd and env
- * as its key holds them, beside the author's. It names each node its refs read in `named`.
+ * as its key holds them, beside the author's. A `shell` task's string is its line, as its key has
+ * always held it.
  */
 function commandInputs<D extends DepRecord, O extends string>(
-  spec: CommandSpec<string, D, O> & { cmd: string | Argv<D, O> },
-  named: Set<string>,
+  spec: CommandFields<string, D, O> & Work<D, O>,
 ) {
   return <S>(deps: DepRefs<D, S>): CommandInputs => {
     const refs = (place: Place): CommandRefs<D, O, S> => ({
@@ -241,21 +226,26 @@ function commandInputs<D extends DepRecord, O extends string>(
       out: byRole(spec.outputs, (file, role) => ownRef<S>(`out.${role}`, { out: file }, place)),
       outputDir: ownRef<S>("outputDir", { outputDir: true }, place),
     });
-    const given = typeof spec.cmd === "function" ? spec.cmd(refs("cmd")) : spec.cmd;
+    const line =
+      spec.shell === undefined
+        ? (typeof spec.cmd === "function" ? spec.cmd(refs("cmd")) : spec.cmd).map((item) =>
+            keyed(item),
+          )
+        : spec.shell;
     const env =
       typeof spec.env === "function"
-        ? spec.env(refs(typeof spec.cmd === "string" ? "shell env" : "env"))
+        ? spec.env(refs(spec.shell === undefined ? "env" : "shell env"))
         : (spec.env ?? {});
     return {
       ...spec.inputs,
       [COMMAND_INPUT]: {
-        version: typeof given === "string" ? "run-shell:v1" : "run:v7",
-        cmd: typeof given === "string" ? given : given.map((item) => keyed(item, named)),
+        version: typeof line === "string" ? "run-shell:v1" : "run:v7",
+        cmd: line,
         cwd: spec.cwd ?? "",
         env: Object.fromEntries(
           Object.entries(env).map(([name, value]): [string, Command<S>["env"][string]] => [
             name,
-            keyed(value, named),
+            keyed(value),
           ]),
         ),
       },
@@ -263,58 +253,27 @@ function commandInputs<D extends DepRecord, O extends string>(
   };
 }
 
-function addCommand<D extends DepRecord, O extends string>(
+/**
+ * Adds a command, a task whose work is `cmd` or `shell`, to `graph`. `where` and `deps` are
+ * `addTask`'s.
+ */
+export function addCommand<D extends DepRecord, O extends string = never>(
   graph: Graph<Ports>,
-  spec: CommandSpec<string, D, O> & { cmd: string | Argv<D, O> },
-  where: string,
+  spec: CommandFields<string, D, O> & Work<D, O>,
+  where = `task "${spec.name}"`,
+  deps: DepRecord | undefined = spec.deps,
 ): NodeRef<Record<O, string>> {
-  const { cmd: _cmd, env: _env, cwd: _cwd, inputs: authored = {}, cacheable, ...rest } = spec;
+  const { cmd: _cmd, shell: _shell, env: _env, cwd: _cwd, inputs: authored = {}, ...rest } = spec;
   return addTask<D, O, CommandInputs>(
     graph,
     {
       ...rest,
-      inputs: commandInputs(spec, new Set()),
+      inputs: commandInputs(spec),
       // Its own command input is always there, so only the author's make it cacheable.
-      cacheable: cacheable ?? Object.values(authored).some((value) => value !== undefined),
+      cacheable: spec.cacheable ?? Object.values(authored).some((value) => value !== undefined),
       action: runCommand,
     },
     where,
-  );
-}
-
-export function run<D extends DepRecord, O extends string = never>(
-  graph: Graph<Ports>,
-  spec: RunSpec<string, D, O>,
-): NodeRef<Record<O, string>> {
-  return addCommand(graph, spec, `run "${spec.name}"`);
-}
-
-export function runShell<D extends DepRecord, O extends string = never>(
-  graph: Graph<Ports>,
-  spec: RunShellSpec<string, D, O>,
-): NodeRef<Record<O, string>> {
-  return addCommand(graph, spec, `runShell "${spec.name}"`);
-}
-
-export function post<D extends DepRecord, O extends string = never, M extends NodeRef = NodeRef>(
-  graph: Graph<Ports>,
-  spec: PostSpec<string, D, O, M>,
-): NodeRef<Record<O, string>> {
-  const where = `post "${spec.name}"`;
-  const fields: PostFields<string, D, O, M> = spec;
-  const deps = { main: fields.main, ...fields.deps };
-  const named = new Set<string>();
-  const { main, cmd: _cmd, env: _env, cwd: _cwd, inputs: _inputs, ...rest } = fields;
-  const task = {
-    ...rest,
     deps,
-    inputs: commandInputs({ ...fields, deps }, named),
-    cacheable: false,
-    action: runCommand,
-  };
-  const ref = addTask<D & { main: M }, O, CommandInputs>(graph, task, where);
-  const addTo = (other: Graph<Ports>, name: string, deps: DepRecord) =>
-    void addTask<D & { main: M }, O, CommandInputs>(other, { ...task, name }, where, deps);
-  recordPost(graph, spec.name, { main: main.name, refs: [...named], deps, addTo });
-  return ref;
+  );
 }

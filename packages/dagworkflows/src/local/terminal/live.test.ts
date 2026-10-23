@@ -138,10 +138,10 @@ describe("live terminal", () => {
       defineWorkflow({
         schedulerOptions: { maxParallelism: 2 },
         implementation: (workflow) => {
-          const lint = workflow.run({ name: "lint", cmd: ["lint"], cacheable: false });
-          workflow.run({ name: "typecheck", cmd: ["tsc"], cacheable: false });
-          workflow.run({ name: "test", cmd: ["test"], cacheable: false });
-          workflow.run({ name: "docs", cmd: ["docs"], deps: { lint }, cacheable: false });
+          const lint = workflow.task({ name: "lint", cmd: ["lint"], cacheable: false });
+          workflow.task({ name: "typecheck", cmd: ["tsc"], cacheable: false });
+          workflow.task({ name: "test", cmd: ["test"], cacheable: false });
+          workflow.task({ name: "docs", cmd: ["docs"], deps: { lint }, cacheable: false });
         },
       }),
       ["lint", "tsc", "test", "docs"],
@@ -190,8 +190,8 @@ describe("live terminal", () => {
       const run = liveRun(
         defineWorkflow({
           implementation: (workflow) => {
-            workflow.run({ name: "bundle", cmd: ["bundle"], cacheable: false });
-            for (const name of names) workflow.run({ name, cmd: [name], cacheable: false });
+            workflow.task({ name: "bundle", cmd: ["bundle"], cacheable: false });
+            for (const name of names) workflow.task({ name, cmd: [name], cacheable: false });
           },
         }),
         ["bundle", ...names],
@@ -274,8 +274,8 @@ describe("live terminal", () => {
       const run = liveRun(
         defineWorkflow({
           implementation: (workflow) => {
-            workflow.run({ name: "lint", cmd: ["lint"], cacheable: false });
-            workflow.run({ name: "typecheck", cmd: ["tsc"], cacheable: false });
+            workflow.task({ name: "lint", cmd: ["lint"], cacheable: false });
+            workflow.task({ name: "typecheck", cmd: ["tsc"], cacheable: false });
           },
         }),
         ["lint", "tsc"],

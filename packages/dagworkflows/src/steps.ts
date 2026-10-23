@@ -3,6 +3,7 @@ import {
   dep,
   isFileHandle,
   nodeInputs,
+  notAString,
   settled,
   type Dep,
   type DepRecord,
@@ -10,9 +11,12 @@ import {
   type DepSpecs,
   type Graph,
   type NodeRef,
+  type NotAString,
   type OutputRef,
+  type Outputs,
   type SettledDep,
   type SettledOutputRef,
+  type SettledRef,
 } from "@mrmeku/dagraph";
 import { defineStep } from "./define-step.ts";
 import { errorMessage } from "./kernel/format.ts";
@@ -39,31 +43,71 @@ const anyRole: DepSpecs = {};
 
 /* ------------------------------------------------------------------ posts */
 
+const POST_NODE = Symbol("post node");
+
 /**
- * A post step as the facade records it beside the graph: its main, the nodes its command names,
- * its deps, and how to add it to another graph under its name with other deps, as `--only` does.
+ * What `workflow.post` and `workflow.saveCache` return: a post's handle, which only another
+ * post's `main` takes, `main: down`. No other node depends on a post, so `deps: { down }` and
+ * `requireAll({ deps: { down } })` do not compile.
+ */
+export type PostRef<T extends Outputs = Outputs> = {
+  readonly [POST_NODE]: NodeRef<T>;
+} & NotAString;
+
+/** A post's handle on its node `ref`. */
+export const postRef = <T extends Outputs>(ref: NodeRef<T>): PostRef<T> =>
+  notAString(
+    { [POST_NODE]: ref },
+    `post "${ref.name}" can't be part of a string. Only another post takes it, as its main: workflow.post({ name, main: <this post>, cmd }).`,
+  );
+
+const isPostRef = (value: unknown): value is PostRef =>
+  typeof value === "object" && value !== null && POST_NODE in value;
+
+/** What a post's `main` takes: a node, `settled(node)` to run after any outcome, or a post. */
+export type Main = NodeRef | SettledRef | PostRef;
+
+/** The dep a post's `main` gives it, by role `main`: a post's node, for a post of a post. */
+export type MainDep<M> = {
+  main: M extends PostRef<infer T extends Outputs> ? NodeRef<T> : Extract<M, NodeRef | SettledRef>;
+};
+
+/** The node a post's `main` names, as the post depends on it. */
+export const mainNode = (main: Main): NodeRef | SettledRef =>
+  isPostRef(main) ? main[POST_NODE] : main;
+
+const WAIT_ROLE = "downstream:";
+
+/** The role of a post's wait on `node`, a node downstream of its main. */
+export const waitRole = (node: string) => `${WAIT_ROLE}${node}`;
+
+/** A post's own deps leave the roles of its waits to the run: no role starts `downstream:`. */
+export type WaitRoles = { readonly [role: `${typeof WAIT_ROLE}${string}`]: never };
+
+/**
+ * A post as the facade records it beside the graph: its main, its deps, the main's among them,
+ * and how to add it to another graph with other deps, as a run adds it with its waits.
  */
 export interface PostRecord {
   main: string;
-  refs: string[];
   deps: DepRecord;
-  addTo: (graph: StepGraph, name: string, deps: DepRecord) => void;
+  addTo: (graph: StepGraph, deps: DepRecord) => void;
 }
 
-/** The post steps of each graph the facade added steps to, by node name. */
+/** The posts of each graph the facade added nodes to, by node name. */
 const postRecords = new WeakMap<StepGraph, Map<string, PostRecord>>();
 
-/** The posts recorded beside `graph`, by node name. */
+/** The posts recorded beside `graph`, by node name, in the order they were added. */
 export const postsOf = (graph: StepGraph): ReadonlyMap<string, PostRecord> =>
   postRecords.get(graph) ?? new Map();
 
-/** Record `name` as a post step of `graph`. */
+/** Record `name` as a post of `graph`. */
 export function recordPost(graph: StepGraph, name: string, post: PostRecord): void {
   const posts = postRecords.get(graph) ?? new Map<string, PostRecord>();
   postRecords.set(graph, posts.set(name, post));
 }
 
-/** Each post step of the graph, by name, with its main's: `dag post` runs the ones a cancelled run did not. */
+/** Each post of the graph, by name, with its main's: `dag post` runs the ones a cancelled run did not. */
 export function postNodes(graph: StepGraph): Map<string, string> {
   return new Map([...postsOf(graph)].map(([name, post]) => [name, post.main]));
 }
@@ -146,17 +190,18 @@ export function restoreCache(graph: StepGraph, spec: RestoreCacheSpec): RestoreC
 const cacheAndAnyRole: DepSpecs & { cache: Dep<string> } = { cache: dep<string>() };
 
 /**
- * `actions/cache/save` as the post step of a restore, with the `if: cache-hit != 'true'` every
- * example writes by hand. When else it runs is its deps: a required dep saves only when that
- * node succeeded, a settled one saves regardless (`if: always()`). `save.json` holds what
+ * `actions/cache/save` as a post of its restore, with the `if: cache-hit != 'true'` every
+ * example writes by hand. It waits for every node of the run downstream of the restore, whatever
+ * they did; a required dep saves only when that node succeeded (`deps: { install }`), a settled
+ * one whatever it did (`if: always()`). `save.json` holds what
  * `@actions/cache` returned, the entry's id or -1 when it did not save, or null when it was not
  * asked: a hit on the primary key, or a save the service refused, which is a warning, not a
  * failure. An invalid key is a workflow bug and fails the node.
  */
 export function saveCache(
   graph: StepGraph,
-  opts: { name: string; cache: RestoreCacheRef; deps: DepRecord & { cache?: never } },
-): NodeRef<string> {
+  opts: { name: string; cache: RestoreCacheRef; deps?: DepRecord & { cache?: never } & WaitRoles },
+): PostRef<string> {
   const { path, key } = opts.cache.spec;
   const step = defineStep({
     kind: opts.name,
@@ -201,11 +246,10 @@ export function saveCache(
   const ref = step.addNode(graph, { deps });
   recordPost(graph, ref.name, {
     main: opts.cache.name,
-    refs: [],
     deps,
-    addTo: (g, name, deps) => void step.addNode(g, { name, deps: { ...deps, cache: opts.cache } }),
+    addTo: (other, deps) => void step.addNode(other, { deps: { ...deps, cache: opts.cache } }),
   });
-  return ref;
+  return postRef(ref);
 }
 
 /* ------------------------------------------------- actions/upload-artifact */

@@ -5,14 +5,13 @@ import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, relative } from "node:path";
 import { describe, test } from "node:test";
-import { post, run, runShell } from "./commands.ts";
+import { addCommand } from "./commands.ts";
 import { LAST_RUN_FILE } from "./config.ts";
-import type { Exec, ExecResult, Ports } from "./ports.ts";
+import type { ExecResult, Ports } from "./ports.ts";
 import { createTestPorts } from "./ports/memory.ts";
 import { createExec } from "./ports/real.ts";
 import { runWorkflow } from "./runner.ts";
 import { logPath } from "./step-records.ts";
-import { postNodes } from "./steps.ts";
 
 const CAS = "/cas";
 const newGraph = () => new Graph<Ports>();
@@ -60,18 +59,18 @@ describe("a command", () => {
       },
     });
     const graph = newGraph();
-    const pack = run(graph, {
+    const pack = addCommand(graph, {
       name: "pack",
       cmd: ({ out }) => ["pack", out.tarball],
       outputs: { tarball: "pkg.tgz" },
     });
-    run(graph, {
+    addCommand(graph, {
       name: "publish",
       deps: { pack },
       cmd: ({ pack }) => ["publish", pack.tarball],
       env: ({ pack, outputDir }) => ({ TARBALL: pack.tarball, OUT: outputDir, MODE: "dry" }),
     });
-    run(graph, { name: "bad", cmd: ["bad", "--flag"] });
+    addCommand(graph, { name: "bad", cmd: ["bad", "--flag"] });
     const results = byName(await executeUnder(graph, ports));
     const packed = found(results.get("pack"), "pack's result");
     const publishKey = found(results.get("publish"), "publish's result").actionKey;
@@ -119,13 +118,13 @@ describe("a command", () => {
     const cache = new MemCache();
     const statusesOf = async (packName: string, role: string, casBaseDir = CAS, at = cache) => {
       const graph = newGraph();
-      const pack = run(graph, {
+      const pack = addCommand(graph, {
         name: packName,
         cmd: ({ out }) => ["pack", out.tarball],
         outputs: { tarball: "pkg.tgz" },
         cacheable: true,
       });
-      run(graph, {
+      addCommand(graph, {
         name: "publish",
         deps: { [role]: pack },
         cmd: (refs) => ["publish", found(refs[role], role).tarball],
@@ -155,6 +154,60 @@ describe("a command", () => {
     );
   });
 
+  test("keys a cmd and a shell task as workflow.run and workflow.runShell keyed the same command, so their cache entries still hit", async () => {
+    const { ports, fs } = createTestPorts({
+      files: { "src/a.ts": "a" },
+      exec: {
+        run: async ([program, path]) => {
+          if (program === "pack" && path) await fs.writeText(path, "bytes");
+          return exited(program === "false" ? 1 : 0);
+        },
+      },
+    });
+    const graph = newGraph();
+    const pack = addCommand(graph, {
+      name: "pack",
+      cmd: ({ out }) => ["pack", out.tarball],
+      outputs: { tarball: "pkg.tgz" },
+      inputs: { "src/a.ts": file("src/a.ts") },
+      cwd: "sub",
+      env: { MODE: "dry" },
+    });
+    const tests = addCommand(graph, {
+      name: "tests",
+      cmd: ["false"],
+      outputs: { report: "junit.xml" },
+    });
+    addCommand(graph, {
+      name: "publish",
+      deps: { pack, tests: settled(tests) },
+      cmd: ({ pack, outputDir }) => ["publish", pack.tarball, "--out", outputDir],
+      env: ({ pack, tests, out }) => ({
+        TARBALL: pack.tarball,
+        REPORT: tests.report,
+        LOG: out.log,
+        MODE: "dry",
+      }),
+      outputs: { log: "publish.log" },
+    });
+    addCommand(graph, {
+      name: "size",
+      deps: { pack },
+      shell: 'gzip -c "$TARBALL" | wc -c',
+      env: ({ pack, outputDir }) => ({ TARBALL: pack.tarball, OUT: outputDir }),
+      inputs: { version: "size-v1" },
+      cwd: "sub",
+    });
+    const results = await executeUnder(graph, ports);
+    // What main's workflow.run and workflow.runShell gave the same graph.
+    assert.deepEqual(Object.fromEntries(results.map((r) => [r.name, [r.status, r.actionKey]])), {
+      tests: ["failed", "645ea960b6b52dd64b4e037443ba29f82ed43d1afe9fc069afd4ba8ccfa9a535"],
+      pack: ["done", "4596f3025fd0f5ea536796c5e1a8f906ed0cce9e562eb22df97c050ca8c473b6"],
+      publish: ["failed", "de111e3628f6767fc16efa61a8ae0c8893229b6f3e48622964d96a2e3b54ce42"],
+      size: ["done", "fce48642e2d0c9b2afcbe955dd951e727acfc81c2af0ceda69d2b780b81fcca2"],
+    });
+  });
+
   test("that declares no inputs runs every time, and one that declares inputs is cached on them; its own command does not count, and an explicit cacheable wins", async () => {
     const { ports } = createTestPorts({
       files: { "src/a.ts": "a" },
@@ -164,12 +217,12 @@ describe("a command", () => {
     const src = { "src/a.ts": file("src/a.ts") };
     const once = async () => {
       const graph = newGraph();
-      run(graph, { name: "smoke", cmd: ["curl", "-f", "localhost"] });
-      run(graph, { name: "lint", cmd: ["lint"], inputs: src });
+      addCommand(graph, { name: "smoke", cmd: ["curl", "-f", "localhost"] });
+      addCommand(graph, { name: "lint", cmd: ["lint"], inputs: src });
       // A glob that matched nothing.
-      run(graph, { name: "empty", cmd: ["empty"], inputs: {} });
-      run(graph, { name: "publish", cmd: ["publish"], cacheable: true });
-      run(graph, { name: "e2e", cmd: ["e2e"], inputs: src, cacheable: false });
+      addCommand(graph, { name: "empty", cmd: ["empty"], inputs: {} });
+      addCommand(graph, { name: "publish", cmd: ["publish"], cacheable: true });
+      addCommand(graph, { name: "e2e", cmd: ["e2e"], inputs: src, cacheable: false });
       return statuses(await executeUnder(graph, ports, cache));
     };
     assert.deepEqual(
@@ -186,7 +239,7 @@ describe("a command", () => {
     assert.deepEqual(
       {
         ownTemplateString: refusal(() =>
-          run(graph, {
+          addCommand(graph, {
             name: "x",
             outputs: { id: "id" },
             // @ts-expect-error its own output in a template string (TS2731)
@@ -194,7 +247,7 @@ describe("a command", () => {
           }),
         ),
         ownInEnv: refusal(() =>
-          run(graph, {
+          addCommand(graph, {
             name: "z",
             outputs: { id: "id" },
             cmd: ["write-id"],
@@ -203,9 +256,9 @@ describe("a command", () => {
           }),
         ),
         ownInShell: refusal(() =>
-          runShell(graph, {
+          addCommand(graph, {
             name: "y",
-            cmd: 'tar -cf "$OUT" .',
+            shell: 'tar -cf "$OUT" .',
             // @ts-expect-error its own output dir in a template string (TS2731)
             env: ({ outputDir }) => ({ OUT: `${outputDir}/pkg.tar` }),
           }),
@@ -239,7 +292,11 @@ describe("a command's paths", () => {
       },
     });
     const listing = files.addNode(graph, {});
-    run(graph, { name: "ls", deps: { listing }, cmd: ({ listing }) => ["ls", listing.files] });
+    addCommand(graph, {
+      name: "ls",
+      deps: { listing },
+      cmd: ({ listing }) => ["ls", listing.files],
+    });
     const results = byName(await executeUnder(graph, ports));
     const listed = found(results.get("files"), "the files node's result");
     const dir = listed.status === "done" && `${CAS}/${listed.actionKey}/out-${listed.contentHash}`;
@@ -261,24 +318,24 @@ describe("a command's paths", () => {
         casBaseDir: cas,
         historyDir: join(root, "history"),
         implementation: async (graph) => {
-          const pack = runShell(graph, {
+          const pack = addCommand(graph, {
             name: "pack",
-            cmd: 'echo bytes > "$OUT"',
+            shell: 'echo bytes > "$OUT"',
             env: ({ out }) => ({ OUT: out.tarball }),
             outputs: { tarball: "t.txt" },
           });
-          run(graph, {
+          addCommand(graph, {
             name: "list",
             deps: { pack },
             cwd: sub,
             cmd: ({ pack }) => ["cat", pack.tarball],
           });
-          runShell(graph, {
+          addCommand(graph, {
             name: "own",
             cwd: sub,
             // An input makes it cacheable, so it writes a manifest.
             inputs: { version: "own-v1" },
-            cmd: 'echo 1 > "$ID"',
+            shell: 'echo 1 > "$ID"',
             env: ({ out }) => ({ ID: out.id }),
             outputs: { id: "id" },
           });
@@ -319,24 +376,25 @@ describe("a command's paths", () => {
   });
 });
 
-describe("runShell", () => {
-  test("runs its string under bash -eo pipefail, where a settled dep's output is unset when the dep failed, even when inherited; a machine without bash fails the node, saying so, as run does for a program it cannot start", async () => {
+describe("a shell task", () => {
+  test("runs its string under bash -eo pipefail, where a settled dep's output is unset when the dep failed, even when inherited; a machine without bash fails the node, saying so, as a cmd task does for a program it cannot start", async () => {
     const { ports, fs } = createTestPorts({ exec: createExec() });
     const graph = newGraph();
-    const tests = runShell(graph, {
+    const tests = addCommand(graph, {
       name: "tests",
-      cmd: "exit 3",
+      shell: "exit 3",
       outputs: { report: "junit.xml" },
     });
-    runShell(graph, { name: "pipe", cmd: "false | cat; echo after" });
-    runShell(graph, {
+    addCommand(graph, { name: "pipe", shell: "false | cat; echo after" });
+    addCommand(graph, {
       name: "report",
       deps: { tests: settled(tests) },
-      cmd: 'if [ -n "${DAG_TEST_REPORT+set}" ]; then echo "report $DAG_TEST_REPORT"; else echo "no report"; fi',
+      shell:
+        'if [ -n "${DAG_TEST_REPORT+set}" ]; then echo "report $DAG_TEST_REPORT"; else echo "no report"; fi',
       env: ({ tests }) => ({ DAG_TEST_REPORT: tests.report }),
     });
-    runShell(graph, { name: "no-bash", cmd: "echo hi", env: { PATH: "/nonexistent" } });
-    run(graph, { name: "missing", cmd: ["dag-test-no-such-program"] });
+    addCommand(graph, { name: "no-bash", shell: "echo hi", env: { PATH: "/nonexistent" } });
+    addCommand(graph, { name: "missing", cmd: ["dag-test-no-such-program"] });
     process.env["DAG_TEST_REPORT"] = "inherited";
     let results: Map<string, Result>;
     try {
@@ -371,70 +429,6 @@ describe("runShell", () => {
           "could not start bash. Check that it is on the command's PATH and that its cwd exists.",
         missing:
           "could not start dag-test-no-such-program. Check that it is on the command's PATH and that its cwd exists.",
-      },
-    );
-  });
-});
-
-describe("post", () => {
-  test("runs after its deps even when they failed, not when its main failed, takes its main's outputs as main, and is never cached", async () => {
-    const calls: string[][] = [];
-    const { ports, fs } = createTestPorts();
-    const exec: Exec = {
-      run: async (cmd) => {
-        calls.push(cmd);
-        const [program, verb, path] = cmd;
-        if (program === "bad") return exited(1, "no\n");
-        if (verb === "start" && path) await fs.writeText(path, "42");
-        return exited(0);
-      },
-    };
-    ports.exec = exec;
-    const graph = newGraph();
-    const db = run(graph, {
-      name: "up:db",
-      cmd: ({ out }) => ["db", "start", out.pid],
-      outputs: { pid: "pid" },
-    });
-    const broken = run(graph, { name: "up:broken", cmd: ["bad"] });
-    const tests = run(graph, { name: "tests", cmd: ["bad"], deps: { db } });
-    post(graph, {
-      name: "down:db",
-      main: db,
-      cmd: ({ main }) => ["db", "stop", main.pid],
-      // An input would make it cacheable, were it not a post.
-      inputs: { version: "down-v1" },
-      deps: { tests: settled(tests) },
-    });
-    post(graph, { name: "down:broken", main: broken, cmd: ["never"], deps: {} });
-    const results = await executeUnder(graph, ports);
-    const [, , stoppedPath] = found(
-      calls.find((c) => c[1] === "stop"),
-      "the stop call",
-    );
-    assert.deepEqual(
-      {
-        statuses: statuses(results),
-        calls: calls.map((c) => c.slice(0, 2)),
-        stoppedPid: await fs.readText(found(stoppedPath, "the stop call's pid path")),
-        posts: Object.fromEntries(postNodes(graph)),
-        uncached: graph
-          .describe()
-          .filter((n) => n.cacheable === false)
-          .map((n) => n.name),
-      },
-      {
-        statuses: {
-          "up:db": "done",
-          "up:broken": "failed",
-          tests: "failed",
-          "down:db": "done",
-          "down:broken": "dep-failed",
-        },
-        calls: [["db", "start"], ["bad"], ["bad"], ["db", "stop"]],
-        stoppedPid: "42",
-        posts: { "down:db": "up:db", "down:broken": "up:broken" },
-        uncached: ["up:db", "up:broken", "tests", "down:db", "down:broken"],
       },
     );
   });

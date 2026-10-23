@@ -19,13 +19,15 @@ const pnpm = workflow.restoreCache({
   key: `pnpm-${process.platform}-${await workflow.hash("pnpm-lock.yaml")}`,
   restoreKeys: [`pnpm-${process.platform}-`],
 });
-const install = workflow.run({ name: "install", cmd: ["pnpm", "install"], deps: { pnpm } });
-workflow.saveCache({ name: "save:pnpm", cache: pnpm, deps: { install: settled(install) } });
+const install = workflow.task({ name: "install", cmd: ["pnpm", "install"], deps: { pnpm } });
+workflow.saveCache({ name: "save:pnpm", cache: pnpm, deps: { install } });
 ```
 
 The restore tries `key` first. Then it tries each prefix in `restoreKeys` and takes the newest entry that matches.
 
-The save is a post step. It does not save when the restore found an exact match, as `if: cache-hit != 'true'` does. If the cache service refuses the save, the task writes a warning. It does not fail.
+The save is a post step of the restore, as `actions/cache` is a `main` and a `post`. It waits for each task that depends on the restore, directly or through other tasks, whatever that task did, and it runs after a cancellation too. See [Post steps](lifecycle.md#post-steps). Its `deps` are ordinary dependencies: `deps: { install }` saves only after a successful install, so a half-written store is never saved.
+
+The save does not save when the restore found an exact match, as `if: cache-hit != 'true'` does. If the cache service refuses the save, the task writes a warning. It does not fail.
 
 Each task writes the value that `@actions/cache` returned, as JSON:
 
@@ -48,7 +50,7 @@ To use the results of the last run, restore and save `.dag/cas`. See [Keep the c
 `workflow.uploadArtifact` uploads files as an artifact of the run. `path` takes globs over the working tree, or a function of `deps` that names their outputs too, each its own item. Thus a task can upload a build product directly from the CAS:
 
 ```typescript
-const pack = workflow.run({
+const pack = workflow.task({
   name: "pack",
   cmd: ({ outputDir }) => ["npm", "pack", "--pack-destination", outputDir],
   outputs: { tarball: "pkg-1.0.0.tgz" },

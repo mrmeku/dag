@@ -146,7 +146,7 @@ describe("dag run", () => {
 
   test("a node that fails under --force: the run is forced, and exits 1", LIMIT, async () => {
     const { code, stdout } = await cli(
-      workflowOf('workflow.run({ name: "lint", cmd: ["false"] });'),
+      workflowOf('workflow.task({ name: "lint", cmd: ["false"] });'),
       { args: ["--force"] },
     ).exited;
     // The banner alone: the lines after it carry timings, and the session goldens pin them.
@@ -246,13 +246,14 @@ describe("dag run", () => {
 describe("dag post", () => {
   test("a post step a stopped run's history owes that fails exits 1", LIMIT, async () => {
     const workflow = workflowOf(`
-      const up = workflow.run({ name: "up", cmd: ["true"] });
-      workflow.post({ name: "down", main: up, cmd: ["false"], deps: {} });
+      const up = workflow.task({ name: "up", cmd: ["true"] });
+      workflow.post({ name: "down", main: up, cmd: ["false"] });
     `);
     // A stopped run's history: it holds no lock, and names its workflow file by its real path.
     const history = (dir: string) =>
       JSON.stringify({
         workflow: join(dir, "ci.ts"),
+        started: ["up"],
         results: {
           up: {
             name: "up",

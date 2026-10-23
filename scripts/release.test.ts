@@ -4,6 +4,7 @@ import {
   createTestPorts,
   createWorkflow,
   okExec,
+  selectNodes,
   type Ports,
 } from "@mrmeku/dagworkflows";
 import assert from "node:assert/strict";
@@ -50,7 +51,8 @@ describe("release workflow", () => {
       const parsed = async (path: string): Promise<unknown> => JSON.parse(await fs.readText(path));
       const restored = resultOf("restore:cas");
       return {
-        nodes: graph.describe(),
+        // The graph a run executes, where the save waits for every node that reads the CAS.
+        nodes: selectNodes(graph).describe(),
         ...out,
         processed,
         resultOf,
@@ -95,7 +97,10 @@ describe("release workflow", () => {
         releaseDeps: by("release").deps.sort(),
         uploads: tagged.uploads,
         uploadDeps: ["upload:dagraph", "upload:action"].map((n) => by(n).deps),
-        saveDeps: { deps: by("save:cas").deps.sort(), settled: by("save:cas").settledDeps },
+        saveDeps: {
+          deps: by("save:cas").deps.sort(),
+          settled: by("save:cas").settledDeps?.sort(),
+        },
         uncached: tagged.nodes.filter((n) => n.cacheable === false).map((n) => n.name),
         checksAfterRestore: tagged.nodes
           .filter((n) => /^(typecheck|lint|test:)/.test(n.name))
@@ -165,7 +170,44 @@ describe("release workflow", () => {
           ["action-1.2.3", ["main.js", "post.js"]],
         ],
         uploadDeps: [["pack:dagraph"], ["build:action"]],
-        saveDeps: { deps: ["release", "restore:cas"], settled: ["release"] },
+        // Every node but the restore, which it needs to have succeeded.
+        saveDeps: {
+          deps: [
+            "build:action",
+            "lint",
+            "pack:dagraph",
+            "pack:dagworkflows",
+            "publish:dagraph",
+            "publish:dagworkflows",
+            "release",
+            "release:action",
+            "require-all",
+            "restore:cas",
+            "test:dagraph",
+            "test:dagworkflows",
+            "typecheck",
+            "upload:action",
+            "upload:dagraph",
+            "upload:dagworkflows",
+          ],
+          settled: [
+            "build:action",
+            "lint",
+            "pack:dagraph",
+            "pack:dagworkflows",
+            "publish:dagraph",
+            "publish:dagworkflows",
+            "release",
+            "release:action",
+            "require-all",
+            "test:dagraph",
+            "test:dagworkflows",
+            "typecheck",
+            "upload:action",
+            "upload:dagraph",
+            "upload:dagworkflows",
+          ],
+        },
         uncached: [
           "restore:cas",
           "upload:dagraph",

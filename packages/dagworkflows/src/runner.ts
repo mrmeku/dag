@@ -3,10 +3,8 @@ import {
   execute,
   FsCache,
   Graph,
-  isSucceeded,
   orchestrate,
   processNode,
-  requiredDeps,
   throttledScheduler,
   type ExecuteOptions,
   type Result,
@@ -19,7 +17,6 @@ import {
   createRunHistory,
   readRunHistory,
   runHistoryLive,
-  type RunHistory,
   type RunHistoryFile,
 } from "./history.ts";
 import { errorMessage, titleOf } from "./kernel/format.ts";
@@ -77,30 +74,28 @@ const runOutcomeOf = (outcome: Omit<RunOutcome, "exitCode">): RunOutcome => ({
 const workflowOf = (opts: { workflowFile?: string }) =>
   opts.workflowFile ? resolve(opts.workflowFile) : "";
 
-async function buildGraph(opts: { implementation: Implementation; ports: Ports; only?: string[] }) {
+async function buildGraph(opts: { implementation: Implementation; ports: Ports }) {
   const ctx = await opts.ports.host.context();
   const full = new Graph<Ports>();
   await opts.implementation(full, opts.ports, ctx);
-  const graph = opts.only?.length ? selectNodes(full, opts.only) : full;
-  return { ctx, full, graph };
+  return { ctx, full };
 }
 
 /**
- * The post steps a run's history shows it owes: not finished (never reached, or cancelled while
- * they ran), with every required dep finished in that run or owed itself. A post whose main
- * never succeeded is owed nothing.
+ * The posts a run's history shows it owes: not finished (never reached, or cancelled), whose main
+ * ran, whatever came of it: it hit the cache, started its action, or is an owed post itself. A
+ * main that never got that far, `dep-failed` or cancelled while queued, owes nothing.
  */
-function owedPosts(graph: Graph<Ports>, history: RunHistory): Set<string> {
-  const posts = postNodes(graph);
+function owedPosts(
+  graph: Graph<Ports>,
+  { results, started }: Pick<RunHistoryFile, "results" | "started">,
+): Set<string> {
   const owed = new Set<string>();
-  const finished = (n: string) => history[n] !== undefined && isSucceeded(history[n]);
-  // Nodes come in the order they were added, each after its deps.
-  for (const node of graph.describe()) {
-    const status = history[node.name]?.status;
-    const pending = status === undefined || status === "cancelled";
-    const required = requiredDeps(node);
-    if (posts.has(node.name) && pending && required.every((d) => finished(d) || owed.has(d)))
-      owed.add(node.name);
+  // In the order they were added: a post of a post after its main.
+  for (const [name, main] of postNodes(graph)) {
+    const status = results[name]?.status;
+    const ran = results[main]?.status === "cached" || started.includes(main) || owed.has(main);
+    if ((status === undefined || status === "cancelled") && ran) owed.add(name);
   }
   return owed;
 }
@@ -139,15 +134,19 @@ async function settle(
     try {
       file = await readRunHistory(fs, path);
       if (file.workflow !== workflowOf(opts)) continue;
-      graph = file.only ? selectNodes(full, file.only) : full;
+      graph = selectNodes(full, file.only);
     } catch (e) {
       // Gone: another pass claimed it since the listing.
       if (!(await fs.exists(path))) continue;
-      host.annotate("warning", "dag", `ignoring the run's history ${path}: ${errorMessage(e)}`);
+      host.annotate(
+        "warning",
+        "dag",
+        `ignoring the run's history ${path}: ${errorMessage(e)}. The post steps it owed do not run.`,
+      );
       await drop(path);
       continue;
     }
-    const owed = owedPosts(graph, file.results);
+    const owed = owedPosts(graph, file);
     if (owed.size === 0) {
       await drop(path);
       continue;
@@ -174,7 +173,8 @@ export async function runWorkflow(opts: RunOptions): Promise<RunOutcome> {
   const store = opts.store ?? createGithubStore(opts.ports, opts.casBaseDir);
   opts.signal?.addEventListener("abort", store.cancel, { once: true });
   const { ports } = opts;
-  const { ctx, full, graph } = await buildGraph(opts);
+  const { ctx, full } = await buildGraph(opts);
+  const graph = selectNodes(full, opts.only?.length ? opts.only : undefined);
   // Runs that stopped before their post pass owe their posts; this run finishes them first. Their
   // failures are reported, but the run's outcome is its own nodes'.
   await settle(opts, full, store);
@@ -199,14 +199,6 @@ export async function runWorkflow(opts: RunOptions): Promise<RunOutcome> {
     ...(rerunCommand && { rerunCommand }),
   };
   store.begin(pass);
-  const selected = new Set(names);
-  for (const [post, main] of postNodes(full))
-    if (selected.has(main) && !selected.has(post))
-      ports.host.annotate(
-        "notice",
-        post,
-        "not run: its command refers to an output of a step --only leaves out",
-      );
   await ports.fs.ensureDir(opts.casBaseDir);
   const history = await createRunHistory(
     ports.fs,
@@ -215,6 +207,7 @@ export async function runWorkflow(opts: RunOptions): Promise<RunOutcome> {
     {
       workflow: workflowOf(opts),
       ...(opts.only?.length && { only: opts.only }),
+      started: [],
       results: {},
     },
   );
@@ -241,7 +234,7 @@ export async function runWorkflow(opts: RunOptions): Promise<RunOutcome> {
     );
     await history.flush();
     // A run that owes nothing leaves no history behind.
-    if (owedPosts(graph, history.results).size === 0) await ports.fs.remove(history.path);
+    if (owedPosts(graph, history).size === 0) await ports.fs.remove(history.path);
   } finally {
     await history.close();
   }

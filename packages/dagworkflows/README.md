@@ -45,14 +45,14 @@ dagworkflows makes a CI job faster, and it makes a failure easier to fix. A GitH
    export default defineWorkflow({
      implementation: async (workflow) => {
        const src = await workflow.glob("src/**", "package.json", "tsconfig.json");
-       workflow.run({ name: "typecheck", cmd: ["npx", "tsc", "--noEmit"], inputs: src });
-       workflow.run({ name: "lint", cmd: ["npx", "eslint", "src"], inputs: src });
-       workflow.run({ name: "test", cmd: ["npm", "test"], inputs: src });
+       workflow.task({ name: "typecheck", cmd: ["npx", "tsc", "--noEmit"], inputs: src });
+       workflow.task({ name: "lint", cmd: ["npx", "eslint", "src"], inputs: src });
+       workflow.task({ name: "test", cmd: ["npm", "test"], inputs: src });
      },
    });
    ```
 
-   Each `workflow.run` adds a task that runs one command. These tasks have no dependencies, so they start at the same time. `inputs` holds the files that a task reads.
+   Each `workflow.task` with a `cmd` adds a task that runs one command. These tasks have no dependencies, so they start at the same time. `inputs` holds the files that a task reads.
 
 3. Run the workflow locally:
 
@@ -91,7 +91,7 @@ dagworkflows makes a CI job faster, and it makes a failure easier to fix. A GitH
 Each GitHub runner starts with an empty cache. To use the results of the last run, restore the cache before the checks and save it after them. Both operations are tasks in the graph:
 
 ```typescript
-import { defineWorkflow, settled } from "@mrmeku/dagworkflows";
+import { defineWorkflow } from "@mrmeku/dagworkflows";
 
 export default defineWorkflow({
   implementation: async (workflow) => {
@@ -104,26 +104,26 @@ export default defineWorkflow({
     const afterRestore = { deps: { cas }, invalidateOn: { cas: () => "" } };
     const src = await workflow.glob("src/**", "package.json", "tsconfig.json");
     const check = (name: string, cmd: string[]) =>
-      workflow.run({ name, cmd, inputs: src, ...afterRestore });
-    const requireAll = workflow.requireAll({
+      workflow.task({ name, cmd, inputs: src, ...afterRestore });
+    workflow.requireAll({
       deps: {
         typecheck: check("typecheck", ["npx", "tsc", "--noEmit"]),
         lint: check("lint", ["npx", "eslint", "src"]),
         test: check("test", ["npm", "test"]),
       },
     });
-    workflow.saveCache({ name: "save:cas", cache: cas, deps: { requireAll: settled(requireAll) } });
+    workflow.saveCache({ name: "save:cas", cache: cas });
   },
 });
 ```
 
 - `deps: { cas }` starts each check after the restore.
 - `invalidateOn: { cas: () => "" }` keeps the restored key out of the cache key of each check.
-- `settled(requireAll)` saves the cache also when a check fails.
+- The save is a post step of the restore. It waits for each task that depends on the restore, directly or through other tasks, and it saves also when a check fails.
 
 ## Features
 
-- **A graph of tasks.** Tasks declare their dependencies. Independent tasks run in parallel, with a limit for the run and for each group. A task is a command, with or without a shell, or a TypeScript function. [Workflows](https://github.com/mrmeku/dag/blob/main/packages/dagworkflows/docs/workflows.md)
+- **A graph of tasks.** Tasks declare their dependencies. Independent tasks run in parallel, with a limit for the run and for each group. A task's work is a command (`cmd`), a bash string (`shell`) or a TypeScript function (`action`). [Workflows](https://github.com/mrmeku/dag/blob/main/packages/dagworkflows/docs/workflows.md)
 - **A content-addressed cache.** A task runs again only when its command, its inputs, or the outputs of its dependencies change. A task that declares no inputs runs each time, as a GitHub step does. [The cache key](https://github.com/mrmeku/dag/blob/main/packages/dagworkflows/docs/workflows.md#the-cache-key)
 - **Files between tasks.** A task writes output files, and other tasks read them through the dependencies that they declare. [Outputs](https://github.com/mrmeku/dag/blob/main/packages/dagworkflows/docs/workflows.md#outputs)
 - **GitHub's cache and artifacts as tasks.** `workflow.restoreCache`, `workflow.saveCache` and `workflow.uploadArtifact` are `actions/cache` and `actions/upload-artifact`. [Cache and artifacts](https://github.com/mrmeku/dag/blob/main/packages/dagworkflows/docs/cache-and-artifacts.md)

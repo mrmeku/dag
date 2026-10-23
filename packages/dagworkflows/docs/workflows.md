@@ -11,7 +11,7 @@ From these declarations, dagworkflows knows which tasks can run in parallel and 
 ## A complete example
 
 ```typescript
-import { defineWorkflow, settled } from "@mrmeku/dagworkflows";
+import { defineWorkflow } from "@mrmeku/dagworkflows";
 
 export default defineWorkflow({
   schedulerOptions: { maxParallelism: 4, concurrencyLimits: { test: 2 } },
@@ -22,21 +22,21 @@ export default defineWorkflow({
       key: `pnpm-${process.platform}-${await workflow.hash("pnpm-lock.yaml")}`,
       restoreKeys: [`pnpm-${process.platform}-`],
     });
-    const install = workflow.run({ name: "install", cmd: ["pnpm", "install"], deps: { pnpm } });
+    const install = workflow.task({ name: "install", cmd: ["pnpm", "install"], deps: { pnpm } });
     const src = await workflow.glob("src/**", "package.json", "tsconfig.json");
-    const typecheck = workflow.run({
+    const typecheck = workflow.task({
       name: "typecheck",
       cmd: ["pnpm", "typecheck"],
       inputs: src,
       deps: { install },
     });
-    const lint = workflow.run({
+    const lint = workflow.task({
       name: "lint",
       cmd: ["pnpm", "lint"],
       inputs: src,
       deps: { install },
     });
-    const test = workflow.run({
+    const test = workflow.task({
       name: "test",
       cmd: ["pnpm", "test"],
       inputs: src,
@@ -44,7 +44,7 @@ export default defineWorkflow({
       concurrencyGroup: "test",
     });
     workflow.requireAll({ deps: { typecheck, lint, test } });
-    workflow.saveCache({ name: "save:pnpm", cache: pnpm, deps: { install: settled(install) } });
+    workflow.saveCache({ name: "save:pnpm", cache: pnpm, deps: { install } });
   },
 });
 ```
@@ -53,26 +53,24 @@ The sections that follow explain each part of this example.
 
 ## Tasks
 
-Each node of the graph is a task. `workflow.task` adds a task whose work is a TypeScript function. The other functions are conveniences: each adds tasks for a common case.
+Each node of the graph is a task. `workflow.task` adds a task whose work is exactly one of `action`, `cmd` or `shell`. A task that gives two of them does not compile. The other functions add tasks for a common case.
 
-| Function                  | Adds                                                                                          |
-| ------------------------- | --------------------------------------------------------------------------------------------- |
-| `workflow.task`           | A task whose work is a TypeScript function, as `actions/github-script` runs one.              |
-| `workflow.run`            | A task that runs one program, with no shell. A non-zero exit code fails it.                   |
-| `workflow.runShell`       | A task that runs a string under bash, as a `run:` step of a GitHub workflow does.             |
-| `workflow.requireAll`     | A task that runs no command. It fails if one of its dependencies fails. Use it for many deps. |
-| `workflow.post`           | A command that cleans up after a main task. See [Lifecycle](lifecycle.md).                    |
-| `workflow.restoreCache`   | A restore of an `actions/cache` entry. See [Cache and artifacts](cache-and-artifacts.md).     |
-| `workflow.saveCache`      | A save of an `actions/cache` entry.                                                           |
-| `workflow.uploadArtifact` | An upload of an `actions/upload-artifact` artifact.                                           |
+| Function                  | Adds                                                                                                            |
+| ------------------------- | --------------------------------------------------------------------------------------------------------------- |
+| `workflow.task`           | A task. Its work is a TypeScript function (`action`), one program (`cmd`) or a string that bash runs (`shell`). |
+| `workflow.requireAll`     | A task that runs no command. It fails if one of its dependencies fails. Use it for many deps.                   |
+| `workflow.post`           | A task that runs after a main task and the tasks that use it. See [Lifecycle](lifecycle.md).                    |
+| `workflow.restoreCache`   | A restore of an `actions/cache` entry. See [Cache and artifacts](cache-and-artifacts.md).                       |
+| `workflow.saveCache`      | A save of an `actions/cache` entry, as a post step of its restore.                                              |
+| `workflow.uploadArtifact` | An upload of an `actions/upload-artifact` artifact.                                                             |
 
 `workflow.requireAll` names its task `require-all` unless you give it a `name`. To add many tasks of one shape, call a function in a loop.
 
-### Commands: `workflow.run` and `workflow.runShell`
+### Commands: `cmd` and `shell`
 
-`workflow.run` runs one program. `cmd` is a list: the program and its arguments. No shell runs it, and nothing in it is expanded.
+A task with `cmd` runs one program. `cmd` is a list: the program and its arguments. No shell runs it, and nothing in it is expanded. A non-zero exit code fails the task.
 
-`workflow.runShell` runs `cmd`, one string, under `bash --noprofile --norc -eo pipefail -c`. This is GitHub's `shell: bash`:
+A task with `shell` runs one string under `bash --noprofile --norc -eo pipefail -c`. This is the `shell: bash` of a `run:` step in a GitHub workflow:
 
 - The first command that fails stops the string and fails the task.
 - A pipe fails when one of its commands fails: `npm test | tee test.log` fails when the tests fail.
@@ -80,31 +78,31 @@ Each node of the graph is a task. `workflow.task` adds a task whose work is a Ty
 - A machine without bash fails the task. dagworkflows never uses `sh` instead.
 
 ```typescript
-workflow.run({ name: "lint", cmd: ["bun", "run", "lint"], inputs: await workflow.glob("src/**") });
-workflow.runShell({ name: "smoke", cmd: "curl -fsS localhost:4000/health | grep -q ok" });
+workflow.task({ name: "lint", cmd: ["bun", "run", "lint"], inputs: await workflow.glob("src/**") });
+workflow.task({ name: "smoke", shell: "curl -fsS localhost:4000/health | grep -q ok" });
 ```
 
 Both commands take these fields:
 
-| Field              | Meaning                                                                                          |
-| ------------------ | ------------------------------------------------------------------------------------------------ |
-| `name`             | The task's name. It is unique in the graph, and it is not part of the cache key.                 |
-| `cmd`              | A list for `run`, a string for `runShell`. `run` also takes a function. See [Outputs](#outputs). |
-| `deps`             | The tasks that it needs, by role.                                                                |
-| `inputs`           | What it reads from outside the graph. See [Inputs](#inputs).                                     |
-| `outputs`          | The files that it writes to its output directory, by role.                                       |
-| `cwd`              | The directory that it runs in, from the repository root.                                         |
-| `env`              | Variables set over the environment that it inherits. A record, or a function.                    |
-| `cacheable`        | `true` or `false`. See [When a task runs](#when-a-task-runs).                                    |
-| `concurrencyGroup` | A group of `concurrencyLimits`.                                                                  |
-| `timeoutMs`        | The time that it can run, in milliseconds. See [Lifecycle](lifecycle.md#timeouts).               |
-| `invalidateOn`     | For a dependency that it reads only in part, that part. See [The cache key](#the-cache-key).     |
+| Field              | Meaning                                                                                        |
+| ------------------ | ---------------------------------------------------------------------------------------------- |
+| `name`             | The task's name. It is unique in the graph, and it is not part of the cache key.               |
+| `cmd` or `shell`   | `cmd` is a list, or a function that returns one. `shell` is a string. See [Outputs](#outputs). |
+| `deps`             | The tasks that it needs, by role.                                                              |
+| `inputs`           | What it reads from outside the graph. See [Inputs](#inputs).                                   |
+| `outputs`          | The files that it writes to its output directory, by role.                                     |
+| `cwd`              | The directory that it runs in, from the repository root.                                       |
+| `env`              | Variables set over the environment that it inherits. A record, or a function.                  |
+| `cacheable`        | `true` or `false`. See [When a task runs](#when-a-task-runs).                                  |
+| `concurrencyGroup` | A group of `concurrencyLimits`.                                                                |
+| `timeoutMs`        | The time that it can run, in milliseconds. See [Lifecycle](lifecycle.md#timeouts).             |
+| `invalidateOn`     | For a dependency that it reads only in part, that part. See [The cache key](#the-cache-key).   |
 
 A command gets the whole environment of the process. Its `env` sets variables over it.
 
-### `workflow.task`
+### Functions: `action`
 
-A task's `action` is a TypeScript function:
+A task with `action` runs a TypeScript function:
 
 ```typescript
 const notes = workflow.task({
@@ -131,7 +129,7 @@ The function receives these values:
 | `ports`                  | The run's ports, as `workflow.ports`.                                                                                                  |
 | `signal`                 | Fires when the task times out or the run is cancelled.                                                                                 |
 | `run(argv, options)`     | Runs a program with no shell. It returns what the program writes to stdout.                                                            |
-| `runShell(cmd, options)` | Runs a string as `workflow.runShell` does. It returns what the string writes to stdout.                                                |
+| `runShell(cmd, options)` | Runs a string as a `shell` task does. It returns what the string writes to stdout.                                                     |
 | `log(line)`              | Writes a line to the task's log.                                                                                                       |
 | `warn(message)`          | Writes a GitHub warning to the task's log, with the task's name as its title.                                                          |
 
@@ -150,7 +148,12 @@ If a dependency fails, dagworkflows skips the dependent task. To run the depende
 ```typescript
 import { settled } from "@mrmeku/dagworkflows";
 
-workflow.saveCache({ name: "save:pnpm", cache: pnpm, deps: { install: settled(install) } });
+workflow.uploadArtifact({
+  name: "upload:junit",
+  artifact: "junit",
+  path: ["reports/**/*.xml"],
+  deps: { test: settled(test) },
+});
 ```
 
 ## Scheduler options
@@ -187,7 +190,7 @@ Both functions are `@actions/glob`. Only `workflow.glob` excludes the directorie
 > [!WARNING]
 > An exclusion removes files from the result, but `@actions/glob` still reads the excluded directory. Thus `**` reads all of `node_modules`, which can take 30 seconds. Start each pattern below the directories that you need, for example `src/**`.
 
-Two input names are taken. A task keys its declared outputs under `declaredOutputs`, and a command keys its `cmd`, `cwd` and `env` under `command`. Thus no task's `inputs` can use the first name, and no command's `inputs` the second.
+Two input names are taken. A task keys its declared outputs under `declaredOutputs`, and a command keys its `cmd` or `shell`, `cwd` and `env` under `command`. Thus no task's `inputs` can use the first name, and no command's `inputs` the second.
 
 ## When a task runs
 
@@ -199,12 +202,12 @@ A task that declares no inputs runs each time, as a GitHub step does. A task who
 | `true`      | Comes from the cache when its key did not change, also with no inputs.             |
 | `false`     | Runs each time. Use it for an install on a new runner, or for an integration test. |
 
-A command's own `cmd`, `cwd` and `env` are part of its key, but they do not count as inputs. Thus a glob that matches no file gives a task that runs each time.
+A command's own `cmd` or `shell`, `cwd` and `env` are part of its key, but they do not count as inputs. Thus a glob that matches no file gives a task that runs each time.
 
 A receipt is a side effect that a run again must skip, such as an `npm publish`. It declares `cacheable: true`, so the same tarball does not publish twice:
 
 ```typescript
-workflow.run({
+workflow.task({
   name: "publish",
   deps: { pack },
   cmd: ({ pack }) => ["npm", "publish", pack.tarball],
@@ -220,7 +223,7 @@ workflow.run({
 The cache key of a task is a hash of these items:
 
 - each input, by name,
-- for a command, its `cmd`, `cwd` and `env`,
+- for a command, its `cmd` or `shell`, `cwd` and `env`,
 - the role and file name of each declared output,
 - the content of the outputs of each dependency, by its role in `deps`.
 
@@ -259,7 +262,7 @@ These options change how a task uses the cache:
 A constant `invalidateOn` function orders a task after a dependency but keeps that dependency out of the key. Use this for a cache restore:
 
 ```typescript
-workflow.run({
+workflow.task({
   name: "lint",
   cmd: ["pnpm", "lint"],
   inputs: src,
@@ -275,16 +278,16 @@ A command writes its output files to its output directory, and declares them by 
 A command names a path only through a function. `cmd` and `env` can each be a function of the dependencies that the command declares, each with its outputs, and of its own `out` and `outputDir`:
 
 ```typescript
-const pack = workflow.run({
+const pack = workflow.task({
   name: "pack",
   cmd: ({ outputDir }) => ["npm", "pack", "--pack-destination", outputDir],
   outputs: { tarball: "pkg-1.0.0.tgz" },
 });
-workflow.run({ name: "list", deps: { pack }, cmd: ({ pack }) => ["tar", "-tzf", pack.tarball] });
-workflow.runShell({
+workflow.task({ name: "list", deps: { pack }, cmd: ({ pack }) => ["tar", "-tzf", pack.tarball] });
+workflow.task({
   name: "size",
   deps: { pack },
-  cmd: 'gzip -c "$TARBALL" | wc -c',
+  shell: 'gzip -c "$TARBALL" | wc -c',
   env: ({ pack }) => ({ TARBALL: pack.tarball }),
 });
 ```

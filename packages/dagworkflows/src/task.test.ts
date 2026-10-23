@@ -14,13 +14,13 @@ import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, relative } from "node:path";
 import { describe, test } from "node:test";
-import { run } from "./commands.ts";
+import { addCommand } from "./commands.ts";
 import type { ExecResult, Ports } from "./ports.ts";
 import { createTestPorts } from "./ports/memory.ts";
 import { createExec } from "./ports/real.ts";
 import { runWorkflow } from "./runner.ts";
 import { logPath } from "./step-records.ts";
-import { addTask, type TaskSpec } from "./task.ts";
+import { addTask, type ActionTaskSpec } from "./task.ts";
 
 const CAS = "/cas";
 const executeUnder = (graph: Graph<Ports>, ports: Ports, cache = new MemCache()) =>
@@ -60,7 +60,7 @@ const task = <
   I extends InputRecord = Record<never, never>,
 >(
   graph: Graph<Ports>,
-  spec: TaskSpec<string, D, O, I>,
+  spec: ActionTaskSpec<string, D, O, I>,
 ) => addTask(graph, spec);
 
 describe("a task", () => {
@@ -282,8 +282,8 @@ describe("a task", () => {
           manifest("cached:b", { cacheable: true }),
         ],
         commands: [
-          refusal(() => run(graph, { name: "lint:a", cmd: ["lint"], inputs: { v: 1 } })),
-          refusal(() => run(graph, { name: "lint:b", cmd: ["lint"], inputs: { v: 1 } })),
+          refusal(() => addCommand(graph, { name: "lint:a", cmd: ["lint"], inputs: { v: 1 } })),
+          refusal(() => addCommand(graph, { name: "lint:b", cmd: ["lint"], inputs: { v: 1 } })),
         ],
       },
       {

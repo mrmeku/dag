@@ -4,7 +4,7 @@
  * the last run on main; the checks (scripts/checks.ts) order after it; the CAS is saved last and
  * only on main, so pull requests read main's entry and never evict it.
  */
-import { defineWorkflow, settled } from "@mrmeku/dagworkflows";
+import { defineWorkflow } from "@mrmeku/dagworkflows";
 import { addChecks } from "./checks.ts";
 
 export default defineWorkflow({
@@ -18,11 +18,7 @@ export default defineWorkflow({
     });
     const requireAll = await addChecks(workflow, cas);
     if (workflow.ctx.ref === "refs/heads/main") {
-      workflow.saveCache({
-        name: "save:cas",
-        cache: cas,
-        deps: { requireAll: settled(requireAll) },
-      });
+      workflow.saveCache({ name: "save:cas", cache: cas });
     }
     return { cas, requireAll };
   },

@@ -26,27 +26,27 @@ export async function addChecks(
       ...TOOLCHAIN,
     ),
   ]);
-  const typecheck = workflow.run({
+  const typecheck = workflow.task({
     name: "typecheck",
     cmd: ["bun", "run", "typecheck"],
     inputs: all,
     ...afterRestore,
   });
-  const lint = workflow.run({
+  const lint = workflow.task({
     name: "lint",
     cmd: ["bun", "run", "lint"],
     inputs: all,
     ...afterRestore,
   });
   // "./" anchors the path: a bare one is a substring filter for bun test.
-  const testDagraph = workflow.run({
+  const testDagraph = workflow.task({
     name: "test:dagraph",
     cmd: ["bun", "test", "./packages/dagraph"],
     inputs: engine,
     concurrencyGroup: "test",
     ...afterRestore,
   });
-  const testDagworkflows = workflow.run({
+  const testDagworkflows = workflow.task({
     name: "test:dagworkflows",
     cmd: ["node", "--test", "packages/dagworkflows/src/**/*.test.ts", "scripts/*.test.ts"],
     inputs: runner,

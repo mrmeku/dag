@@ -7,11 +7,14 @@ export type RunHistory = Record<string, Result>;
 
 /**
  * A run's history file: its workflow file (resolved; empty when none was named) and `--only`, so
- * a later pass of the same workflow rebuilds the graph it ran, and its settled nodes' results.
+ * a later pass of the same workflow rebuilds the graph it ran; the nodes whose action started, in
+ * the order they started, so a run killed mid-action still shows what it owes; and its settled
+ * nodes' results.
  */
 export interface RunHistoryFile {
   workflow: string;
   only?: string[];
+  started: string[];
   results: RunHistory;
 }
 
@@ -50,7 +53,11 @@ export async function createRunHistory(
     // The run goes on: at worst a later pass takes it for stopped and settles its posts.
     onCompromised: (e) => process.emitWarning(`the lock on ${path} was lost: ${e.message}`),
   });
-  const history: RunHistoryFile = { ...initial, results: { ...initial.results } };
+  const history: RunHistoryFile = {
+    ...initial,
+    started: [...initial.started],
+    results: { ...initial.results },
+  };
   let chain = Promise.resolve();
   const saveHistory = () => {
     chain = chain.then(async () => {
@@ -60,29 +67,33 @@ export async function createRunHistory(
     });
     return chain;
   };
-  const recordResult = (node: string, result: Result) => {
-    history.results[node] = result;
-    void saveHistory();
-  };
   return {
     path,
     results: history.results,
+    started: history.started,
     begin: saveHistory,
     onEvent: (event: ExecEvent) => {
-      if (event.type === "result") recordResult(event.node, event.result);
+      if (event.type === "start") history.started.push(event.node);
+      else if (event.type === "result") history.results[event.node] = event.result;
+      else return;
+      void saveHistory();
     },
     flush: () => chain,
     close: release,
   };
 }
 
+const isNames = (value: unknown) =>
+  Array.isArray(value) && value.every((name) => typeof name === "string");
+
 const isHistoryFile = (value: unknown): value is RunHistoryFile =>
   typeof value === "object" &&
   value !== null &&
   "workflow" in value &&
   typeof value.workflow === "string" &&
-  (!("only" in value) ||
-    (Array.isArray(value.only) && value.only.every((n) => typeof n === "string"))) &&
+  (!("only" in value) || isNames(value.only)) &&
+  "started" in value &&
+  isNames(value.started) &&
   "results" in value &&
   typeof value.results === "object" &&
   value.results !== null &&
@@ -91,6 +102,10 @@ const isHistoryFile = (value: unknown): value is RunHistoryFile =>
 export async function readRunHistory(fs: DagFs, path: string): Promise<RunHistoryFile> {
   const file: unknown = JSON.parse(await fs.readText(path));
   if (!isHistoryFile(file))
-    throw new Error("not a run's history: it has no results, or no workflow");
+    throw new Error(
+      typeof file === "object" && file !== null && !("started" in file)
+        ? "it records no started nodes, as a history from before dag recorded them"
+        : "not a run's history: it lacks its workflow, started nodes or results",
+    );
   return file;
 }

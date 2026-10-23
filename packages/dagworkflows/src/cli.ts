@@ -27,12 +27,12 @@ const withCommonOptions = <Options extends OptionValues>(cmd: Command<[], Option
     .argument("<workflow>", "path to the workflow file")
     .option(
       "--only <names>",
-      "comma-separated nodes to run, with their dependencies and the post steps of what runs",
+      "comma-separated nodes to run, with the post steps of what runs, each with its dependencies",
     )
     .option("--cas-dir <dir>", "local content-addressed cache directory", DEFAULT_CAS_DIR)
     .option(
       "--history-dir <dir>",
-      "where each run records what settled, in a history of its own",
+      "where each run records what started and settled, in a history of its own",
       DEFAULT_HISTORY_DIR,
     )
     .option(

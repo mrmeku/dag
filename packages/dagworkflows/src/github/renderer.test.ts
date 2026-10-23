@@ -34,14 +34,14 @@ describe("GitHub renderer", () => {
     };
     const { implementation } = defineWorkflow({
       implementation: (workflow) => {
-        const lint = workflow.run({ name: "lint", cmd: ["lint"], cacheable: false });
-        const slow = workflow.run({
+        const lint = workflow.task({ name: "lint", cmd: ["lint"], cacheable: false });
+        const slow = workflow.task({
           name: "slow",
           cmd: ["slow"],
           deps: { lint: settled(lint) },
           cacheable: false,
         });
-        workflow.run({ name: "after", cmd: ["after"], deps: { slow } });
+        workflow.task({ name: "after", cmd: ["after"], deps: { slow } });
       },
     });
     const controller = new AbortController();

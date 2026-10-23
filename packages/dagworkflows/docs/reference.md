@@ -28,9 +28,9 @@ npx --no dag post <workflow> [options]
 | `--output-style <style>`        | `run`         |                    | Terminal output (default: picked from the terminal). One of `live`, `failures`, `grouped`. Also set by `DAG_OUTPUT_STYLE`. |
 | `--log-dir <dir>`               | `run`         | `.dag/logs`        | Where each node's log is written as it runs.                                                                               |
 | `--failures-report-file <file>` | `run`         | `.dag/failures.md` | Where the report of the run's failures is written.                                                                         |
-| `--only <names>`                | `run`, `post` |                    | Comma-separated nodes to run, with their dependencies and the post steps of what runs.                                     |
+| `--only <names>`                | `run`, `post` |                    | Comma-separated nodes to run, with the post steps of what runs, each with its dependencies.                                |
 | `--cas-dir <dir>`               | `run`, `post` | `.dag/cas`         | Local content-addressed cache directory.                                                                                   |
-| `--history-dir <dir>`           | `run`, `post` | `.dag/history`     | Where each run records what settled, in a history of its own.                                                              |
+| `--history-dir <dir>`           | `run`, `post` | `.dag/history`     | Where each run records what started and settled, in a history of its own.                                                  |
 | `--summary-file <file>`         | `run`, `post` | `.dag/summary.md`  | Where the local adapter writes the markdown summary.                                                                       |
 
 <!-- /generated:cli -->
@@ -45,13 +45,13 @@ npx --no dag post <workflow> [options]
 
 <!-- generated:action -->
 
-| Input         | Default        | Meaning                                                                                         |
-| ------------- | -------------- | ----------------------------------------------------------------------------------------------- |
-| `workflow`    |                | Path to the workflow file that default-exports defineWorkflow(...). Required.                   |
-| `cas-dir`     | `.dag/cas`     | Local content-addressed cache directory.                                                        |
-| `history-dir` | `.dag/history` | Directory where each run records every settled node in a history of its own, for the post step. |
-| `force`       | `false`        | Ignore the cache for this run.                                                                  |
-| `only`        |                | Comma-separated nodes to run, with their dependencies and the post steps of what runs.          |
+| Input         | Default        | Meaning                                                                                      |
+| ------------- | -------------- | -------------------------------------------------------------------------------------------- |
+| `workflow`    |                | Path to the workflow file that default-exports defineWorkflow(...). Required.                |
+| `cas-dir`     | `.dag/cas`     | Local content-addressed cache directory.                                                     |
+| `history-dir` | `.dag/history` | Where each run records what started and settled, in a history of its own, for the post step. |
+| `force`       | `false`        | Ignore the cache for this run.                                                               |
+| `only`        |                | Comma-separated nodes to run, with the post steps of what runs, each with its dependencies.  |
 
 <!-- /generated:action -->
 

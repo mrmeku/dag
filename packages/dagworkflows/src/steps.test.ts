@@ -1,7 +1,7 @@
 import { execute, Graph, MemCache, settled, soleOutput } from "@mrmeku/dagraph";
 import assert from "node:assert/strict";
 import { describe, test } from "node:test";
-import { run } from "./commands.ts";
+import { addCommand } from "./commands.ts";
 import type { Exec, Ports } from "./ports.ts";
 import { nullActionsArtifact } from "./ports/actions-artifact.ts";
 import { createMemoryActionsCache } from "./ports/actions-cache.ts";
@@ -49,7 +49,7 @@ describe("restoreCache + saveCache", () => {
     });
     const cas = restoreCache(graph, { name: "restore:cas", path: [".cas"], key: "cas-main-1" });
     const broken = restoreCache(graph, { name: "restore:broken", path: [], key: "broken" });
-    const install = run(graph, {
+    const install = addCommand(graph, {
       name: "install",
       cmd: ["ok"],
       deps: { pnpm },
@@ -62,7 +62,7 @@ describe("restoreCache + saveCache", () => {
       if (key === "broken") throw new Error("Path Validation Error: nothing to save");
       return save(paths, key);
     };
-    saveCache(graph, { name: "save:broken", cache: broken, deps: {} });
+    saveCache(graph, { name: "save:broken", cache: broken });
 
     const results = await executeUnder(graph, p);
     const byName = new Map(results.map((r) => [r.name, r]));
@@ -152,17 +152,17 @@ describe("uploadArtifact", () => {
       },
     });
     const graph = newGraph();
-    const pack = run(graph, {
+    const pack = addCommand(graph, {
       name: "pack",
       cmd: ({ out }) => ["pack", out.tarball],
       outputs: { tarball: "pkg.tgz" },
     });
-    const bundle = run(graph, {
+    const bundle = addCommand(graph, {
       name: "bundle",
       cmd: ({ out }) => ["bundle", out.main],
       outputs: { main: "main.js" },
     });
-    const bad = run(graph, { name: "bad", cmd: ["bad"], outputs: { report: "report.xml" } });
+    const bad = addCommand(graph, { name: "bad", cmd: ["bad"], outputs: { report: "report.xml" } });
     const first = uploadArtifact(graph, {
       name: "upload:tarball",
       artifact: "tarball",
@@ -209,7 +209,7 @@ describe("uploadArtifact", () => {
       artifact: "offline",
       path: ({ pack }) => [pack.tarball],
       deps: {
-        pack: run(offline, {
+        pack: addCommand(offline, {
           name: "pack",
           cmd: ({ out }) => ["pack", out.tarball],
           outputs: { tarball: "pkg.tgz" },

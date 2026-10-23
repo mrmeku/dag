@@ -8,7 +8,7 @@ export {
   type SettledOutputRef,
   type SettledRef,
 } from "@mrmeku/dagraph";
-export type { PostSpec, RunShellSpec, RunSpec } from "./commands.ts";
+export type { CmdTaskSpec, ShellTaskSpec } from "./commands.ts";
 export {
   DEFAULT_CAS_DIR,
   DEFAULT_EXCLUDES,
@@ -74,6 +74,7 @@ export {
   type RecordedHost,
 } from "./ports/memory.ts";
 export { abortOnSignals, createExec, systemClock } from "./ports/real.ts";
+export type { PostSpec } from "./post.ts";
 export { createReporter } from "./reporter.ts";
 export {
   runJob,
@@ -89,6 +90,7 @@ export {
   logPath,
   postNodes,
   type CommandCause,
+  type PostRef,
   type RestoreCacheRef,
   type RestoreCacheSpec,
   type UploadArtifactSpec,
@@ -104,11 +106,12 @@ export {
   type RunReport,
   type SummaryRenderer,
 } from "./summary.ts";
-export type { TaskSpec } from "./task.ts";
+export type { ActionTaskSpec } from "./task.ts";
 export {
   createWorkflow,
   defineWorkflow,
   type GroupsOf,
+  type TaskSpec,
   type Workflow,
   type WorkflowDef,
 } from "./workflow.ts";

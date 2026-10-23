@@ -14,7 +14,7 @@ import {
 } from "./ports/memory.ts";
 import { runJob, runPost, runWorkflow } from "./runner.ts";
 import { renderStatus, renderTimeline } from "./summary.ts";
-import { defineWorkflow } from "./workflow.ts";
+import { defineWorkflow, type WorkflowDef } from "./workflow.ts";
 
 const CAS = "/cas";
 
@@ -77,36 +77,28 @@ describe("cancel, then post", () => {
           key: "bun-new",
           restoreKeys: ["bun-"],
         });
-        const db = workflow.run({
+        const db = workflow.task({
           name: "up:db",
           cmd: ({ out }) => ["db", "start", out.pid],
           outputs: { pid: "pid" },
           cacheable: false,
         });
-        const fast = workflow.run({
+        const fast = workflow.task({
           name: "fast",
           cmd: ["fast"],
           deps: { bun, db },
           cacheable: false,
         });
-        const slow = workflow.run({
+        const slow = workflow.task({
           name: "slow",
           cmd: ["slow"],
           deps: { bun, db },
           cacheable: false,
         });
-        const after = workflow.run({ name: "after", cmd: ["after"], deps: { fast, slow } });
-        workflow.saveCache({
-          name: "save:bun",
-          cache: bun,
-          deps: { fast: settled(fast), slow: settled(slow) },
-        });
-        workflow.post({
-          name: "down:db",
-          main: db,
-          cmd: ({ main }) => ["db", "stop", main.pid],
-          deps: { after: settled(after) },
-        });
+        workflow.task({ name: "after", cmd: ["after"], deps: { fast, slow } });
+        // Each waits for fast, slow and after, which use its main.
+        workflow.saveCache({ name: "save:bun", cache: bun });
+        workflow.post({ name: "down:db", main: db, cmd: ({ main }) => ["db", "stop", main.pid] });
       },
     });
     const common = {
@@ -178,8 +170,8 @@ describe("cancel, then post", () => {
           "▷ slow",
           "◼\uFE0E cancelled, 4 nodes not run · run · built 3 · cached 0 · failed 0 · skipped 0 · cancelled 4 · wall 9.0s",
           "post · 2 of 2 post steps owed",
-          "▷ down:db",
           "▷ save:bun",
+          "▷ down:db",
           "✔\uFE0E all 2 nodes succeeded · run · post · built 2 · cached 0 · failed 0 · skipped 0 · wall 3.0s",
         ],
         // The workflow's own section, in both passes; the post pass draws its owed steps alone.
@@ -199,6 +191,146 @@ describe("cancel, then post", () => {
           ["## run · post", "", "save:bun done", "down:db done", ""].join("\n"),
         ],
         slowLog: ["killed by SIGINT"],
+      },
+    );
+  });
+});
+
+describe("owed after a cancel", () => {
+  test("a post is owed when its main hit the cache or started its action, whatever came of it, and its deps then decide whether it runs; a main dep-failed or cancelled while queued owes nothing", async () => {
+    const status = (rs: { name: string; status: string }[]) =>
+      Object.fromEntries(rs.map((r) => [r.name, r.status]));
+    /** A run of `def` cancelled once `cancelAt` starts, after a run that fills the cache if `warm`, then its post pass. */
+    const cancelThenPost = async (def: WorkflowDef, cancelAt: string, warm = false) => {
+      const { ports, fs } = createTestPorts();
+      const controller = new AbortController();
+      let armed = !warm;
+      const calls: string[] = [];
+      let downEnv: Record<string, string | undefined> | undefined;
+      ports.exec = {
+        run: async (cmd, opts) => {
+          const [program, verb, path] = cmd;
+          const call = cmd.slice(0, 2).join(" ");
+          calls.push(call);
+          if (call === "compose down") downEnv = opts?.env;
+          if (program === "fail") return { code: 1, stdout: "", stderr: "", output: "", ok: false };
+          if (program === "compose" && verb === "up" && path) await fs.writeText(path, "db-1");
+          if (call === cancelAt && armed) {
+            armed = false;
+            controller.abort();
+            return { code: -1, stdout: "", stderr: "", output: "", ok: false };
+          }
+          return { code: 0, stdout: "", stderr: "", output: "", ok: true };
+        },
+      };
+      const common = {
+        implementation: def.implementation,
+        ...(def.schedulerOptions && { schedulerOptions: def.schedulerOptions }),
+        ports,
+        casBaseDir: CAS,
+        historyDir: HISTORY_DIR,
+      };
+      if (warm) {
+        await runWorkflow(common);
+        calls.length = 0;
+        armed = true;
+      }
+      const run = await runWorkflow({ ...common, signal: controller.signal });
+      const post = await runPost(common);
+      return { run: status(run.results), post: status(post.results), calls, downEnv };
+    };
+    const midAction = defineWorkflow({
+      implementation: (workflow) => {
+        const db = workflow.task({
+          name: "up:db",
+          cmd: ({ out }) => ["compose", "up", out.id],
+          outputs: { id: "id" },
+        });
+        workflow.post({
+          name: "down:db",
+          main: settled(db),
+          cmd: ["compose", "down"],
+          env: ({ main }) => ({ ID: main.id }),
+        });
+        workflow.post({ name: "stop:db", main: db, cmd: ["stop"] });
+      },
+    });
+    const cached = defineWorkflow({
+      implementation: (workflow) => {
+        const db = workflow.task({
+          name: "up:db",
+          cmd: ({ out }) => ["compose", "up", out.id],
+          outputs: { id: "id" },
+          inputs: { version: "db-v1" },
+        });
+        workflow.task({ name: "test", cmd: ["test"], deps: { db } });
+        workflow.post({
+          name: "down:db",
+          main: db,
+          cmd: ({ main }) => ["compose", "down", main.id],
+        });
+      },
+    });
+    const queued = defineWorkflow({
+      schedulerOptions: { concurrencyLimits: { one: 1 } },
+      implementation: (workflow) => {
+        workflow.task({ name: "prep", cmd: ["prep"], concurrencyGroup: "one" });
+        const db = workflow.task({
+          name: "up:db",
+          cmd: ["compose", "up"],
+          concurrencyGroup: "one",
+        });
+        workflow.post({ name: "down:db", main: settled(db), cmd: ["compose", "down"] });
+      },
+    });
+    const depFailed = defineWorkflow({
+      implementation: (workflow) => {
+        const prep = workflow.task({ name: "prep", cmd: ["fail"] });
+        const db = workflow.task({ name: "up:db", cmd: ["compose", "up"], deps: { prep } });
+        const slow = workflow.task({ name: "slow", cmd: ["slow"], deps: { prep: settled(prep) } });
+        workflow.post({
+          name: "down:db",
+          main: settled(db),
+          cmd: ["compose", "down"],
+          deps: { slow: settled(slow) },
+        });
+      },
+    });
+    assert.deepEqual(
+      {
+        midAction: await cancelThenPost(midAction, "compose up"),
+        depFailed: await cancelThenPost(depFailed, "slow"),
+        cached: await cancelThenPost(cached, "test", true),
+        queued: await cancelThenPost(queued, "prep"),
+      },
+      {
+        // Its action started: the post on settled(db) runs without its id, the one on db is skipped.
+        midAction: {
+          run: { "up:db": "cancelled", "down:db": "cancelled", "stop:db": "cancelled" },
+          post: { "down:db": "done", "stop:db": "dep-failed" },
+          calls: ["compose up", "compose down"],
+          downEnv: { ID: undefined },
+        },
+        cached: {
+          run: { "up:db": "cached", test: "cancelled", "down:db": "cancelled" },
+          post: { "down:db": "done" },
+          calls: ["test", "compose down"],
+          downEnv: {},
+        },
+        // Its dep failed, so it never started.
+        depFailed: {
+          run: { prep: "failed", "up:db": "dep-failed", slow: "cancelled", "down:db": "cancelled" },
+          post: {},
+          calls: ["fail", "slow"],
+          downEnv: undefined,
+        },
+        // Waiting for its group's slot when the cancel came, it never started.
+        queued: {
+          run: { prep: "cancelled", "up:db": "cancelled", "down:db": "cancelled" },
+          post: {},
+          calls: ["prep"],
+          downEnv: undefined,
+        },
       },
     );
   });
@@ -228,15 +360,15 @@ describe("runJob", () => {
     const def = defineWorkflow({
       summary: [(r) => r.nodes.map((n) => `${n.name} ${n.status}`)],
       implementation: (workflow) => {
-        const fast = workflow.run({ name: "fast", cmd: ["fast"], cacheable: false });
-        const slow = workflow.run({ name: "slow", cmd: ["slow"], cacheable: false });
+        const fast = workflow.task({ name: "fast", cmd: ["fast"], cacheable: false });
+        const slow = workflow.task({ name: "slow", cmd: ["slow"], cacheable: false });
         workflow.post({
           name: "save",
           main: fast,
           cmd: ["save"],
           deps: { slow: settled(slow) },
         });
-        workflow.post({ name: "notify", main: fast, cmd: ["notify"], deps: {} });
+        workflow.post({ name: "notify", main: fast, cmd: ["notify"] });
       },
     });
     assert.ok(def.summary, "summary");
@@ -319,22 +451,21 @@ describe("a run killed before its post pass", () => {
     };
     const implementation = defineWorkflow({
       implementation: (workflow) => {
-        const db = workflow.run({
+        const db = workflow.task({
           name: "up:db",
           cmd: ({ out }) => ["db", "start", out.pid],
           outputs: { pid: "pid" },
           cacheable: false,
         });
-        const slow = workflow.run({ name: "slow", cmd: ["slow"], deps: { db }, cacheable: false });
+        const slow = workflow.task({ name: "slow", cmd: ["slow"], deps: { db }, cacheable: false });
         const down = workflow.post({
           name: "down:db",
           main: db,
           cmd: ({ main }) => ["db", "stop", main.pid],
-          deps: { slow: settled(slow) },
         });
-        workflow.post({ name: "report:db", main: down, cmd: ["report"], deps: {} });
-        workflow.run({ name: "lint", cmd: ["lint"], cacheable: false });
-        workflow.post({ name: "down:lint", main: slow, cmd: ["never"], deps: {} });
+        workflow.post({ name: "report:db", main: down, cmd: ["report"] });
+        workflow.task({ name: "lint", cmd: ["lint"], cacheable: false });
+        workflow.post({ name: "down:lint", main: slow, cmd: ["never"] });
       },
     }).implementation;
     const common = { implementation, ports, casBaseDir: CAS, historyDir: HISTORY_DIR };
@@ -354,15 +485,17 @@ describe("a run killed before its post pass", () => {
       },
       {
         stopped: ["1", "2"],
+        // down:lint is owed too, since slow started, and skipped there, since slow did not succeed.
+        // down:db waits for it, a post of slow, which uses the database.
         headers: [
-          "post · 2 of 3 post steps owed",
+          "post · 3 of 3 post steps owed",
           "▷ down:db",
           "▷ report:db",
           "▷ up:db (last run 2.0s)",
           "▷ lint (last run 2.0s)",
           "▷ slow",
-          "▷ down:db",
           "▷ down:lint",
+          "▷ down:db",
           "▷ report:db",
         ],
         failed: 0,
@@ -392,7 +525,7 @@ describe("a damaged history", () => {
     };
     const implementation = defineWorkflow({
       implementation: (workflow) =>
-        void workflow.run({ name: "lint", cmd: ["lint"], cacheable: false }),
+        void workflow.task({ name: "lint", cmd: ["lint"], cacheable: false }),
     }).implementation;
     const common = { implementation, ports, casBaseDir: CAS, historyDir: HISTORY_DIR };
     const running = runWorkflow(common);
@@ -411,7 +544,7 @@ describe("a damaged history", () => {
         left: [...fs.files.keys()].filter((k) => k.startsWith(HISTORY_DIR)),
       },
       {
-        midWrite: [{ workflow: "", results: {} }],
+        midWrite: [{ workflow: "", started: [], results: {} }],
         after: [["lint", "done"]],
         annotations: [
           {
@@ -427,30 +560,133 @@ describe("a damaged history", () => {
 });
 
 describe("--only", () => {
-  test("a post ordered after the selection through a node left out, such as require-all, waits for what runs and runs whether it fails", async () => {
+  test("runs the closure of the named nodes and the posts of every main in it, each after the main's dependents in the run, whatever they did: test stops the database it shares with e2e once test settles, and up:db starts it and stops it at once", async () => {
     const { ports } = createTestPorts();
     const events: string[] = [];
     ports.exec = {
       run: async (cmd) => {
         events.push(`start ${cmd.join(" ")}`);
-        if (cmd[0] === "e2e") await new Promise((r) => setTimeout(r, 50));
+        if (cmd[0] === "test") await new Promise((r) => setTimeout(r, 50));
         events.push(`end ${cmd.join(" ")}`);
-        const ok = cmd[0] !== "e2e";
+        const ok = cmd[0] !== "test";
         return { code: ok ? 0 : 1, stdout: "", stderr: "", output: "", ok };
       },
     };
     const implementation = defineWorkflow({
       implementation: (workflow) => {
-        const db = workflow.run({ name: "up:db", cmd: ["db", "start"], cacheable: false });
-        const e2e = workflow.run({ name: "e2e", cmd: ["e2e"], deps: { db }, cacheable: false });
-        const lint = workflow.run({ name: "lint", cmd: ["lint"], cacheable: false });
-        const requireAll = workflow.requireAll({ deps: { e2e, lint } });
-        workflow.post({
+        const db = workflow.task({ name: "up:db", cmd: ["db", "start"] });
+        workflow.task({ name: "test", cmd: ["test"], deps: { db } });
+        workflow.task({ name: "e2e", cmd: ["e2e"], deps: { db } });
+        workflow.post({ name: "down:db", main: settled(db), cmd: ["db", "stop"] });
+      },
+    }).implementation;
+    const runOnly = async (only: string[]) => {
+      events.length = 0;
+      const run = await runWorkflow({
+        implementation,
+        ports,
+        casBaseDir: CAS,
+        historyDir: HISTORY_DIR,
+        only,
+      });
+      return {
+        events: [...events],
+        statuses: Object.fromEntries(run.results.map((r) => [r.name, r.status])),
+      };
+    };
+    assert.deepEqual(
+      { test: await runOnly(["test"]), db: await runOnly(["up:db"]) },
+      {
+        test: {
+          events: [
+            "start db start",
+            "end db start",
+            "start test",
+            "end test",
+            "start db stop",
+            "end db stop",
+          ],
+          statuses: { "up:db": "done", test: "failed", "down:db": "done" },
+        },
+        db: {
+          events: ["start db start", "end db start", "start db stop", "end db stop"],
+          statuses: { "up:db": "done", "down:db": "done" },
+        },
+      },
+    );
+  });
+
+  test("saves the CAS after lint alone when the save is a post of the restore lint depends on", async () => {
+    const service = createMemoryActionsCache();
+    const { ports } = createTestPorts({ actionsCache: service });
+    const events: string[] = [];
+    ports.exec = {
+      run: async (cmd) => {
+        events.push(`start ${cmd[0]}`);
+        await new Promise((r) => setTimeout(r, 50));
+        events.push(`end ${cmd[0]}`);
+        return { code: 0, stdout: "", stderr: "", output: "", ok: true };
+      },
+    };
+    const save = service.saveCache;
+    service.saveCache = async (paths, key) => (events.push(`save ${key}`), save(paths, key));
+    const implementation = defineWorkflow({
+      implementation: (workflow) => {
+        const cas = workflow.restoreCache({
+          name: "restore:cas",
+          path: [".dag/cas"],
+          key: "cas-1",
+        });
+        workflow.task({ name: "lint", cmd: ["lint"], deps: { cas } });
+        workflow.task({ name: "test", cmd: ["test"], deps: { cas } });
+        workflow.saveCache({ name: "save:cas", cache: cas });
+      },
+    }).implementation;
+    const run = await runWorkflow({
+      implementation,
+      ports,
+      casBaseDir: CAS,
+      historyDir: HISTORY_DIR,
+      only: ["lint"],
+    });
+    assert.deepEqual(
+      { events, statuses: Object.fromEntries(run.results.map((r) => [r.name, r.status])) },
+      {
+        events: ["start lint", "end lint", "save cas-1"],
+        statuses: { "restore:cas": "done", lint: "done", "save:cas": "done" },
+      },
+    );
+  });
+
+  test("brings a post's deps into the run as any node's, and the posts of a post; the run's header lists every node it holds", async () => {
+    const { ports, fs, rec } = createTestPorts();
+    const seen: Record<string, Record<string, string | undefined> | undefined> = {};
+    ports.exec = {
+      run: async (cmd, opts) => {
+        const [program = "", path] = cmd;
+        seen[program] = opts?.env;
+        if (program === "dump" && path) await fs.writeText(path, "rows");
+        return { code: 0, stdout: "", stderr: "", output: "", ok: true };
+      },
+    };
+    const implementation = defineWorkflow({
+      implementation: (workflow) => {
+        const db = workflow.task({ name: "up:db", cmd: ["db", "start"] });
+        workflow.task({ name: "e2e", cmd: ["e2e"], deps: { db } });
+        workflow.task({ name: "lint", cmd: ["lint"] });
+        const dump = workflow.task({
+          name: "dump",
+          cmd: ({ out }) => ["dump", out.rows],
+          outputs: { rows: "rows.sql" },
+        });
+        const down = workflow.post({
           name: "down:db",
           main: db,
-          cmd: ["db", "stop"],
-          deps: { requireAll: settled(requireAll) },
+          deps: { dump: settled(dump) },
+          cmd: ["clean"],
+          env: ({ dump }) => ({ DUMP: dump.rows }),
         });
+        workflow.post({ name: "report", main: down, cmd: ["report"] });
       },
     }).implementation;
     const run = await runWorkflow({
@@ -460,23 +696,29 @@ describe("--only", () => {
       historyDir: HISTORY_DIR,
       only: ["e2e"],
     });
+    const dumped = run.results.find((r) => r.name === "dump");
     assert.deepEqual(
-      { events, statuses: Object.fromEntries(run.results.map((r) => [r.name, r.status])) },
       {
-        events: [
-          "start db start",
-          "end db start",
-          "start e2e",
-          "end e2e",
-          "start db stop",
-          "end db stop",
-        ],
-        statuses: { "up:db": "done", e2e: "failed", "down:db": "done" },
+        header: rec.log[0],
+        statuses: Object.fromEntries(run.results.map((r) => [r.name, r.status])),
+        cleanEnv: seen["clean"],
+      },
+      {
+        header: {
+          title: "5 of 6 nodes (--only e2e)",
+          lines: ["up:db", "e2e", "dump", "down:db", "report"],
+        },
+        statuses: { "up:db": "done", e2e: "done", dump: "done", "down:db": "done", report: "done" },
+        cleanEnv: {
+          DUMP:
+            dumped?.status === "done" &&
+            `${CAS}/${dumped.actionKey}/out-${dumped.contentHash}/rows.sql`,
+        },
       },
     );
   });
 
-  test("runs the posts of every node in its closure, each after only its deps that run, and finishes them after a cancel", async () => {
+  test("a cancelled run's post pass runs the posts it owes over that run's selection", async () => {
     const { ports } = createTestPorts();
     const calls: string[] = [];
     const controller = new AbortController();
@@ -490,16 +732,11 @@ describe("--only", () => {
     };
     const implementation = defineWorkflow({
       implementation: (workflow) => {
-        const db = workflow.run({ name: "up:db", cmd: ["db", "start"], cacheable: false });
-        const e2e = workflow.run({ name: "e2e", cmd: ["e2e"], deps: { db }, cacheable: false });
-        const lint = workflow.run({ name: "lint", cmd: ["lint"], cacheable: false });
-        workflow.post({
-          name: "down:db",
-          main: db,
-          cmd: ["db", "stop"],
-          deps: { e2e: settled(e2e), lint: settled(lint) },
-        });
-        workflow.post({ name: "down:lint", main: lint, cmd: ["lint", "clean"], deps: {} });
+        const db = workflow.task({ name: "up:db", cmd: ["db", "start"] });
+        workflow.task({ name: "e2e", cmd: ["e2e"], deps: { db } });
+        const lint = workflow.task({ name: "lint", cmd: ["lint"] });
+        workflow.post({ name: "down:db", main: db, cmd: ["db", "stop"] });
+        workflow.post({ name: "down:lint", main: lint, cmd: ["lint", "clean"] });
       },
     }).implementation;
     const common = {
@@ -553,15 +790,10 @@ describe("two runs at once", () => {
     };
     const implementation = defineWorkflow({
       implementation: (workflow) => {
-        const db = workflow.run({ name: "up:db", cmd: ["db", "start"], cacheable: false });
-        const e2e = workflow.run({ name: "e2e", cmd: ["e2e"], deps: { db }, cacheable: false });
-        workflow.run({ name: "lint", cmd: ["lint"], cacheable: false });
-        workflow.post({
-          name: "down:db",
-          main: db,
-          cmd: ["db", "stop"],
-          deps: { e2e: settled(e2e) },
-        });
+        const db = workflow.task({ name: "up:db", cmd: ["db", "start"], cacheable: false });
+        workflow.task({ name: "e2e", cmd: ["e2e"], deps: { db }, cacheable: false });
+        workflow.task({ name: "lint", cmd: ["lint"], cacheable: false });
+        workflow.post({ name: "down:db", main: db, cmd: ["db", "stop"] });
       },
     }).implementation;
     const common = { implementation, ports, casBaseDir: CAS, historyDir: HISTORY_DIR };
@@ -592,14 +824,9 @@ describe("a history's lock", () => {
     };
     const implementation = defineWorkflow({
       implementation: (workflow) => {
-        const db = workflow.run({ name: "up:db", cmd: ["db", "start"], cacheable: false });
-        const e2e = workflow.run({ name: "e2e", cmd: ["e2e"], deps: { db }, cacheable: false });
-        workflow.post({
-          name: "down:db",
-          main: db,
-          cmd: ["db", "stop"],
-          deps: { e2e: settled(e2e) },
-        });
+        const db = workflow.task({ name: "up:db", cmd: ["db", "start"], cacheable: false });
+        workflow.task({ name: "e2e", cmd: ["e2e"], deps: { db }, cacheable: false });
+        workflow.post({ name: "down:db", main: db, cmd: ["db", "stop"] });
       },
     }).implementation;
     const common = { implementation, ports, casBaseDir: CAS, historyDir: HISTORY_DIR };
@@ -639,25 +866,15 @@ describe("a history of another workflow", () => {
     };
     const a = defineWorkflow({
       implementation: (workflow) => {
-        const cas = workflow.run({ name: "restore:cas", cmd: ["restore"], cacheable: false });
-        const check = workflow.run({
-          name: "check",
-          cmd: ["check"],
-          deps: { cas },
-          cacheable: false,
-        });
-        workflow.post({
-          name: "down:a",
-          main: cas,
-          cmd: ["a", "cleanup"],
-          deps: { check: settled(check) },
-        });
+        const cas = workflow.task({ name: "restore:cas", cmd: ["restore"], cacheable: false });
+        workflow.task({ name: "check", cmd: ["check"], deps: { cas }, cacheable: false });
+        workflow.post({ name: "down:a", main: cas, cmd: ["a", "cleanup"] });
       },
     }).implementation;
     const b = defineWorkflow({
       implementation: (workflow) => {
-        const cas = workflow.run({ name: "restore:cas", cmd: ["restore"], cacheable: false });
-        workflow.post({ name: "save:cas", main: cas, cmd: ["b", "save"], deps: {} });
+        const cas = workflow.task({ name: "restore:cas", cmd: ["restore"], cacheable: false });
+        workflow.post({ name: "save:cas", main: cas, cmd: ["b", "save"] });
       },
     }).implementation;
     const common = { ports, casBaseDir: CAS, historyDir: HISTORY_DIR };
@@ -681,66 +898,10 @@ describe("a history of another workflow", () => {
       },
     );
   });
-
-  test("leaves out a post whose command refers to a step it leaves out, and that post's own posts, with a notice", async () => {
-    const { ports, rec } = createTestPorts();
-    const calls: string[] = [];
-    ports.exec = {
-      run: async (cmd) => {
-        calls.push(cmd.join(" "));
-        return { code: 0, stdout: "", stderr: "", output: "", ok: true };
-      },
-    };
-    const implementation = defineWorkflow({
-      implementation: (workflow) => {
-        const db = workflow.run({ name: "up:db", cmd: ["db", "start"], cacheable: false });
-        workflow.run({ name: "e2e", cmd: ["e2e"], deps: { db }, cacheable: false });
-        const dump = workflow.run({
-          name: "dump",
-          cmd: ["dump"],
-          outputs: { dir: "dir" },
-          cacheable: false,
-        });
-        const down = workflow.post({
-          name: "down:db",
-          main: db,
-          cmd: ["clean"],
-          env: ({ dump }) => ({ DUMP: dump.dir }),
-          deps: { dump: settled(dump) },
-        });
-        workflow.post({ name: "report", main: down, cmd: ["report"], deps: {} });
-      },
-    }).implementation;
-    const run = await runWorkflow({
-      implementation,
-      ports,
-      casBaseDir: CAS,
-      historyDir: HISTORY_DIR,
-      only: ["e2e"],
-    });
-    assert.deepEqual(
-      {
-        calls,
-        statuses: Object.fromEntries(run.results.map((r) => [r.name, r.status])),
-        annotations: rec.annotations,
-      },
-      {
-        calls: ["db start", "e2e"],
-        statuses: { "up:db": "done", e2e: "done" },
-        annotations: [
-          {
-            level: "notice",
-            title: "down:db",
-            message: "not run: its command refers to an output of a step --only leaves out",
-          },
-        ],
-      },
-    );
-  });
 });
 
 describe("a killed --only run", () => {
-  test("owes the posts of its own selection, whose required deps outside it never ran", async () => {
+  test("owes the posts of its own selection, the deps they brought into it included, to the next run of the whole workflow", async () => {
     const { ports, fs } = createTestPorts();
     const stopped: string[] = [];
     let pid = 0;
@@ -756,14 +917,14 @@ describe("a killed --only run", () => {
     };
     const implementation = defineWorkflow({
       implementation: (workflow) => {
-        const db = workflow.run({
+        const db = workflow.task({
           name: "up:db",
           cmd: ({ out }) => ["db", "start", out.pid],
           outputs: { pid: "pid" },
           cacheable: false,
         });
-        const seed = workflow.run({ name: "seed", cmd: ["seed"], cacheable: false });
-        workflow.run({ name: "e2e", cmd: ["e2e"], deps: { db }, cacheable: false });
+        const seed = workflow.task({ name: "seed", cmd: ["seed"], cacheable: false });
+        workflow.task({ name: "e2e", cmd: ["e2e"], deps: { db }, cacheable: false });
         workflow.post({
           name: "down:db",
           main: db,
@@ -815,7 +976,7 @@ describe("logs", () => {
       },
     };
     const implementation = defineWorkflow({
-      implementation: (workflow) => void workflow.run({ name: "x", cmd: ["x"], cacheable: false }),
+      implementation: (workflow) => void workflow.task({ name: "x", cmd: ["x"], cacheable: false }),
     }).implementation;
     const common = { implementation, ports, casBaseDir: CAS, historyDir: HISTORY_DIR };
     const runs = [runWorkflow(common), runWorkflow(common)];
@@ -844,8 +1005,8 @@ describe("progress", () => {
     };
     const def = defineWorkflow({
       implementation: (workflow) => {
-        workflow.run({ name: "slow", cmd: ["slow"], cacheable: false });
-        workflow.run({ name: "fast", cmd: ["fast"], cacheable: false });
+        workflow.task({ name: "slow", cmd: ["slow"], cacheable: false });
+        workflow.task({ name: "fast", cmd: ["fast"], cacheable: false });
       },
     });
     await runWorkflow({
@@ -885,7 +1046,7 @@ describe("a step's time", () => {
       summary: [renderStatus, renderTimeline],
       implementation: (workflow) => {
         for (const name of ["a", "b", "c"])
-          workflow.run({ name, cmd: [name], concurrencyGroup: "one" });
+          workflow.task({ name, cmd: [name], concurrencyGroup: "one" });
       },
     });
     assert.ok(def.schedulerOptions && def.summary, "scheduler options and summary");
@@ -955,7 +1116,7 @@ describe("cancel during a save", () => {
     const implementation = defineWorkflow({
       implementation: (workflow) => {
         const cas = workflow.restoreCache({ name: "restore:cas", path: [".cas"], key: "cas-1" });
-        workflow.saveCache({ name: "save:cas", cache: cas, deps: {} });
+        workflow.saveCache({ name: "save:cas", cache: cas });
       },
     }).implementation;
     const common = { implementation, ports, casBaseDir: CAS, historyDir: HISTORY_DIR };
@@ -1005,9 +1166,9 @@ describe("timeoutMs", () => {
     const implementationFor = (lintMs: number) =>
       defineWorkflow({
         implementation: (workflow) => {
-          const test = workflow.run({ name: "test", cmd: ["hang"], inputs, timeoutMs: 30 });
-          workflow.run({ name: "lint", cmd: ["ok"], inputs, timeoutMs: lintMs });
-          workflow.run({ name: "report", cmd: ["ok"], inputs, deps: { test: settled(test) } });
+          const test = workflow.task({ name: "test", cmd: ["hang"], inputs, timeoutMs: 30 });
+          workflow.task({ name: "lint", cmd: ["ok"], inputs, timeoutMs: lintMs });
+          workflow.task({ name: "report", cmd: ["ok"], inputs, deps: { test: settled(test) } });
         },
       }).implementation;
     const common = { ports, casBaseDir: CAS, historyDir: HISTORY_DIR };
@@ -1062,7 +1223,7 @@ describe("secrets", () => {
       },
     };
     const implementation = defineWorkflow({
-      implementation: (workflow) => void workflow.run({ name: "publish", cmd: ["publish"] }),
+      implementation: (workflow) => void workflow.task({ name: "publish", cmd: ["publish"] }),
     }).implementation;
     await runWorkflow({ implementation, ports, casBaseDir: CAS, historyDir: HISTORY_DIR });
     const inCas = [...fs.files]

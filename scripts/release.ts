@@ -22,7 +22,7 @@
  *   whether or not require-all passes, so what a dry run or a failed publish would have shipped
  *   can be inspected.
  */
-import { defineWorkflow, settled, type NodeRef } from "@mrmeku/dagworkflows";
+import { defineWorkflow, type NodeRef } from "@mrmeku/dagworkflows";
 import { addChecks } from "./checks.ts";
 
 type Pkg = "dagraph" | "dagworkflows";
@@ -52,7 +52,7 @@ export default defineWorkflow({
       ...TOOLCHAIN,
     );
     const pack = (pkg: Pkg) => {
-      const tarball = workflow.run({
+      const tarball = workflow.task({
         name: `pack:${pkg}`,
         cmd: ({ outputDir }) => ["bun", "scripts/pack.ts", pkg, version, outputDir],
         outputs: { tarball: `mrmeku-${pkg}-${version}.tgz` },
@@ -68,7 +68,7 @@ export default defineWorkflow({
       return tarball;
     };
     const tarballs = { dagraph: pack("dagraph"), dagworkflows: pack("dagworkflows") };
-    const bundle = workflow.run({
+    const bundle = workflow.task({
       name: "build:action",
       cmd: ({ outputDir }) => [
         "bun",
@@ -93,7 +93,7 @@ export default defineWorkflow({
     });
 
     const publish = (pkg: Pkg, after: { engine?: NodeRef }) =>
-      workflow.run({
+      workflow.task({
         name: `publish:${pkg}`,
         cmd: ({ pack }) => [
           "npm",
@@ -109,7 +109,7 @@ export default defineWorkflow({
       });
     const engine = publish("dagraph", {});
     const published = { dagraph: engine, dagworkflows: publish("dagworkflows", { engine }) };
-    const action = workflow.run({
+    const action = workflow.task({
       name: "release:action",
       cmd: ({ bundle }) => [
         "bun",
@@ -124,11 +124,7 @@ export default defineWorkflow({
     });
 
     const release = workflow.requireAll({ name: "release", deps: { ...published, action } });
-    workflow.saveCache({
-      name: "save:cas",
-      cache: cas,
-      deps: { release: settled(release) },
-    });
+    workflow.saveCache({ name: "save:cas", cache: cas });
     return { version, dryRun, release };
   },
 });
