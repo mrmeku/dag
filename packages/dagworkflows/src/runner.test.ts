@@ -71,8 +71,8 @@ describe("cancel, then post", () => {
     const def = defineWorkflow({
       summary: [(r) => r.nodes.map((n) => `${n.name} ${n.status}`)],
       implementation: (workflow) => {
-        const bun = workflow.restoreCache({
-          name: "restore:bun",
+        const bun = workflow.cache({
+          name: "bun",
           path: ["~/.bun"],
           key: "bun-new",
           restoreKeys: ["bun-"],
@@ -86,18 +86,18 @@ describe("cancel, then post", () => {
         const fast = workflow.task({
           name: "fast",
           cmd: ["fast"],
-          deps: { bun, db },
+          deps: { bun: bun.restore, db },
           cacheable: false,
         });
         const slow = workflow.task({
           name: "slow",
           cmd: ["slow"],
-          deps: { bun, db },
+          deps: { bun: bun.restore, db },
           cacheable: false,
         });
         workflow.task({ name: "after", cmd: ["after"], deps: { fast, slow } });
         // Each waits for fast, slow and after, which use its main.
-        workflow.saveCache({ name: "save:bun", cache: bun });
+        bun.save();
         workflow.post({ name: "down:db", main: db, cmd: ({ main }) => ["db", "stop", main.pid] });
       },
     });
@@ -170,8 +170,8 @@ describe("cancel, then post", () => {
           "▷ slow",
           "◼\uFE0E cancelled, 4 nodes not run · run · built 3 · cached 0 · failed 0 · skipped 0 · cancelled 4 · wall 9.0s",
           "post · 2 of 2 post steps owed",
-          "▷ down:db",
           "▷ save:bun",
+          "▷ down:db",
           "✔\uFE0E all 2 nodes succeeded · run · post · built 2 · cached 0 · failed 0 · skipped 0 · wall 3.0s",
         ],
         // The workflow's own section, in both passes; the post pass draws its owed steps alone.
@@ -632,14 +632,10 @@ describe("--only", () => {
     service.saveCache = async (paths, key) => (events.push(`save ${key}`), save(paths, key));
     const implementation = defineWorkflow({
       implementation: (workflow) => {
-        const cas = workflow.restoreCache({
-          name: "restore:cas",
-          path: [".dag/cas"],
-          key: "cas-1",
-        });
-        workflow.task({ name: "lint", cmd: ["lint"], deps: { cas } });
-        workflow.task({ name: "test", cmd: ["test"], deps: { cas } });
-        workflow.saveCache({ name: "save:cas", cache: cas });
+        const cas = workflow.cache({ name: "cas", path: [".dag/cas"], key: "cas-1" });
+        workflow.task({ name: "lint", cmd: ["lint"], deps: { cas: cas.restore } });
+        workflow.task({ name: "test", cmd: ["test"], deps: { cas: cas.restore } });
+        cas.save();
       },
     }).implementation;
     const run = await runWorkflow({
@@ -1102,7 +1098,7 @@ describe("a step's time", () => {
 });
 
 describe("cancel during a save", () => {
-  test("a save the cancel lands on finishes in the run, and the post pass asks again, which the service refuses for a key it has", async () => {
+  test("a save the cancel lands on finishes in the run, and the post pass finds the key held and saves nothing", async () => {
     const controller = new AbortController();
     const service = createMemoryActionsCache();
     const { ports } = createTestPorts({ actionsCache: service });
@@ -1115,8 +1111,7 @@ describe("cancel during a save", () => {
     };
     const implementation = defineWorkflow({
       implementation: (workflow) => {
-        const cas = workflow.restoreCache({ name: "restore:cas", path: [".cas"], key: "cas-1" });
-        workflow.saveCache({ name: "save:cas", cache: cas });
+        workflow.cache({ name: "cas", path: [".cas"], key: "cas-1" }).save();
       },
     }).implementation;
     const common = { implementation, ports, casBaseDir: CAS, historyDir: HISTORY_DIR };
@@ -1134,7 +1129,7 @@ describe("cancel during a save", () => {
       {
         run: { "restore:cas": "done", "save:cas": "cancelled" },
         post: { "save:cas": "done" },
-        saves: 2,
+        saves: 1,
         saved: ["cas-1"],
       },
     );
@@ -1142,7 +1137,7 @@ describe("cancel during a save", () => {
 });
 
 describe("a run killed after its save finished", () => {
-  test("owes the save, and the post pass gets it from the cache and does not save again", async () => {
+  test("owes the save, and the post pass finds the key held and does not save again", async () => {
     const service = createMemoryActionsCache();
     const { ports, fs } = createTestPorts({ actionsCache: service });
     let saves = 0;
@@ -1150,8 +1145,7 @@ describe("a run killed after its save finished", () => {
     service.saveCache = async (paths, key) => (saves++, save(paths, key));
     const implementation = defineWorkflow({
       implementation: (workflow) => {
-        const cas = workflow.restoreCache({ name: "restore:cas", path: [".cas"], key: "cas-1" });
-        workflow.saveCache({ name: "save:cas", cache: cas });
+        workflow.cache({ name: "cas", path: [".cas"], key: "cas-1" }).save();
       },
     }).implementation;
     const common = { implementation, ports, casBaseDir: CAS, historyDir: HISTORY_DIR };
@@ -1173,7 +1167,7 @@ describe("a run killed after its save finished", () => {
       { run: status(run.results), post: status(post.results), saves },
       {
         run: { "restore:cas": "done", "save:cas": "done" },
-        post: { "save:cas": "cached" },
+        post: { "save:cas": "done" },
         saves: 1,
       },
     );

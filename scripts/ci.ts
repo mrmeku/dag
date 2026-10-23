@@ -10,16 +10,18 @@ import { addChecks, addPackChecks } from "./checks.ts";
 export default defineWorkflow({
   schedulerOptions: { maxParallelism: 4, concurrencyLimits: { test: 2 } },
   implementation: async (workflow) => {
-    const cas = workflow.restoreCache({
-      name: "restore:cas",
+    const cas = workflow.cache({
+      name: "cas",
       path: [".dag/cas"],
       key: `dag-main-${workflow.ctx.sha}`,
       restoreKeys: ["dag-main-"],
     });
-    const requireAll = await addChecks(workflow, cas, await addPackChecks(workflow, cas));
-    if (workflow.ctx.ref === "refs/heads/main") {
-      workflow.saveCache({ name: "save:cas", cache: cas });
-    }
+    const requireAll = await addChecks(
+      workflow,
+      cas.restore,
+      await addPackChecks(workflow, cas.restore),
+    );
+    if (workflow.ctx.ref === "refs/heads/main") cas.save();
     return { cas, requireAll };
   },
 });

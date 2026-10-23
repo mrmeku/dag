@@ -309,4 +309,28 @@ describe("a post", () => {
       },
     );
   });
+
+  test("that would wait for each other names the form of the post it would make a task: a cache's save is an action", async () => {
+    const { ports } = createTestPorts();
+    const { implementation } = defineWorkflow({
+      implementation: (workflow) => {
+        const cas = workflow.cache({ name: "cas", path: [".cas"], key: "cas-1" });
+        const db = workflow.task({ name: "db", cmd: ["db"] });
+        const lint = workflow.task({ name: "lint", cmd: ["lint"], deps: { cas: cas.restore } });
+        const e2e = workflow.task({ name: "e2e", cmd: ["e2e"], deps: { db } });
+        cas.save({ deps: { e2e } });
+        workflow.post({ name: "down", main: db, deps: { lint }, cmd: ["down"] });
+      },
+    });
+    await assert.rejects(
+      runWorkflow({ implementation, ports, casBaseDir: CAS, historyDir: HISTORY_DIR }),
+      {
+        message:
+          'posts "save:cas" and "down" wait for each other: a post waits for every node downstream ' +
+          "of its main, and each is downstream of another's main, neither main upstream of the " +
+          "other. Make one a task, which waits only for the deps it names: " +
+          'workflow.task({ name: "save:cas", deps: { main: main, ...deps }, action }).',
+      },
+    );
+  });
 });

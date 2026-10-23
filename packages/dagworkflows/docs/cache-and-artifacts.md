@@ -1,6 +1,6 @@
 # Cache and artifacts
 
-`workflow.restoreCache`, `workflow.saveCache` and `workflow.uploadArtifact` are the GitHub actions `actions/cache/restore`, `actions/cache/save` and `actions/upload-artifact`, as tasks in the graph. They take the same inputs as these actions. The restore and the upload run each time, and dagworkflows never caches their results. The save comes from the cache when its `path`, its `key` and the outputs of the tasks that it waits for did not change.
+`workflow.cache` and `workflow.uploadArtifact` are the GitHub actions `actions/cache` and `actions/upload-artifact`, as tasks in the graph. They take the same inputs as these actions. Their tasks run each time, and dagworkflows never caches their results.
 
 Without a GitHub cache or artifact service, for example on your laptop, these tasks do nothing:
 
@@ -10,31 +10,34 @@ Without a GitHub cache or artifact service, for example on your laptop, these ta
 
 ## actions/cache
 
-`workflow.restoreCache` restores an entry, and `workflow.saveCache` saves it:
+`workflow.cache` adds a task that restores an entry, and returns it as `restore`. Its `save` adds a task that saves the entry:
 
 ```typescript
-const pnpm = workflow.restoreCache({
-  name: "restore:pnpm",
+const pnpm = workflow.cache({
+  name: "pnpm",
   path: ["~/.local/share/pnpm/store"],
   key: `pnpm-${process.platform}-${await workflow.hash("pnpm-lock.yaml")}`,
   restoreKeys: [`pnpm-${process.platform}-`],
 });
-const install = workflow.task({ name: "install", cmd: ["pnpm", "install"], deps: { pnpm } });
-workflow.saveCache({ name: "save:pnpm", cache: pnpm, deps: { install } });
+const install = workflow.task({
+  name: "install",
+  cmd: ["pnpm", "install"],
+  deps: { pnpm: pnpm.restore },
+});
+pnpm.save({ deps: { install } });
 ```
 
-The restore tries `key` first. Then it tries each prefix in `restoreKeys` and takes the newest entry that matches.
+`name` names the two tasks, `restore:pnpm` and `save:pnpm`. If you do not give a `name`, it is `cache`.
+
+The restore tries `key` first. Then it tries each prefix in `restoreKeys` and takes the newest entry that matches. It writes what it found to its log.
+
+The restore has no outputs. Thus a hit and a miss give the tasks that depend on it the same cache key, and `deps: { pnpm: pnpm.restore }` does nothing but order `install` after the restore. No task can tell a hit from a miss. Work that must run only on a miss must check the files itself.
 
 The save is a post step of the restore, as `actions/cache` is a `main` and a `post`. It waits for each task that depends on the restore, directly or through other tasks, whatever that task did, and it runs after a cancellation too. See [Post steps](lifecycle.md#post-steps). Its `deps` are ordinary dependencies: `deps: { install }` saves only after a successful install, so a half-written store is never saved.
 
-The save does not save when the restore found an exact match, as `if: cache-hit != 'true'` does. If the cache service refuses the save, the task writes a warning. It does not fail.
+The save runs each time, and dagworkflows never caches it. Before it saves, it asks the cache service if it has an entry for `key`. It saves only if the service has none. Thus a second run saves nothing, and an entry that GitHub evicted is saved again. If the cache service refuses the save, the task writes a warning. It does not fail. An invalid key fails it.
 
-Each task writes the value that `@actions/cache` returned, as JSON:
-
-| Task    | File         | Content                                                                     |
-| ------- | ------------ | --------------------------------------------------------------------------- |
-| Restore | `cache.json` | The key that it restored, or `null`.                                        |
-| Save    | `save.json`  | The ID of the entry, `-1` if it saved nothing, or `null` if it did not try. |
+The save writes the value that `@actions/cache` returned to `save.json`: the ID of the entry, or `-1` if the toolkit saved nothing. It writes `null` if the service already had `key`, or refused the save.
 
 GitHub controls the match order, immutability, branch scope and quotas. See [Dependency caching reference](https://docs.github.com/en/actions/reference/workflows-and-actions/dependency-caching).
 
@@ -47,7 +50,7 @@ To use the results of the last run, restore and save `.dag/cas`. See [Keep the c
 
 ## actions/upload-artifact
 
-`workflow.uploadArtifact` uploads files as an artifact of the run. `path` takes globs over the working tree, or a function of `deps` that names their outputs too, each its own item. Thus a task can upload a build product directly from the CAS:
+`workflow.uploadArtifact` uploads files as an artifact of the run. `path` takes globs over the working tree, or a function of the outputs of `deps` that names their files too, each its own item. The function gets each output as a file handle, as an `action` task does, when the upload runs. Thus a task can upload a build product directly from the CAS:
 
 ```typescript
 const pack = workflow.task({
@@ -79,7 +82,7 @@ workflow.uploadArtifact({
 | `overwrite`      | Replace an artifact with the same name.                                |
 | `options`        | The `UploadArtifactOptions` of `@actions/artifact`.                    |
 
-An artifact belongs to the run. Thus the task runs each time, and `deps` tells when. Use `settled` to upload a test report also when the tests fail: `deps: { tests: settled(tests) }, path: ({ tests }) => [tests.report]`. When that dependency did not succeed, its output is left out.
+An artifact belongs to the run. Thus the task runs each time, and `deps` tells when. Use `settled` to upload a test report also when the tests fail: `deps: { tests: settled(tests) }, path: ({ tests }) => [tests?.report]`. When that dependency did not succeed, it is `undefined`, and the upload leaves out an `undefined` item.
 
 The archive starts at the deepest directory that holds all files, as in `actions/upload-artifact`. Thus the outputs of one task are at the top of the archive. Outputs of more than one task keep their CAS paths.
 

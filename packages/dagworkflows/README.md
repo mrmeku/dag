@@ -95,16 +95,15 @@ import { defineWorkflow } from "@mrmeku/dagworkflows";
 
 export default defineWorkflow({
   implementation: async (workflow) => {
-    const cas = workflow.restoreCache({
-      name: "restore:cas",
+    const cas = workflow.cache({
+      name: "cas",
       path: [".dag/cas"],
       key: `dag-${workflow.ctx.sha}`,
       restoreKeys: ["dag-"],
     });
-    const afterRestore = { deps: { cas }, invalidateOn: { cas: () => "" } };
     const src = await workflow.glob("src/**", "package.json", "tsconfig.json");
     const check = (name: string, cmd: string[]) =>
-      workflow.task({ name, cmd, inputs: src, ...afterRestore });
+      workflow.task({ name, cmd, inputs: src, deps: { cas: cas.restore } });
     workflow.requireAll({
       deps: {
         typecheck: check("typecheck", ["npx", "tsc", "--noEmit"]),
@@ -112,13 +111,12 @@ export default defineWorkflow({
         test: check("test", ["npm", "test"]),
       },
     });
-    workflow.saveCache({ name: "save:cas", cache: cas });
+    cas.save();
   },
 });
 ```
 
-- `deps: { cas }` starts each check after the restore.
-- `invalidateOn: { cas: () => "" }` keeps the restored key out of the cache key of each check.
+- `deps: { cas: cas.restore }` starts each check after the restore. The restore has no outputs, so a hit and a miss give each check the same cache key.
 - The save is a post step of the restore. It waits for each task that depends on the restore, directly or through other tasks, and it saves also when a check fails.
 
 ## Features
@@ -126,7 +124,7 @@ export default defineWorkflow({
 - **A graph of tasks.** Tasks declare their dependencies. Independent tasks run in parallel, with a limit for the run and for each group. A task's work is a command (`cmd`), a bash string (`shell`) or a TypeScript function (`action`). [Workflows](https://github.com/mrmeku/dag/blob/main/packages/dagworkflows/docs/workflows.md)
 - **A content-addressed cache.** A task runs again only when its command, its inputs, or the outputs of its dependencies change, or when a TypeScript task gets a new name. A task that declares no inputs runs each time, as a GitHub step does. [The cache key](https://github.com/mrmeku/dag/blob/main/packages/dagworkflows/docs/workflows.md#the-cache-key)
 - **Files between tasks.** A task writes output files, and other tasks read them through the dependencies that they declare. [Outputs](https://github.com/mrmeku/dag/blob/main/packages/dagworkflows/docs/workflows.md#outputs)
-- **GitHub's cache and artifacts as tasks.** `workflow.restoreCache`, `workflow.saveCache` and `workflow.uploadArtifact` are `actions/cache` and `actions/upload-artifact`. [Cache and artifacts](https://github.com/mrmeku/dag/blob/main/packages/dagworkflows/docs/cache-and-artifacts.md)
+- **GitHub's cache and artifacts as tasks.** `workflow.cache` and `workflow.uploadArtifact` are `actions/cache` and `actions/upload-artifact`. [Cache and artifacts](https://github.com/mrmeku/dag/blob/main/packages/dagworkflows/docs/cache-and-artifacts.md)
 - **GitHub's job lifecycle.** Post steps, timeouts and cancellation behave as they do on GitHub. [Lifecycle](https://github.com/mrmeku/dag/blob/main/packages/dagworkflows/docs/lifecycle.md)
 - **Output for each reader.** A live view in a terminal, a short report for an AI agent, and log groups, check runs and a step summary on GitHub. [Output](https://github.com/mrmeku/dag/blob/main/packages/dagworkflows/docs/output.md)
 - **Secrets stay out of the cache.** Commands see secrets only through the environment, and dagworkflows masks them as GitHub does. [Secrets](https://github.com/mrmeku/dag/blob/main/packages/dagworkflows/docs/secrets.md)

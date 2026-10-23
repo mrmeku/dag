@@ -1,8 +1,9 @@
-import { Graph, namedOutput, soleOutput } from "@mrmeku/dagraph";
+import { Graph, namedOutput } from "@mrmeku/dagraph";
 import {
   createMemoryActionsCache,
   createTestPorts,
   createWorkflow,
+  logPath,
   okExec,
   selectNodes,
   type Ports,
@@ -10,7 +11,7 @@ import {
 import assert from "node:assert/strict";
 import { basename } from "node:path";
 import { describe, test } from "node:test";
-import { processEach } from "./process-each.ts";
+import { CAS, processEach } from "./process-each.ts";
 import release from "./release.ts";
 
 const BASH = ["bash", "--noprofile", "--norc", "-eo", "pipefail", "-c"];
@@ -53,7 +54,6 @@ describe("release workflow", () => {
         assert.ok(result?.status === "done", `${name} is done`);
         return namedOutput(result.outputs, key);
       };
-      const parsed = async (path: string): Promise<unknown> => JSON.parse(await fs.readText(path));
       const restored = resultOf("restore:cas");
       return {
         // The graph a run executes, where the save waits for every node that reads the CAS.
@@ -64,7 +64,8 @@ describe("release workflow", () => {
         ran,
         tarballOf: (name: string) => tarballs.get(ran(name)?.at(-1)),
         output,
-        restored: restored?.status === "done" && (await parsed(soleOutput(restored.outputs))),
+        restored:
+          restored?.status === "done" && (await fs.readText(logPath(CAS, restored.actionKey))),
         saved: [...actionsCache.entries].slice(2),
         uploads: [...actionsArtifact.uploads].map(([name, { files }]) => [
           name,
@@ -136,7 +137,10 @@ describe("release workflow", () => {
           "upload:dagworkflows",
         ],
         // A release restores its own earlier attempt first, a dry run main's.
-        restored: ["dag-release-1.2.3-0", "dag-main-1"],
+        restored: [
+          "Cache restored from key: dag-release-1.2.3-0\n",
+          "Cache restored from key: dag-main-1\n",
+        ],
         saved: [
           [["dag-release-1.2.3-abc1234def", [".dag/cas"]]],
           [["dag-release-0.0.0-dev.abc1234-abc1234def", [".dag/cas"]]],
@@ -210,7 +214,13 @@ describe("release workflow", () => {
             "upload:dagworkflows",
           ],
         },
-        uncached: ["restore:cas", "upload:dagraph", "upload:dagworkflows", "upload:action"],
+        uncached: [
+          "restore:cas",
+          "upload:dagraph",
+          "upload:dagworkflows",
+          "upload:action",
+          "save:cas",
+        ],
         checksAfterRestore: true,
       },
     );

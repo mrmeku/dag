@@ -173,7 +173,7 @@ describe("local session, grouped style", () => {
     });
     const { implementation } = defineWorkflow({
       implementation: (workflow) => {
-        workflow.restoreCache({ name: "restore", path: [".dag/cas"], key: "k" });
+        workflow.cache({ path: [".dag/cas"], key: "k" });
         const lint = workflow.task({ name: "lint", cmd: ["lint"], cacheable: false });
         const up = workflow.task({ name: "../up", cmd: ["up"], cacheable: false });
         const abs = workflow.task({ name: "/abs", cmd: ["up"], cacheable: false });
@@ -197,21 +197,23 @@ describe("local session, grouped style", () => {
         code: 1,
         stdout: [
           "▶ ci flows.ts · 6 nodes",
-          ...["restore", "lint", "../up", "/abs", ":", "require-all"].map((node) => `    ${node}`),
+          ...["restore:cache", "lint", "../up", "/abs", ":", "require-all"].map(
+            (node) => `    ${node}`,
+          ),
           "[warning] dag: failures report off: EACCES: permission denied",
-          "▷ restore",
+          "▷ restore:cache",
           "▷ lint (last run 2.0s)",
           "▷ ../up",
           "▷ /abs",
           "▷ :",
-          "▶ ✔︎ restore (1ms)",
-          "    Cache not found for input keys: k",
           "▶ ✖︎ lint (1ms)",
           "    checking",
           "    \x1b[31merror\x1b[0m",
           "    ── error ──",
           "    lint exited 1",
           "[error] lint: lint exited 1",
+          "▶ ✔︎ restore:cache (1ms)",
+          "    Cache not found for input keys: k",
           "▶ ✔︎ ../up (1ms)",
           "    up",
           "▶ ✔︎ /abs (1ms)",
@@ -232,7 +234,7 @@ describe("local session, grouped style", () => {
         ],
         logs: {
           ".dag/logs/old.log": "a node outside this run\n",
-          ".dag/logs/restore.log": "Cache not found for input keys: k\n",
+          ".dag/logs/restore/cache.log": "Cache not found for input keys: k\n",
           ".dag/logs/lint.log": "checking\nerror\n",
           ".dag/logs/%2E%2E/up.log": "up\n\n",
           ".dag/logs/abs.log": "up\n\n",

@@ -7,6 +7,7 @@ import {
   type NodeRef,
   type ThrottledSchedulerOptions,
 } from "@mrmeku/dagraph";
+import { cache, type ActionsCacheSpec, type ActionsCacheTasks } from "./cache.ts";
 import { addCommand, type CmdTaskSpec, type ShellTaskSpec } from "./commands.ts";
 import type { CiContext, Ports } from "./ports.ts";
 import { post, type PostSpec } from "./post.ts";
@@ -15,13 +16,9 @@ import {
   glob,
   hashFiles,
   requireAll,
-  restoreCache,
-  saveCache,
   uploadArtifact,
   type Main,
   type PostRef,
-  type RestoreCacheRef,
-  type RestoreCacheSpec,
   type UploadArtifactSpec,
 } from "./steps.ts";
 import type { SummaryRenderer } from "./summary.ts";
@@ -73,7 +70,7 @@ export interface Workflow<G extends string = never> {
   >(
     spec: TaskSpec<G, D, O, I>,
   ) => NodeRef<Record<O, string>>;
-  requireAll: (opts: Parameters<typeof requireAll>[1]) => NodeRef<string>;
+  requireAll: (opts: Parameters<typeof requireAll>[1]) => NodeRef<Record<"outcome", string>>;
   /**
    * Adds a task that runs after `main` and every node of the run downstream of it, still owed
    * after a cancel: see `PostSpec`.
@@ -86,17 +83,17 @@ export interface Workflow<G extends string = never> {
   >(
     spec: PostSpec<G, D, O, M>,
   ) => PostRef<Record<O, string>>;
-  /** `actions/cache/restore` as a node. */
-  restoreCache: (spec: RestoreCacheSpec) => RestoreCacheRef;
   /**
-   * `actions/cache/save` as a post of `cache`, the restore it saves for: it waits for every node
-   * of the run downstream of the restore. `deps` are ordinary deps: `deps: { install }`.
+   * `actions/cache` as tasks: adds the restore, `restore:<name>`, and returns it with `save`,
+   * which adds the save, `save:<name>`, a post of the restore: see `ActionsCacheTasks`.
+   * `const cas = workflow.cache({ name: "cas", path: [".dag/cas"], key, restoreKeys })`, then
+   * `deps: { cas: cas.restore }` and `cas.save()`.
    */
-  saveCache: (opts: Parameters<typeof saveCache>[1]) => PostRef<string>;
+  cache: (spec: ActionsCacheSpec) => ActionsCacheTasks;
   /** `actions/upload-artifact` as a node: globs and dep outputs up as one artifact of the run. */
   uploadArtifact: <D extends DepRecord = Record<never, never>>(
     spec: UploadArtifactSpec<D>,
-  ) => NodeRef<string>;
+  ) => NodeRef<Record<"response", string>>;
   /**
    * Adds another workflow's nodes to this graph and returns what its implementation returns:
    * `const { lint } = await workflow.compose(checks)`. Its `schedulerOptions` do not apply, so
@@ -120,8 +117,7 @@ export function createWorkflow<G extends string>(
     task: (spec) => (spec.action === undefined ? addCommand(graph, spec) : addTask(graph, spec)),
     requireAll: (opts) => requireAll(graph, opts),
     post: (spec) => post(graph, spec),
-    restoreCache: (spec) => restoreCache(graph, spec),
-    saveCache: (opts) => saveCache(graph, opts),
+    cache: (spec) => cache(graph, spec),
     uploadArtifact: (spec) => uploadArtifact(graph, spec),
     compose: (other) => other.implementation(graph, ports, ctx),
   };

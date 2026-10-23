@@ -69,7 +69,8 @@ describe("ci workflow", () => {
         requireAllSettledDeps: 6,
         saveCas: {
           name: "save:cas",
-          kind: "save-cache",
+          kind: "save:cas",
+          cacheable: false,
           deps: [
             "restore:cas",
             "pack:dagraph",

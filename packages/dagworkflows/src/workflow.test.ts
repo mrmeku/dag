@@ -139,13 +139,7 @@ describe("two of every node the facade adds", () => {
       implementation: (workflow) => {
         const db = workflow.task({ name: "db", cmd: ["echo", "db up"] });
         for (const x of ["a", "b"]) {
-          const cache = workflow.restoreCache({
-            name: `restore:${x}`,
-            path: [x],
-            key: `${x}-1`,
-            restoreKeys: [`${x}-`],
-          });
-          workflow.saveCache({ name: `save:${x}`, cache });
+          workflow.cache({ name: x, path: [x], key: `${x}-1`, restoreKeys: [`${x}-`] }).save();
           const cmd = workflow.task({ name: `cmd:${x}`, cmd: ["echo", `cmd ${x}`] });
           workflow.task({ name: `shell:${x}`, shell: `echo shell ${x}` });
           const action = workflow.task({
@@ -209,16 +203,18 @@ describe("two of every node the facade adds", () => {
       outputs,
     });
     const pair = (x: string, id: number) => ({
-      [`restore:${x}`]: node(`Cache not found for input keys: ${x}-1, ${x}-`, null),
-      [`save:${x}`]: node(`Cache saved with key: ${x}-1`, id),
+      [`restore:${x}`]: node(`Cache not found for input keys: ${x}-1, ${x}-\n`, {}),
+      [`save:${x}`]: node(`Cache saved with key: ${x}-1\n`, { cacheId: String(id) }),
       [`cmd:${x}`]: node(`cmd ${x}\n`, {}),
       [`shell:${x}`]: node(`echo shell ${x}\n`, {}),
       [`action:${x}`]: node(`action ${x}\n`, { note: x }),
       [`upload:${x}`]: node(
-        `Artifact ${x} has been successfully uploaded! Final size is 1 bytes. Artifact ID is ${id}`,
-        { id, size: 1 },
+        `Artifact ${x} has been successfully uploaded! Final size is 1 bytes. Artifact ID is ${id}\n`,
+        { response: JSON.stringify({ id, size: 1 }, null, 2) },
       ),
-      [`require:${x}`]: node(null, { present: [x], missing: [] }),
+      [`require:${x}`]: node("", {
+        outcome: JSON.stringify({ present: [x], missing: [] }, null, 2),
+      }),
       [`down:${x}`]: node(`down ${x}\n`, {}),
       [`stop:${x}`]: node(`stop ${x}\n`, {}),
       [`clean:${x}`]: node(`echo clean ${x}\n`, {}),
@@ -381,15 +377,42 @@ export function wrongFormsAndPostsDoNotCompile(workflow: Workflow) {
   workflow.uploadArtifact({ name: "p", artifact: "p", path: ["x"], deps: { down } });
   // @ts-expect-error a post's dep in a role of its waits
   workflow.post({ name: "q", main: db, deps: { "downstream:e2e": db }, cmd: ["x"] });
-  const cas = workflow.restoreCache({ name: "restore:cas", path: [".dag/cas"], key: "cas-1" });
-  const save = workflow.saveCache({ name: "save:cas", cache: cas });
+  const cas = workflow.cache({ name: "cas", path: [".dag/cas"], key: "cas-1" });
+  const save = cas.save();
   // @ts-expect-error a save as a task's dep
   workflow.task({ name: "r", deps: { save }, cmd: ["x"] });
   // @ts-expect-error a save in requireAll
   workflow.requireAll({ deps: { save } });
+  // @ts-expect-error a save with cacheable: it is never cached
+  cas.save({ cacheable: true });
   workflow.post({
     name: "s",
     main: save,
-    action: async ({ depOutputs, log }) => log(await depOutputs.main.text()),
+    action: async ({ depOutputs, log }) => log(await depOutputs.main.cacheId.text()),
+  });
+}
+
+/** Typechecked, never run: each line marked @ts-expect-error must not compile. */
+export function uploadPathsReadHandles(workflow: Workflow) {
+  const pack = workflow.task({ name: "pack", cmd: ["pack"], outputs: { tarball: "pkg.tgz" } });
+  // The function gets each dep's outputs as the handles an action reads.
+  workflow.uploadArtifact({
+    name: "a",
+    artifact: "a",
+    deps: { pack },
+    path: ({ pack }) => [pack.tarball],
+  });
+  workflow.uploadArtifact({
+    name: "b",
+    artifact: "b",
+    deps: { pack: settled(pack) },
+    // @ts-expect-error a settled dep that failed is undefined: check it
+    path: ({ pack }) => [pack.tarball],
+  });
+  workflow.uploadArtifact({
+    name: "c",
+    artifact: "c",
+    deps: { pack: settled(pack) },
+    path: ({ pack }) => [pack?.tarball],
   });
 }

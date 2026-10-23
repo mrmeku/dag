@@ -7,7 +7,7 @@ const nodeNames = (graph: Graph<Ports>) => new Set(graph.describe().map((node) =
 
 /**
  * Two or more posts that would wait for each other, which cannot run. The fix converts one whose
- * work reads a main that is not a post, `workflow.post`'s own, into a task naming its deps.
+ * main is not a post into a task of the same form, naming its deps.
  */
 function cycleError(cycle: string[], posts: ReadonlyMap<string, PostRecord>): Error {
   const named = cycle.map((name) => `"${name}"`);
@@ -19,13 +19,14 @@ function cycleError(cycle: string[], posts: ReadonlyMap<string, PostRecord>): Er
     const main = posts.get(name)?.deps.main;
     return main !== undefined && !posts.has(main.name);
   });
-  const main = convertible === undefined ? undefined : posts.get(convertible)?.deps.main;
-  if (convertible === undefined || main === undefined) return new Error(rule);
+  const post = convertible === undefined ? undefined : posts.get(convertible);
+  const main = post?.deps.main;
+  if (convertible === undefined || post === undefined || main === undefined) return new Error(rule);
   const ref = /^[A-Za-z_$][\w$]*$/.test(main.name) ? main.name : "main";
   const given = "settled" in main ? `settled(${ref})` : ref;
   return new Error(
     `${rule} Make one a task, which waits only for the deps it names: ` +
-      `workflow.task({ name: "${convertible}", deps: { main: ${given}, ...deps }, cmd }).`,
+      `workflow.task({ name: "${convertible}", deps: { main: ${given}, ...deps }, ${post.work} }).`,
   );
 }
 

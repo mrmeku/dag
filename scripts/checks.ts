@@ -14,7 +14,7 @@ const REFERENCE_SOURCES = [
 /** Each package packed as a release packs it, so a change that breaks packing fails CI. */
 export async function addPackChecks(
   workflow: Workflow<"test">,
-  after: NodeRef,
+  casRestore: NodeRef,
 ): Promise<Record<string, NodeRef>> {
   const sources = await workflow.glob(
     "packages/*/src/**",
@@ -30,19 +30,18 @@ export async function addPackChecks(
       cmd: ({ outputDir }) => ["bun", "scripts/pack.ts", pkg, PACK_VERSION, outputDir],
       outputs: { tarball: `mrmeku-${pkg}-${PACK_VERSION}.tgz` },
       inputs: sources,
-      deps: { after },
-      invalidateOn: { after: () => "" },
+      deps: { cas: casRestore },
     });
   return { "pack:dagraph": pack("dagraph"), "pack:dagworkflows": pack("dagworkflows") };
 }
 
 export async function addChecks(
   workflow: Workflow<"test">,
-  after: NodeRef,
+  casRestore: NodeRef,
   others: Record<string, NodeRef> = {},
-): Promise<NodeRef<string>> {
-  // Each check orders after the CAS restore but reads nothing from it.
-  const afterRestore = { deps: { after }, invalidateOn: { after: () => "" } };
+): Promise<NodeRef> {
+  // Each check orders after the CAS restore.
+  const afterRestore = { deps: { cas: casRestore } };
   const [all, engine, runner] = await Promise.all([
     workflow.glob("packages/*/src/**", "scripts/**", "eslint.config.ts", ...TOOLCHAIN),
     workflow.glob(ENGINE, ...TOOLCHAIN),

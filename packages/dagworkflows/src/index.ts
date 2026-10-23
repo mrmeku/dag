@@ -8,6 +8,7 @@ export {
   type SettledOutputRef,
   type SettledRef,
 } from "@mrmeku/dagraph";
+export type { ActionsCacheSpec, ActionsCacheTasks } from "./cache.ts";
 export type { CmdTaskSpec, ShellTaskSpec } from "./commands.ts";
 export {
   DEFAULT_CAS_DIR,
@@ -91,8 +92,6 @@ export {
   postNodes,
   type CommandCause,
   type PostRef,
-  type RestoreCacheRef,
-  type RestoreCacheSpec,
   type UploadArtifactSpec,
 } from "./steps.ts";
 export {

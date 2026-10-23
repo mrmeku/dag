@@ -38,14 +38,14 @@ export default defineWorkflow({
     const version = tagged ?? `0.0.0-dev.${workflow.ctx.sha.slice(0, 7) || "local"}`;
     const dryRun = tagged === undefined;
 
-    const cas = workflow.restoreCache({
-      name: "restore:cas",
+    const cas = workflow.cache({
+      name: "cas",
       path: [".dag/cas"],
       key: `dag-release-${version}-${workflow.ctx.sha}`,
       restoreKeys: [`dag-release-${version}-`, "dag-main-"],
     });
-    const afterCas = { deps: { cas }, invalidateOn: { cas: () => "" } };
-    const requireAll = await addChecks(workflow, cas);
+    const afterCas = { deps: { cas: cas.restore } };
+    const requireAll = await addChecks(workflow, cas.restore);
 
     const sources = await workflow.glob(
       "packages/*/src/**",
@@ -124,7 +124,7 @@ export default defineWorkflow({
     });
 
     const release = workflow.requireAll({ name: "release", deps: { ...published, action } });
-    workflow.saveCache({ name: "save:cas", cache: cas });
+    cas.save();
     return { version, dryRun, release };
   },
 });

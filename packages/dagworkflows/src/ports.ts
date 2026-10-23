@@ -50,7 +50,8 @@ export type SyncFs = Pick<
 /**
  * The cache service behind `actions/cache`: the two functions of `@actions/cache`, so that
  * module is itself an ActionsCache and so is any client with the same two. `restoreCache`
- * resolves to the key it restored, or undefined on a miss; `saveCache` to the new entry's id.
+ * resolves to the key it restored, or undefined on a miss, and under `lookupOnly` restores
+ * nothing; `saveCache` resolves to the new entry's id.
  */
 export type ActionsCache = Pick<typeof cache, "restoreCache" | "saveCache">;
 

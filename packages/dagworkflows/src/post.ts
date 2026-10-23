@@ -96,6 +96,7 @@ export function post<D extends DepRecord, O extends string = never, M extends Ma
   };
   const deps = { main, ...spec.deps };
   const ref = add(graph, deps);
-  recordPost(graph, ref.name, { main: main.name, deps, addTo: add });
+  const work = spec.action !== undefined ? "action" : spec.shell !== undefined ? "shell" : "cmd";
+  recordPost(graph, ref.name, { main: main.name, deps, work, addTo: add });
   return postRef(ref);
 }

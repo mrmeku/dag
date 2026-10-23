@@ -13,8 +13,9 @@ export interface MemoryActionsCache extends ActionsCache {
 
 /**
  * An in-memory cache service for tests, with the service's matching rules: the primary key
- * exactly, else each restore key as a prefix, newest entry first. Saving an existing key is a
- * no-op, as on GitHub. It records keys and paths and moves no files.
+ * exactly, else the primary key and then each restore key as a prefix, newest entry first. A
+ * `lookupOnly` lookup answers the same. Saving an existing key is a no-op, as on GitHub; deleting
+ * from `entries` is an eviction. It records keys and paths and moves no files.
  */
 export function createMemoryActionsCache(initialKeys: string[] = []): MemoryActionsCache {
   const entries = new Map<string, string[]>(initialKeys.map((k) => [k, []]));
@@ -23,7 +24,7 @@ export function createMemoryActionsCache(initialKeys: string[] = []): MemoryActi
     restoreCache: async (_paths, primaryKey, restoreKeys = []) => {
       if (entries.has(primaryKey)) return primaryKey;
       const newestFirst = [...entries.keys()].reverse();
-      for (const prefix of restoreKeys) {
+      for (const prefix of [primaryKey, ...restoreKeys]) {
         const hit = newestFirst.find((k) => k.startsWith(prefix));
         if (hit) return hit;
       }

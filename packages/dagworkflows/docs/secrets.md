@@ -27,7 +27,7 @@ On GitHub, dagworkflows writes command output only to the log. Locally, it also 
 
 ## Where logs go
 
-The log of each task is in `.dag/cas.logs`, next to the CAS and not in it. Thus a `workflow.saveCache` of `.dag/cas` does not upload logs.
+The log of each task is in `.dag/cas.logs`, next to the CAS and not in it. Thus a `workflow.cache` of `.dag/cas` does not upload logs.
 
 > [!CAUTION]
 > Cache `.dag/cas`, not all of `.dag`. A pull request can restore a cache entry, also a pull request from a fork.

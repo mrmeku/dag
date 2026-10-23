@@ -16,13 +16,17 @@ import { defineWorkflow } from "@mrmeku/dagworkflows";
 export default defineWorkflow({
   schedulerOptions: { maxParallelism: 4, concurrencyLimits: { test: 2 } },
   implementation: async (workflow) => {
-    const pnpm = workflow.restoreCache({
-      name: "restore:pnpm",
+    const pnpm = workflow.cache({
+      name: "pnpm",
       path: ["~/.local/share/pnpm/store"],
       key: `pnpm-${process.platform}-${await workflow.hash("pnpm-lock.yaml")}`,
       restoreKeys: [`pnpm-${process.platform}-`],
     });
-    const install = workflow.task({ name: "install", cmd: ["pnpm", "install"], deps: { pnpm } });
+    const install = workflow.task({
+      name: "install",
+      cmd: ["pnpm", "install"],
+      deps: { pnpm: pnpm.restore },
+    });
     const src = await workflow.glob("src/**", "package.json", "tsconfig.json");
     const typecheck = workflow.task({
       name: "typecheck",
@@ -44,7 +48,7 @@ export default defineWorkflow({
       concurrencyGroup: "test",
     });
     workflow.requireAll({ deps: { typecheck, lint, test } });
-    workflow.saveCache({ name: "save:pnpm", cache: pnpm, deps: { install } });
+    pnpm.save({ deps: { install } });
   },
 });
 ```
@@ -60,8 +64,7 @@ Each node of the graph is a task. `workflow.task` adds a task whose work is exac
 | `workflow.task`           | A task. Its work is a TypeScript function (`action`), one program (`cmd`) or a string that bash runs (`shell`). |
 | `workflow.requireAll`     | A task that runs no command. It fails if one of its dependencies fails. Use it for many deps.                   |
 | `workflow.post`           | A task that runs after a main task and the tasks that use it. See [Lifecycle](lifecycle.md).                    |
-| `workflow.restoreCache`   | A restore of an `actions/cache` entry. See [Cache and artifacts](cache-and-artifacts.md).                       |
-| `workflow.saveCache`      | A save of an `actions/cache` entry, as a post step of its restore.                                              |
+| `workflow.cache`          | An `actions/cache` restore, and its save as a post step. See [Cache and artifacts](cache-and-artifacts.md).     |
 | `workflow.uploadArtifact` | An upload of an `actions/upload-artifact` artifact.                                                             |
 
 `workflow.requireAll` names its task `require-all` unless you give it a `name`. To add many tasks of one shape, call a function in a loop.
@@ -222,7 +225,7 @@ workflow.task({
 
 The cache key of a task is a hash of these items:
 
-- its kind: `run` for a `cmd` command, `run-shell` for a `shell` command, the task's name for an `action` task, and a kind of its own for each other function, as `save-cache`,
+- its kind: the task's name, or for a command `run` (`cmd`), `run-shell` (`shell`) or `post` (in a post step),
 - each input, by name,
 - for a command, its `cmd` or `shell`, `cwd` and `env`,
 - the role and file name of each declared output,
@@ -244,18 +247,6 @@ These options change how a task uses the cache:
 | `cacheable`         | The default is not correct for the task. See [When a task runs](#when-a-task-runs).                              |
 | `invalidateOn`      | The task reads only part of a dependency's outputs. Give a function that returns the part that the task reads.   |
 | `--force` (the CLI) | You want to ignore the cache for one run.                                                                        |
-
-A constant `invalidateOn` function orders a task after a dependency but keeps that dependency out of the key. Use this for a cache restore:
-
-```typescript
-workflow.task({
-  name: "lint",
-  cmd: ["pnpm", "lint"],
-  inputs: src,
-  deps: { cas },
-  invalidateOn: { cas: () => "" },
-});
-```
 
 ## Outputs
 
@@ -312,13 +303,13 @@ The other workflow's `schedulerOptions` do not apply. Each concurrency group tha
 
 dagworkflows uses the [actions toolkit](https://github.com/actions/toolkit). It does not make its own copy of it:
 
-| Package             | Use in dagworkflows                               |
-| ------------------- | ------------------------------------------------- |
-| `@actions/core`     | Log groups, annotations and the step summary.     |
-| `@actions/github`   | The run's context and the check runs.             |
-| `@actions/cache`    | `workflow.restoreCache` and `workflow.saveCache`. |
-| `@actions/artifact` | `workflow.uploadArtifact`.                        |
-| `@actions/glob`     | `workflow.glob` and `workflow.hash`.              |
+| Package             | Use in dagworkflows                           |
+| ------------------- | --------------------------------------------- |
+| `@actions/core`     | Log groups, annotations and the step summary. |
+| `@actions/github`   | The run's context and the check runs.         |
+| `@actions/cache`    | `workflow.cache`.                             |
+| `@actions/artifact` | `workflow.uploadArtifact`.                    |
+| `@actions/glob`     | `workflow.glob` and `workflow.hash`.          |
 
 Each JSON output of a cache or artifact task holds the value that the toolkit returned, without changes.
 
