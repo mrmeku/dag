@@ -1,46 +1,25 @@
 import { closure, nodeRefNamed, settled, type Graph, type SettledRef } from "@mrmeku/dagraph";
 import type { Ports } from "./ports.ts";
-import { postsOf, recordPost, waitRole, type PostRecord } from "./steps.ts";
+import { postsOf, recordPost, recordSave, savesOf, waitRole, type PostRecord } from "./steps.ts";
 import { depRoles } from "./task.ts";
 
 const nodeNames = (graph: Graph<Ports>) => new Set(graph.describe().map((node) => node.name));
 
-/**
- * Two or more posts that would wait for each other, which cannot run. The fix converts one whose
- * main is not a post into a task of the same form, naming its deps.
- */
-function cycleError(cycle: string[], posts: ReadonlyMap<string, PostRecord>): Error {
-  const named = cycle.map((name) => `"${name}"`);
-  const listed = `${named.slice(0, -1).join(", ")} and ${named.at(-1) ?? ""}`;
-  const rule =
-    `posts ${listed} wait for each other: a post waits for every node downstream of its main, ` +
-    `and each is downstream of another's main, neither main upstream of the other.`;
-  const convertible = cycle.find((name) => {
-    const main = posts.get(name)?.deps.main;
-    return main !== undefined && !posts.has(main.name);
-  });
-  const post = convertible === undefined ? undefined : posts.get(convertible);
-  const main = post?.deps.main;
-  if (convertible === undefined || post === undefined || main === undefined) return new Error(rule);
-  const ref = /^[A-Za-z_$][\w$]*$/.test(main.name) ? main.name : "main";
-  const given = "settled" in main ? `settled(${ref})` : ref;
-  return new Error(
-    `${rule} Make one a task, which waits only for the deps it names: ` +
-      `workflow.task({ name: "${convertible}", deps: { main: ${given}, ...deps }, ${post.work} }).`,
+/** Settled waits on `nodes`, by their wait roles. */
+const waitsOn = (nodes: Iterable<string>) =>
+  Object.fromEntries(
+    [...nodes].map((node): [string, SettledRef] => [waitRole(node), settled(nodeRefNamed(node))]),
   );
-}
 
-/** The posts in an order they can be added: each after the posts it waits for and its main. */
+/**
+ * The posts in an order they can be added: each after the posts it waits for. A post waits only
+ * for posts of mains downstream of its own, so no two wait for each other.
+ */
 function postOrder(posts: ReadonlyMap<string, PostRecord>, waits: Map<string, string[]>) {
   const order: string[] = [];
-  const path: string[] = [];
   const visit = (name: string) => {
     if (order.includes(name)) return;
-    if (path.includes(name)) throw cycleError(path.slice(path.indexOf(name)), posts);
-    path.push(name);
-    for (const before of [...(waits.get(name) ?? []), posts.get(name)?.main ?? ""])
-      if (posts.has(before)) visit(before);
-    path.pop();
+    for (const before of waits.get(name) ?? []) if (posts.has(before)) visit(before);
     order.push(name);
   };
   for (const name of posts.keys()) visit(name);
@@ -49,30 +28,43 @@ function postOrder(posts: ReadonlyMap<string, PostRecord>, waits: Map<string, st
 
 /**
  * The graph a run executes, of `names` (every node unless given): the engine's `closure` of them,
- * with the posts of every main in it and their deps' closure, until nothing more joins. Each post
- * then waits, by a settled dep, for every node of the run downstream of its main, posts of other
- * mains included, but not for the other posts of its own main or for what follows it. Nothing but
- * a post depends on a post, so the posts go last, each after the posts it waits for.
+ * with the posts of every main in it and the saves of every restore in it. Each post then waits,
+ * by a settled dep, for every node of the run downstream of its main, posts of other mains
+ * included, but not for the other posts of its own main. Each save waits for every other node of
+ * the run but the posts and the saves. Nothing depends on a post or a save, so they go last.
+ *
+ * A post requires what its main requires, so it is skipped when its main never started. `paying`
+ * builds the graph of a post pass instead: there an owed post's main started, so the post needs
+ * only its main, and a dep that the workflow file has added to the main since cannot hold it back.
  */
-export function selectNodes(graph: Graph<Ports>, names?: Iterable<string>): Graph<Ports> {
+export function selectNodes(
+  graph: Graph<Ports>,
+  names?: Iterable<string>,
+  paying = false,
+): Graph<Ports> {
   const posts = postsOf(graph);
+  const saves = savesOf(graph);
   let held = nodeNames(closure(graph, names ?? nodeNames(graph)));
   for (;;) {
-    const joining = [...posts].filter(([name, post]) => held.has(post.main) && !held.has(name));
+    const joining = [
+      ...[...posts].filter(([name, post]) => held.has(post.main) && !held.has(name)),
+      ...[...saves].filter(([name, save]) => held.has(save.restore) && !held.has(name)),
+    ];
     if (joining.length === 0) break;
     held = nodeNames(closure(graph, [...held, ...joining.map(([name]) => name)]));
   }
   const run = closure(
     graph,
-    [...held].filter((name) => !posts.has(name)),
+    [...held].filter((name) => !posts.has(name) && !saves.has(name)),
   );
+  const tasks = nodeNames(run);
   const heldPosts = new Map([...posts].filter(([name]) => held.has(name)));
   // Every node of the run with what it depends on, each after its deps: a post after its main.
   const depsOf = new Map([
     ...run.describe().map((node): [string, string[]] => [node.name, node.deps]),
     ...[...heldPosts].map(([name, post]): [string, string[]] => [
       name,
-      depRoles(post.deps).map(([, ref]) => ref.name),
+      depRoles({ ...post.deps, ...post.mainRequires }).map(([, ref]) => ref.name),
     ]),
   ]);
   const downstream = new Map<string, Set<string>>();
@@ -85,19 +77,14 @@ export function selectNodes(graph: Graph<Ports>, names?: Iterable<string>): Grap
     downstream.set(name, found);
     return found;
   };
-  // A post waits for what its main's run reaches, but not for the posts of its own main and what
-  // follows them, nor for a post of a main upstream of its own, which waits for it instead: posts
-  // run in the reverse order of their mains, as GitHub's do.
+  // A post waits for what its main's run reaches, posts of mains downstream of its own included,
+  // but not for the other posts of its own main: posts run in the reverse order of their mains,
+  // as GitHub's do.
   const waits = new Map(
     [...heldPosts].map(([name, post]): [string, string[]] => {
-      const ownPosts = [...heldPosts].filter(([, other]) => other.main === post.main);
-      const afterOwn = new Set(ownPosts.flatMap(([own]) => [own, ...downstreamOf(own)]));
-      const isOuter = (node: string) => {
-        const other = heldPosts.get(node);
-        return other !== undefined && downstreamOf(other.main).has(post.main);
-      };
+      const isOwn = (node: string) => heldPosts.get(node)?.main === post.main;
       const waited = [...depsOf.keys()].filter(
-        (node) => downstreamOf(post.main).has(node) && !afterOwn.has(node) && !isOuter(node),
+        (node) => downstreamOf(post.main).has(node) && !isOwn(node),
       );
       return [name, waited];
     }),
@@ -105,12 +92,14 @@ export function selectNodes(graph: Graph<Ports>, names?: Iterable<string>): Grap
   for (const name of postOrder(heldPosts, waits)) {
     const post = heldPosts.get(name);
     if (!post) continue;
-    const settledWaits = (waits.get(name) ?? []).map((node): [string, SettledRef] => [
-      waitRole(node),
-      settled(nodeRefNamed(node)),
-    ]);
-    post.addTo(run, { ...post.deps, ...Object.fromEntries(settledWaits) });
+    const requires = paying ? {} : post.mainRequires;
+    post.addTo(run, { ...post.deps, ...requires, ...waitsOn(waits.get(name) ?? []) });
     recordPost(run, name, post);
+  }
+  for (const [name, save] of saves) {
+    if (!held.has(name)) continue;
+    save.addTo(run, waitsOn(tasks));
+    recordSave(run, name, save);
   }
   return run;
 }

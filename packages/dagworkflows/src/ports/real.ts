@@ -132,7 +132,19 @@ export function createExec(
 export const syncFs: SyncFs = fs;
 
 export function systemClock(): Clock {
-  return { now: () => Date.now() };
+  return {
+    now: () => Date.now(),
+    sleep: (ms, signal) =>
+      new Promise((resolve) => {
+        const done = () => {
+          clearTimeout(timer);
+          signal?.removeEventListener("abort", done);
+          resolve();
+        };
+        const timer = setTimeout(done, ms);
+        signal?.addEventListener("abort", done, { once: true });
+      }),
+  };
 }
 
 /**

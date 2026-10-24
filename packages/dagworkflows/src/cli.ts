@@ -113,7 +113,7 @@ runCommand.action(async (file, opts) => {
 const postCommand = withCommonOptions(
   program
     .command("post")
-    .description("Run the post steps that stopped runs' histories show as not reached"),
+    .description("Run the post steps that stopped runs' histories show as still owed"),
 );
 /** The options `run` and `post` share; `post` has no others. */
 type CommonOptions = ReturnType<typeof postCommand.opts>;

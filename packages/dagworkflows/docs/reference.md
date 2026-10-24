@@ -17,10 +17,10 @@ npx --no dag run <workflow> [options]
 npx --no dag post <workflow> [options]
 ```
 
-| Command | What it does                                                         |
-| ------- | -------------------------------------------------------------------- |
-| `run`   | Execute a workflow file that default-exports defineWorkflow(...).    |
-| `post`  | Run the post steps that stopped runs' histories show as not reached. |
+| Command | What it does                                                        |
+| ------- | ------------------------------------------------------------------- |
+| `run`   | Execute a workflow file that default-exports defineWorkflow(...).   |
+| `post`  | Run the post steps that stopped runs' histories show as still owed. |
 
 | Option                          | Commands      | Default            | Meaning                                                                                                                    |
 | ------------------------------- | ------------- | ------------------ | -------------------------------------------------------------------------------------------------------------------------- |
@@ -59,11 +59,11 @@ The action has its own copy of `@mrmeku/dagworkflows`. Thus the workflow file lo
 
 ## Exit codes
 
-| Code | `run`                                       | `post`                                   |
-| ---- | ------------------------------------------- | ---------------------------------------- |
-| 0    | All tasks succeeded or came from the cache. | All post steps that it ran succeeded.    |
-| 1    | A task did not succeed.                     | A post step that it ran did not succeed. |
-| 130  | The run was cancelled.                      |                                          |
+| Code | `run`                                                                                         | `post`                                   |
+| ---- | --------------------------------------------------------------------------------------------- | ---------------------------------------- |
+| 0    | All tasks succeeded or came from the cache.                                                   | All post steps that it ran succeeded.    |
+| 1    | A task did not succeed, or a post step that an earlier run owes failed again, so no task ran. | A post step that it ran did not succeed. |
+| 130  | The run was cancelled.                                                                        |                                          |
 
 The action uses the same codes.
 

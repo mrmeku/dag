@@ -82,6 +82,7 @@ describe("ci workflow", () => {
             "require-all",
           ],
           settledDeps: [
+            "restore:cas",
             "pack:dagraph",
             "pack:dagworkflows",
             "typecheck",

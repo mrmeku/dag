@@ -19,25 +19,30 @@ const pnpm = workflow.cache({
   key: `pnpm-${process.platform}-${await workflow.hash("pnpm-lock.yaml")}`,
   restoreKeys: [`pnpm-${process.platform}-`],
 });
-const install = workflow.task({
-  name: "install",
-  cmd: ["pnpm", "install"],
-  deps: { pnpm: pnpm.restore },
-});
-pnpm.save({ deps: { install } });
+workflow.task({ name: "install", cmd: ["pnpm", "install"], deps: { pnpm: pnpm.restore } });
+pnpm.save({ partial: "skip" });
 ```
 
 `name` names the two tasks, `restore:pnpm` and `save:pnpm`. If you do not give a `name`, it is `cache`.
 
-The restore tries `key` first. Then it tries each prefix in `restoreKeys` and takes the newest entry that matches. It writes what it found to its log.
+The restore tries `key` first, also as a prefix. Then it tries each prefix in `restoreKeys` and takes the newest entry that matches. It writes what it found to its log.
 
 The restore has no outputs. Thus a hit and a miss give the tasks that depend on it the same cache key, and `deps: { pnpm: pnpm.restore }` does nothing but order `install` after the restore. No task can tell a hit from a miss. Work that must run only on a miss must check the files itself.
 
-The save is a post step of the restore, as `actions/cache` is a `main` and a `post`. It waits for each task that depends on the restore, directly or through other tasks, whatever that task did, and it runs after a cancellation too. See [Post steps](lifecycle.md#post-steps). Its `deps` are ordinary dependencies: `deps: { install }` saves only after a successful install, so a half-written store is never saved.
+The save waits for every other task of the run, whatever that task did, so a task that you add later is never left out. It does not wait for post steps or for other saves, and no task depends on it. It is an ordinary task, not a post step: a cancellation stops it, and no later run owes it. To save at another point, write the save as your own task: an `action` that calls `ports.actionsCache.saveCache`, with the deps you choose.
 
-The save runs each time, and dagworkflows never caches it. Before it saves, it asks the cache service if it has an entry for `key`. It saves only if the service has none. Thus a second run saves nothing, and an entry that GitHub evicted is saved again. If the cache service refuses the save, the task writes a warning. It does not fail. An invalid key fails it.
+`partial` tells what a run where a task did not succeed saves:
 
-The save writes the value that `@actions/cache` returned to `save.json`: the ID of the entry, or `-1` if the toolkit saved nothing. It writes `null` if the service already had `key`, or refused the save.
+| `partial`          | A run where every task succeeded | A run where a task did not succeed                                                                  |
+| ------------------ | -------------------------------- | --------------------------------------------------------------------------------------------------- |
+| `"save"` (default) | Saves under `key`                | Saves what succeeded under `<key>-partial-<run id>`. The next restore finds it as a prefix of `key` |
+| `"skip"`           | Saves under `key`                | Saves nothing, as `actions/cache` does with `post-if: success()`                                    |
+
+Only a run where every task succeeded saves under `key`. GitHub never replaces an entry, so a failed run that took `key` would keep the next green run from saving. Use `"skip"` for a cache that a failed task can leave half written, such as a package store after a failed install. The CAS writes each entry completely or not at all, so `"save"` suits it.
+
+The save runs each time, and dagworkflows never caches it. Before it saves, it asks the cache service if it has an entry for the key it saves under. It saves only if the service has none. Thus a second run saves nothing, and an entry that GitHub evicted is saved again. If the cache service refuses the save, the task writes a warning. It does not fail. An invalid key fails it.
+
+The save writes the value that `@actions/cache` returned to `save.json`: the ID of the entry, or `-1` if the toolkit saved nothing. It writes `null` if it skipped a partial run, if the service already had the key, or if the service refused the save.
 
 GitHub controls the match order, immutability, branch scope and quotas. See [Dependency caching reference](https://docs.github.com/en/actions/reference/workflows-and-actions/dependency-caching).
 

@@ -206,6 +206,7 @@ describe("release workflow", () => {
             "release",
             "release:action",
             "require-all",
+            "restore:cas",
             "test:dagraph",
             "test:dagworkflows",
             "typecheck",

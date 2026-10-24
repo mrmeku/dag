@@ -30,8 +30,9 @@ before `npm install` has run. Locally, `npx --no dag run scripts/ci.ts` runs the
 What the step summary shows, and in which order, is set in the workflow file with `summary`; see
 [Select the renderers](https://github.com/mrmeku/dag/blob/main/packages/dagworkflows/docs/output.md#select-the-renderers).
 
-The action's `post` runs at the end of the job whatever became of the main step: after a cancel,
-it runs the post steps (cache saves, service shutdowns) the run did not reach.
+The action's `post` runs at the end of the job whatever became of the main step. It runs the post
+steps (service shutdowns) that the run still owes: those a cancel kept from finishing, and those
+that failed every try.
 
 This repository holds build output only. The source, documentation and issues are at
 [mrmeku/dag](https://github.com/mrmeku/dag). Pin to a commit SHA if your policy requires it.

@@ -27,7 +27,11 @@ describe("cache", () => {
   test("the restore logs what it found and has no outputs, so its dependent keys alike after an exact hit, a restore-key hit and a miss", async () => {
     const { ports: p, fs } = createTestPorts();
     const graph = new Graph<Ports>();
-    const cas = cache(graph, { name: "cas", path: [".cas"], key: "cas-2", restoreKeys: ["cas-"] });
+    const cas = cache(
+      graph,
+      { name: "cas", path: [".cas"], key: "cas-2", restoreKeys: ["cas-"] },
+      await p.host.context(),
+    );
     addCommand(graph, {
       name: "lint",
       cmd: ["lint"],
@@ -63,7 +67,7 @@ describe("cache", () => {
     const service = createMemoryActionsCache(["cas-10"]);
     const { ports: p, fs } = createTestPorts({ actionsCache: service });
     const graph = new Graph<Ports>();
-    cache(graph, { name: "cas", path: [".cas"], key: "cas-1" }).save();
+    cache(graph, { name: "cas", path: [".cas"], key: "cas-1" }, await p.host.context()).save();
     const store = new MemCache();
     const saveRun = async () =>
       saveOutcome(
@@ -109,12 +113,13 @@ describe("cache", () => {
       return save(paths, key);
     };
     const graph = new Graph<Ports>();
+    const ctx = await p.host.context();
     for (const [name, key] of [
       ["unreachable", "unreachable"],
       ["refused", "refused"],
       ["invalid", "in,valid"],
     ] as const)
-      cache(graph, { name, path: [name], key }).save();
+      cache(graph, { name, path: [name], key }, ctx).save();
     const saves = (await executeUnder(graph, p)).filter((r) => r.name.startsWith("save:"));
     const outcomes = await Promise.all(
       saves.map(async (r): Promise<[string, unknown]> => [r.name, await saveOutcome(fs, r)]),

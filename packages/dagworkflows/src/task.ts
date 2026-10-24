@@ -13,6 +13,7 @@ import {
 } from "@mrmeku/dagraph";
 import { isAbsolute } from "node:path";
 import { defineStep } from "./define-step.ts";
+import { errorMessage } from "./kernel/format.ts";
 import type { Exec, ExecResult, Ports } from "./ports.ts";
 import { warningLine, writeLog, type CommandCause } from "./step-records.ts";
 
@@ -124,9 +125,17 @@ export function byRole<O extends string, V>(
   return mapped as Record<O, V>;
 }
 
-/** Runs `spec.action` with what a task gets, logging beside `outputDir`, then checks its outputs. */
+/** What a task's facade gives `addTask` beside its fields: a post's delays between its tries. */
+export interface Tries {
+  retryDelaysMs?: readonly number[];
+}
+
+/**
+ * Runs `spec.action` with what a task gets, logging beside `outputDir`, then checks its outputs.
+ * A failed try runs again after each of `retryDelaysMs` in turn, until one succeeds or a cancel.
+ */
 async function runTask<D extends DepRecord, O extends string, I extends InputRecord<unknown>>(
-  spec: TaskFields<string, D, O, I>,
+  spec: TaskFields<string, D, O, I> & Tries,
   {
     inputs: { declaredOutputs: _declaredOutputs, ...inputs },
     output,
@@ -158,8 +167,11 @@ async function runTask<D extends DepRecord, O extends string, I extends InputRec
     return result.stdout;
   };
   const out = byRole(spec.outputs, (file) => outputPath(outputDir, file));
-  try {
-    await spec.action({
+  const delays = spec.retryDelaysMs ?? [];
+  // A cancel or the timeout ends the tries, also during the wait between two.
+  const stopped = () => signal.aborted;
+  const tryAction = () =>
+    spec.action({
       ...context,
       inputs,
       out,
@@ -172,6 +184,21 @@ async function runTask<D extends DepRecord, O extends string, I extends InputRec
       log: logLine,
       warn: (message) => logLine(warningLine(spec.name, message)),
     });
+  try {
+    for (let tried = 0; ; tried++)
+      try {
+        await tryAction();
+        break;
+      } catch (e) {
+        const delay = delays[tried];
+        if (delay === undefined || stopped()) throw e;
+        logLine(
+          `Try ${tried + 1} of ${delays.length + 1} failed: ${errorMessage(e)}. ` +
+            `Trying again in ${delay} ms.`,
+        );
+        await ports.clock.sleep(delay, signal);
+        if (stopped()) throw e;
+      }
     for (const role in out)
       if (!(await ports.fs.exists(out[role])))
         throw failure(
@@ -196,7 +223,7 @@ export function addTask<
   I extends InputRecord<unknown> = Record<never, never>,
 >(
   graph: Graph<Ports>,
-  spec: TaskFields<string, D, O, I>,
+  spec: TaskFields<string, D, O, I> & Tries,
   where = `task "${spec.name}"`,
   deps: DepRecord | undefined = spec.deps,
   kind = spec.name,

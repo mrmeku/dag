@@ -10,31 +10,25 @@ import {
 import { cache, type ActionsCacheSpec, type ActionsCacheTasks } from "./cache.ts";
 import { addCommand, type CmdTaskSpec, type ShellTaskSpec } from "./commands.ts";
 import type { CiContext, Ports } from "./ports.ts";
-import { post, type PostSpec } from "./post.ts";
+import { addPost, type PostField } from "./post.ts";
 import type { Implementation } from "./runner.ts";
-import {
-  glob,
-  hashFiles,
-  requireAll,
-  uploadArtifact,
-  type Main,
-  type PostRef,
-  type UploadArtifactSpec,
-} from "./steps.ts";
+import { glob, hashFiles, requireAll, uploadArtifact, type UploadArtifactSpec } from "./steps.ts";
 import type { SummaryRenderer } from "./summary.ts";
 import { addTask, type ActionTaskSpec } from "./task.ts";
 
 /**
  * What `workflow.task` takes: a node whose work is exactly one of `action`, a TypeScript function
  * (`ActionTaskSpec`); `cmd`, an argv run with no shell (`CmdTaskSpec`); or `shell`, a string
- * run under bash (`ShellTaskSpec`). Giving two does not compile.
+ * run under bash (`ShellTaskSpec`). Giving two does not compile. A task that sets something up
+ * that must be undone, as a database container, gives its release as `post` (`PostSpec`), and is
+ * then never cached.
  */
 export type TaskSpec<
   G extends string,
   D extends DepRecord,
   O extends string,
   I extends InputRecord = Record<never, never>,
-> = ActionTaskSpec<G, D, O, I> | CmdTaskSpec<G, D, O> | ShellTaskSpec<G, D, O>;
+> = (ActionTaskSpec<G, D, O, I> | CmdTaskSpec<G, D, O> | ShellTaskSpec<G, D, O>) & PostField<O>;
 
 /** The concurrency groups that scheduler options declare, or `never` when they declare none. */
 export type GroupsOf<S> = S extends { concurrencyLimits: infer C }
@@ -60,8 +54,10 @@ export interface Workflow<G extends string = never> {
   /** The `hashFiles()` of a workflow file: one hash over the matched files' contents, for a cache key. */
   hash: (...patterns: string[]) => Promise<string>;
   /**
-   * Adds a node whose work is `action`, `cmd` or `shell`: see `TaskSpec`.
-   * `workflow.task({ name: "lint", cmd: ["bun", "run", "lint"], inputs: src })`.
+   * Adds a node whose work is `action`, `cmd` or `shell`, and its `post` when it gives one: see
+   * `TaskSpec`. `workflow.task({ name: "lint", cmd: ["bun", "run", "lint"], inputs: src })`;
+   * `workflow.task({ name: "up:db", cmd: ["compose", "up"], post: { name: "down:db", cmd:
+   * ["compose", "down"] } })`.
    */
   task: <
     D extends DepRecord = Record<never, never>,
@@ -72,20 +68,8 @@ export interface Workflow<G extends string = never> {
   ) => NodeRef<Record<O, string>>;
   requireAll: (opts: Parameters<typeof requireAll>[1]) => NodeRef<Record<"outcome", string>>;
   /**
-   * Adds a task that runs after `main` and every node of the run downstream of it, still owed
-   * after a cancel: see `PostSpec`.
-   * `workflow.post({ name: "down:db", main: settled(db), cmd: ["docker", "rm", "-f", "db"] })`.
-   */
-  post: <
-    D extends DepRecord = Record<never, never>,
-    O extends string = never,
-    M extends Main = Main,
-  >(
-    spec: PostSpec<G, D, O, M>,
-  ) => PostRef<Record<O, string>>;
-  /**
    * `actions/cache` as tasks: adds the restore, `restore:<name>`, and returns it with `save`,
-   * which adds the save, `save:<name>`, a post of the restore: see `ActionsCacheTasks`.
+   * which adds the save, `save:<name>`, after every other node: see `ActionsCacheTasks`.
    * `const cas = workflow.cache({ name: "cas", path: [".dag/cas"], key, restoreKeys })`, then
    * `deps: { cas: cas.restore }` and `cas.save()`.
    */
@@ -114,10 +98,13 @@ export function createWorkflow<G extends string>(
     glob: async (...patterns) =>
       Object.fromEntries((await glob(patterns)).map((path) => [path, file(path)])),
     hash: (...patterns) => hashFiles(patterns),
-    task: (spec) => (spec.action === undefined ? addCommand(graph, spec) : addTask(graph, spec)),
+    task: (spec) => {
+      const ref = spec.action === undefined ? addCommand(graph, spec) : addTask(graph, spec);
+      if (spec.post) addPost(graph, ref, spec.post, spec.deps);
+      return ref;
+    },
     requireAll: (opts) => requireAll(graph, opts),
-    post: (spec) => post(graph, spec),
-    cache: (spec) => cache(graph, spec),
+    cache: (spec) => cache(graph, spec, ctx),
     uploadArtifact: (spec) => uploadArtifact(graph, spec),
     compose: (other) => other.implementation(graph, ports, ctx),
   };

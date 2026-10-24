@@ -21,6 +21,11 @@ export const CHILD_SIGTERM_GRACE_MS = 1000;
  * command settles without it. GitHub's runner waits 5 s; this stays inside the window above.
  */
 export const STREAM_DRAIN_GRACE_MS = 1000;
+/**
+ * A post's backoff, unless it sets `retry: "once"`: after a failed try it runs again after each
+ * delay in turn, so three tries in all, inside its own `timeoutMs`.
+ */
+export const POST_RETRY_DELAYS_MS: readonly number[] = [1_000, 4_000];
 /** Where the local adapter writes the markdown summary GitHub would render on the run page. */
 export const DEFAULT_SUMMARY_PATH = ".dag/summary.md";
 /** Each node's output as it arrives, in `<dir>/<node>.log`. */

@@ -53,10 +53,15 @@ export function createRecordingHost(context: Partial<CiContext> = {}): RecordedH
   return rec;
 }
 
-/** Deterministic clock: each call advances by `step`. */
+/** A clock that reads its time from `now` and whose sleep ends at once: `clockAt(() => now)`. */
+export function clockAt(now: () => number = () => 0): Clock {
+  return { now, sleep: async () => {} };
+}
+
+/** Deterministic clock: each call advances by `step`, and a sleep ends at once. */
 export function steppingClock(start = 0, step = 1000): Clock {
   let t = start - step;
-  return { now: () => (t += step) };
+  return clockAt(() => (t += step));
 }
 
 /** An Exec where every command succeeds silently. */

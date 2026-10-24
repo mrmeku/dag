@@ -18,5 +18,5 @@ inputs:
 runs:
   using: node24
   main: dist/main.js
-  # At the end of the job, whatever became of main: the post steps a cancelled run did not reach.
+  # At the end of the job, whatever became of main: the post steps the run still owes.
   post: dist/post.js

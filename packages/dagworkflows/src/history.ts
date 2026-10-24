@@ -72,11 +72,15 @@ export async function createRunHistory(
     results: history.results,
     started: history.started,
     begin: saveHistory,
-    onEvent: (event: ExecEvent) => {
+    /**
+     * Records a start or a result. For a start it returns the write, which the engine awaits before
+     * the action runs, so a run killed after its command started still shows what it owes.
+     */
+    onEvent: (event: ExecEvent): Promise<void> | undefined => {
       if (event.type === "start") history.started.push(event.node);
       else if (event.type === "result") history.results[event.node] = event.result;
-      else return;
-      void saveHistory();
+      else return undefined;
+      return saveHistory();
     },
     flush: () => chain,
     close: release,

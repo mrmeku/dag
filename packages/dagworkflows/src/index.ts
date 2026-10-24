@@ -8,7 +8,7 @@ export {
   type SettledOutputRef,
   type SettledRef,
 } from "@mrmeku/dagraph";
-export type { ActionsCacheSpec, ActionsCacheTasks } from "./cache.ts";
+export type { ActionsCacheSpec, ActionsCacheTasks, SaveSpec } from "./cache.ts";
 export type { CmdTaskSpec, ShellTaskSpec } from "./commands.ts";
 export {
   DEFAULT_CAS_DIR,
@@ -68,6 +68,7 @@ export {
 } from "./ports/actions-cache.ts";
 export { createLocalHost, nullHost } from "./ports/local.ts";
 export {
+  clockAt,
   createRecordingHost,
   createTestPorts,
   okExec,
@@ -75,7 +76,7 @@ export {
   type RecordedHost,
 } from "./ports/memory.ts";
 export { abortOnSignals, createExec, systemClock } from "./ports/real.ts";
-export type { PostSpec } from "./post.ts";
+export type { PostField, PostSpec } from "./post.ts";
 export { createReporter } from "./reporter.ts";
 export {
   runJob,
@@ -91,7 +92,6 @@ export {
   logPath,
   postNodes,
   type CommandCause,
-  type PostRef,
   type UploadArtifactSpec,
 } from "./steps.ts";
 export {

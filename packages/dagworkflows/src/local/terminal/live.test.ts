@@ -4,7 +4,7 @@ import { EventEmitter } from "node:events";
 import { afterEach, beforeEach, describe, mock, test } from "node:test";
 import { LIVE_FRAME_MS } from "../../config.ts";
 import type { Exec } from "../../ports.ts";
-import { createMemorySyncFs, createTestPorts } from "../../ports/memory.ts";
+import { clockAt, createMemorySyncFs, createTestPorts } from "../../ports/memory.ts";
 import { runJob } from "../../runner.ts";
 import { defineWorkflow, type WorkflowDef } from "../../workflow.ts";
 import { createLocalSession } from "../session.ts";
@@ -86,7 +86,7 @@ function liveRun(workflowDef: WorkflowDef, held: string[], columns = 40, rows = 
   let now = 0;
   const tty = terminal(columns, rows);
   const { exec, command } = heldExec(held);
-  const { ports } = createTestPorts({ exec, clock: { now: () => now } });
+  const { ports } = createTestPorts({ exec, clock: clockAt(() => now) });
   const session = createLocalSession(
     {
       ...workflowDef,

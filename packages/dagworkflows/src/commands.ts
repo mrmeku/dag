@@ -18,6 +18,7 @@ import {
   type OutputsField,
   type TaskContext,
   type TaskFields,
+  type Tries,
 } from "./task.ts";
 
 const COMMAND_INPUT = "command";
@@ -259,7 +260,7 @@ function commandInputs<D extends DepRecord, O extends string>(
  */
 export function addCommand<D extends DepRecord, O extends string = never>(
   graph: Graph<Ports>,
-  spec: CommandFields<string, D, O> & Work<D, O>,
+  spec: CommandFields<string, D, O> & Work<D, O> & Tries,
   where = `task "${spec.name}"`,
   deps: DepRecord | undefined = spec.deps,
   kind = spec.shell === undefined ? "run" : "run-shell",

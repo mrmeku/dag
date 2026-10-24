@@ -53,7 +53,7 @@ const result = await processNode(graph, name, depEntries, executionContext, opti
 | `cacheOnly` | Look the node up without running it. A node without a verified entry fails with `NOT_CACHED` as its error's message. A `cacheable: false` node has no entry, so it fails too. With `force`, there is no lookup, so the node fails as not cached at once. |
 | `signal`    | The execution's cancel. The node gets it through its action context.                                                                                                                                                                                     |
 | `acquire`   | The gate that processing awaits after a miss, before the action runs.                                                                                                                                                                                    |
-| `onEvent`   | Gets the node's `start` and `output` events, before its result returns.                                                                                                                                                                                  |
+| `onEvent`   | Gets the node's `start` and `output` events, before its result returns. The action waits for the promise that it returns for `start`. See [Events](execution.md#events).                                                                                 |
 
 ## Process nodes in other processes
 

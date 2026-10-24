@@ -117,7 +117,7 @@ export default defineWorkflow({
 ```
 
 - `deps: { cas: cas.restore }` starts each check after the restore. The restore has no outputs, so a hit and a miss give each check the same cache key.
-- The save is a post step of the restore. It waits for each task that depends on the restore, directly or through other tasks, and it saves also when a check fails.
+- The save waits for every other task. When a check fails, it saves what succeeded under a partial key, which the next run restores; only a green run takes the key. A cancellation stops it.
 
 ## Features
 
@@ -172,7 +172,7 @@ reproduce: npx --no dag run scripts/ci.ts --only test:unit
 ## Compared to other tools
 
 - **[act](https://github.com/nektos/act)** runs your YAML workflows locally, in Docker. dagworkflows replaces the steps of one job with a TypeScript graph of tasks and caches them. It does not use Docker.
-- **[Turborepo](https://turborepo.com), [Nx](https://nx.dev) and [wireit](https://github.com/google/wireit)** run the scripts of a repository as a cached graph. dagworkflows does this for the steps of a CI job. GitHub's cache, artifacts, post steps and check runs are tasks in its graph.
+- **[Turborepo](https://turborepo.com), [Nx](https://nx.dev) and [wireit](https://github.com/google/wireit)** run the scripts of a repository as a cached graph. dagworkflows does this for the steps of a CI job. GitHub's cache, artifacts and check runs are tasks in its graph, and a post step is a field of its task.
 - **Several GitHub Actions jobs** also run in parallel. But each job needs a new runner, a checkout and an install. dagworkflows runs the tasks in parallel on one runner.
 
 ## Documentation

@@ -6,6 +6,7 @@ import { describe, test } from "node:test";
 import { logPath, runWorkflow, settled, type OutputRef } from "./index.ts";
 import type { Ports } from "./ports.ts";
 import { createTestPorts } from "./ports/memory.ts";
+import type { PostSpec } from "./post.ts";
 import { createWorkflow, defineWorkflow, type Workflow } from "./workflow.ts";
 
 describe("defineWorkflow", () => {
@@ -13,10 +14,14 @@ describe("defineWorkflow", () => {
     const def = defineWorkflow({
       schedulerOptions: { concurrencyLimits: { heavy: 1 } },
       implementation: (workflow) => {
-        const a = workflow.task({ name: "a", cmd: ["x"], concurrencyGroup: "heavy" });
+        const a = workflow.task({
+          name: "a",
+          cmd: ["x"],
+          concurrencyGroup: "heavy",
+          post: { name: "a:post", cmd: ["z"] },
+        });
         // @ts-expect-error "light" is not a declared concurrency group
         const b = workflow.task({ name: "b", cmd: ["y"], concurrencyGroup: "light", deps: { a } });
-        workflow.post({ name: "a:post", main: a, cmd: ["z"] });
         workflow.requireAll({ deps: { a, b } });
       },
     });
@@ -32,8 +37,8 @@ describe("defineWorkflow", () => {
         schedulerOptions: { concurrencyLimits: { heavy: 1 } },
         nodes: [
           ["a", [], "heavy"],
-          ["b", ["a"], "light"],
           ["a:post", ["a"], null],
+          ["b", ["a"], "light"],
           ["require-all", ["a", "b"], null],
         ],
       },
@@ -137,7 +142,6 @@ describe("two of every node the facade adds", () => {
     });
     const { implementation } = defineWorkflow({
       implementation: (workflow) => {
-        const db = workflow.task({ name: "db", cmd: ["echo", "db up"] });
         for (const x of ["a", "b"]) {
           workflow.cache({ name: x, path: [x], key: `${x}-1`, restoreKeys: [`${x}-`] }).save();
           const cmd = workflow.task({ name: `cmd:${x}`, cmd: ["echo", `cmd ${x}`] });
@@ -157,9 +161,21 @@ describe("two of every node the facade adds", () => {
             path: ({ action }) => [action.note],
           });
           workflow.requireAll({ name: `require:${x}`, deps: { [x]: cmd } });
-          workflow.post({ name: `down:${x}`, main: db, action: ({ log }) => log(`down ${x}`) });
-          workflow.post({ name: `stop:${x}`, main: db, cmd: ["echo", `stop ${x}`] });
-          workflow.post({ name: `clean:${x}`, main: db, shell: `echo clean ${x}` });
+          workflow.task({
+            name: `up:${x}`,
+            cmd: ["echo", `up ${x}`],
+            post: { name: `down:${x}`, action: ({ log }) => log(`down ${x}`) },
+          });
+          workflow.task({
+            name: `start:${x}`,
+            cmd: ["echo", `start ${x}`],
+            post: { name: `stop:${x}`, cmd: ["echo", `stop ${x}`] },
+          });
+          workflow.task({
+            name: `make:${x}`,
+            cmd: ["echo", `make ${x}`],
+            post: { name: `clean:${x}`, shell: `echo clean ${x}` },
+          });
         }
       },
     });
@@ -215,6 +231,9 @@ describe("two of every node the facade adds", () => {
       [`require:${x}`]: node("", {
         outcome: JSON.stringify({ present: [x], missing: [] }, null, 2),
       }),
+      [`up:${x}`]: node(`up ${x}\n`, {}),
+      [`start:${x}`]: node(`start ${x}\n`, {}),
+      [`make:${x}`]: node(`make ${x}\n`, {}),
       [`down:${x}`]: node(`down ${x}\n`, {}),
       [`stop:${x}`]: node(`stop ${x}\n`, {}),
       [`clean:${x}`]: node(`echo clean ${x}\n`, {}),
@@ -222,7 +241,7 @@ describe("two of every node the facade adds", () => {
     assert.deepEqual(
       { nodes, saved: Object.fromEntries(actionsCache.entries) },
       {
-        nodes: { db: node("db up\n", {}), ...pair("a", 1), ...pair("b", 2) },
+        nodes: { ...pair("a", 1), ...pair("b", 2) },
         saved: { "a-1": ["a"], "b-1": ["b"] },
       },
     );
@@ -318,15 +337,12 @@ export function wrongCommandsDoNotCompile(workflow: Workflow) {
   workflow.task({ name: "l", deps: { out: pack }, cmd: ["x"] });
   // @ts-expect-error a dep whose role is outputDir
   workflow.task({ name: "m", deps: { outputDir: pack }, cmd: ["x"] });
-  // @ts-expect-error a post's dep whose role is out
-  workflow.post({ name: "q", main: pack, deps: { out: tests }, cmd: ["x"] });
-  // @ts-expect-error a post's dep whose role is main, which its functions get as main's outputs
-  workflow.post({ name: "r", main: pack, deps: { main: tests }, cmd: ["x"] });
 }
 
 /** Typechecked, never run: each line marked @ts-expect-error must not compile. */
 export function wrongFormsAndPostsDoNotCompile(workflow: Workflow) {
-  const db = workflow.task({ name: "up:db", cmd: ["db", "start"], outputs: { id: "id" } });
+  const up = (post: PostSpec<"id">) =>
+    workflow.task({ name: "up:db", cmd: ["db", "start"], outputs: { id: "id" }, post });
   // @ts-expect-error both action and cmd
   workflow.task({ name: "a", action: () => {}, cmd: ["x"] });
   // @ts-expect-error both action and shell
@@ -336,60 +352,32 @@ export function wrongFormsAndPostsDoNotCompile(workflow: Workflow) {
   // @ts-expect-error neither action, cmd nor shell
   workflow.task({ name: "d" });
   // @ts-expect-error a post with both cmd and shell
-  workflow.post({ name: "e", main: db, cmd: ["x"], shell: "x" });
+  up({ name: "e", cmd: ["x"], shell: "x" });
   // @ts-expect-error a post with inputs: it is never cached
-  workflow.post({ name: "f", main: db, cmd: ["x"], inputs: { version: "f-v1" } });
+  up({ name: "f", cmd: ["x"], inputs: { version: "f-v1" } });
   // @ts-expect-error a post with cacheable
-  workflow.post({ name: "g", main: db, cmd: ["x"], cacheable: true });
+  up({ name: "g", cmd: ["x"], cacheable: true });
   // @ts-expect-error a post with invalidateOn
-  workflow.post({ name: "h", main: db, cmd: ["x"], invalidateOn: { main: () => "" } });
-  // @ts-expect-error a post with no main
-  workflow.post({ name: "i", cmd: ["x"] });
-  const down = workflow.post({
+  up({ name: "h", cmd: ["x"], invalidateOn: { main: () => "" } });
+  up({
     name: "down:db",
-    main: settled(db),
     shell: 'if [ -f "$ID" ]; then docker rm -f "$(cat "$ID")"; fi',
     env: ({ main }) => ({ ID: main.id }),
   });
-  // @ts-expect-error a settled main's output as an argument: it may be missing
-  workflow.post({ name: "j", main: settled(db), cmd: ({ main }) => ["db", "stop", main.id] });
-  workflow.post({ name: "k", main: db, cmd: ({ main }) => ["db", "stop", main.id] });
-  workflow.post({
-    name: "l",
-    main: settled(db),
-    action: async ({ depOutputs }) => void (await depOutputs.main?.id.text()),
-  });
-  workflow.post({
+  // @ts-expect-error its task's output as an argument: a task that failed may not have written it
+  up({ name: "j", cmd: ({ main }) => ["db", "stop", main.id] });
+  up({ name: "l", action: async ({ depOutputs }) => void (await depOutputs.main?.id.text()) });
+  up({
     name: "m",
-    main: settled(db),
-    // @ts-expect-error under settled, an action's main may be undefined
+    // @ts-expect-error an action's main may be undefined: its task may have failed
     action: async ({ depOutputs }) => void (await depOutputs.main.id.text()),
   });
-  // A post of a post.
-  workflow.post({ name: "report", main: down, cmd: ["report"] });
-  // @ts-expect-error a post as a task's dep
-  workflow.task({ name: "n", deps: { down }, cmd: ["x"] });
-  // @ts-expect-error a post as another post's dep
-  workflow.post({ name: "o", main: db, deps: { down }, cmd: ["x"] });
-  // @ts-expect-error a post in requireAll
-  workflow.requireAll({ deps: { down } });
-  // @ts-expect-error a post as an upload's dep
-  workflow.uploadArtifact({ name: "p", artifact: "p", path: ["x"], deps: { down } });
-  // @ts-expect-error a post's dep in a role of its waits
-  workflow.post({ name: "q", main: db, deps: { "downstream:e2e": db }, cmd: ["x"] });
+  // @ts-expect-error a retry that is neither backoff nor once
+  up({ name: "n", cmd: ["x"], retry: "forever" });
   const cas = workflow.cache({ name: "cas", path: [".dag/cas"], key: "cas-1" });
-  const save = cas.save();
-  // @ts-expect-error a save as a task's dep
-  workflow.task({ name: "r", deps: { save }, cmd: ["x"] });
-  // @ts-expect-error a save in requireAll
-  workflow.requireAll({ deps: { save } });
+  cas.save({ partial: "skip" });
   // @ts-expect-error a save with cacheable: it is never cached
   cas.save({ cacheable: true });
-  workflow.post({
-    name: "s",
-    main: save,
-    action: async ({ depOutputs, log }) => log(await depOutputs.main.cacheId.text()),
-  });
 }
 
 /** Typechecked, never run: each line marked @ts-expect-error must not compile. */

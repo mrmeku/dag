@@ -48,7 +48,7 @@ export default defineWorkflow({
       concurrencyGroup: "test",
     });
     workflow.requireAll({ deps: { typecheck, lint, test } });
-    pnpm.save({ deps: { install } });
+    pnpm.save({ partial: "skip" });
   },
 });
 ```
@@ -57,15 +57,14 @@ The sections that follow explain each part of this example.
 
 ## Tasks
 
-Each node of the graph is a task. `workflow.task` adds a task whose work is exactly one of `action`, `cmd` or `shell`. A task that gives two of them does not compile. The other functions add tasks for a common case.
+Each node of the graph is a task. `workflow.task` adds a task whose work is exactly one of `action`, `cmd` or `shell`. A task that gives two of them does not compile. A task that sets up something to release, such as a database container, gives its release as its `post` field. See [Lifecycle](lifecycle.md#post-steps). The other functions add tasks for a common case.
 
-| Function                  | Adds                                                                                                            |
-| ------------------------- | --------------------------------------------------------------------------------------------------------------- |
-| `workflow.task`           | A task. Its work is a TypeScript function (`action`), one program (`cmd`) or a string that bash runs (`shell`). |
-| `workflow.requireAll`     | A task that runs no command. It fails if one of its dependencies fails. Use it for many deps.                   |
-| `workflow.post`           | A task that runs after a main task and the tasks that use it. See [Lifecycle](lifecycle.md).                    |
-| `workflow.cache`          | An `actions/cache` restore, and its save as a post step. See [Cache and artifacts](cache-and-artifacts.md).     |
-| `workflow.uploadArtifact` | An upload of an `actions/upload-artifact` artifact.                                                             |
+| Function                  | Adds                                                                                                                |
+| ------------------------- | ------------------------------------------------------------------------------------------------------------------- |
+| `workflow.task`           | A task. Its work is a TypeScript function (`action`), one program (`cmd`) or a string that bash runs (`shell`).     |
+| `workflow.requireAll`     | A task that runs no command. It fails if one of its dependencies fails. Use it for many deps.                       |
+| `workflow.cache`          | An `actions/cache` restore, and its save after every other task. See [Cache and artifacts](cache-and-artifacts.md). |
+| `workflow.uploadArtifact` | An upload of an `actions/upload-artifact` artifact.                                                                 |
 
 `workflow.requireAll` names its task `require-all` unless you give it a `name`. To add many tasks of one shape, call a function in a loop.
 

@@ -1,7 +1,7 @@
 import type { CacheEntry } from "./cache.ts";
 import { ExecState, type Ready } from "./exec-state.ts";
 import type { Node } from "./graph/index.ts";
-import type { ExecEvent, Result } from "./types.ts";
+import type { ExecEvent, ExecListener, Result } from "./types.ts";
 import { errorOf } from "./utils.ts";
 
 export type { Ready } from "./exec-state.ts";
@@ -52,7 +52,7 @@ export async function orchestrate<Meta>(
   nodes: Iterable<Node<Meta>>,
   run: RunNode<Meta>,
   schedule: Scheduler,
-  onEvent?: (event: ExecEvent<Meta>) => void,
+  onEvent?: ExecListener<Meta>,
   signal?: AbortSignal,
 ): Promise<Result[]> {
   const all = [...nodes];
@@ -70,10 +70,14 @@ export async function orchestrate<Meta>(
   signal?.addEventListener("abort", wake, { once: true });
   let listenerError: { thrown: unknown } | undefined;
   const emit = (event: ExecEvent<Meta>) => {
-    try {
-      onEvent?.(event);
-    } catch (thrown) {
+    const failed = (thrown: unknown) => {
       listenerError ??= { thrown };
+    };
+    try {
+      const returned = onEvent?.(event);
+      if (returned instanceof Promise) returned.catch(failed);
+    } catch (thrown) {
+      failed(thrown);
     }
   };
   /** Resolves the scheduler's `run` for the place each node holds. */

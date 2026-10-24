@@ -160,6 +160,14 @@ With this stream you can make a progress view, a log file for each node or a liv
 
 If `onEvent` throws on a `dispatch` or a `result`, the execution continues to its end. Then it rejects with the first error that `onEvent` threw.
 
+For a `start`, `onEvent` can return a promise. The action runs only after the promise resolves. Thus a journal can record the start before the action has any effect, and a run that is killed after that still shows that the node started. If the promise rejects, the node fails and its action does not run. The engine does not wait for the promise of any other event.
+
+```typescript
+await execute(graph, context, {
+  onEvent: (event) => (event.type === "start" ? journal.recordStart(event.node) : undefined),
+});
+```
+
 A `failed` result holds the error's `name`, its `message` and its `cause`, converted as [Results](#results) tells. Thus a listener can tell why a node failed, for example a command's exit code, without reading the node's files.
 
 ## Timeouts and cancellation

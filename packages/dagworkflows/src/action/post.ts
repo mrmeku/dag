@@ -1,7 +1,7 @@
 /**
  * dagworkflows as a JavaScript action, `post` entry: GitHub runs it at the end of the job whatever
  * became of `main`, in its own process. It runs the post steps the main run's history shows as
- * not reached: none after an ordinary run, the owed ones after a cancel or a kill.
+ * still owed: those a cancel or a kill kept from finishing, and those that failed every try.
  */
 import { runPost } from "../runner.ts";
 import { actionOptions } from "./env.ts";

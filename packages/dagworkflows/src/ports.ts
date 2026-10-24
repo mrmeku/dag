@@ -36,6 +36,8 @@ export interface Exec {
 
 export interface Clock {
   now: () => number;
+  /** Resolves after `ms`, or at once when `signal` aborts. */
+  sleep: (ms: number, signal?: AbortSignal) => Promise<void>;
 }
 
 /**

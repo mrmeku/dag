@@ -1481,6 +1481,44 @@ describe("verify outputs on a cache hit", () => {
   });
 });
 
+test("a listener's promise for a start holds the action back until it resolves, and one that rejects fails the node without running it", async () => {
+  const { ctx } = setup();
+  const ran: string[] = [];
+  const g = new Graph<Ports>();
+  for (const name of ["recorded", "unrecorded"])
+    task(g, name, {
+      run: () => {
+        ran.push(name);
+        return name;
+      },
+    });
+  const recording = Promise.withResolvers<void>();
+  const recorded = Promise.withResolvers<void>();
+  const execution = execute(g, ctx, {
+    onEvent: (e) => {
+      if (e.type !== "start") return undefined;
+      if (e.node === "unrecorded") return Promise.reject(new Error("the journal is full"));
+      recording.resolve();
+      return recorded.promise;
+    },
+  });
+  await recording.promise;
+  const ranWhileRecording = [...ran];
+  recorded.resolve();
+  const results = await execution;
+  expect({
+    ranWhileRecording,
+    ran,
+    results: Object.fromEntries(
+      results.map((r) => [r.name, r.status === "failed" ? r.error.message : r.status]),
+    ),
+  }).toEqual({
+    ranWhileRecording: [],
+    ran: ["recorded"],
+    results: { recorded: "done", unrecorded: "the journal is full" },
+  });
+});
+
 test("an interrupted execution resumes from where it left off", async () => {
   const { ctx } = setup();
   let bFails = true;

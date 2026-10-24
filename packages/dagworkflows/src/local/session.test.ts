@@ -11,7 +11,7 @@ import { LIVE_FRAME_MS, type OutputStyle } from "../config.ts";
 import { defineStep } from "../define-step.ts";
 import { errorMessage } from "../kernel/format.ts";
 import type { Exec, ExecResult, Ports } from "../ports.ts";
-import { createMemorySyncFs, createTestPorts } from "../ports/memory.ts";
+import { clockAt, createMemorySyncFs, createTestPorts } from "../ports/memory.ts";
 import { runJob, type RunOptions } from "../runner.ts";
 import { defineWorkflow } from "../workflow.ts";
 import { createLocalSession } from "./session.ts";
@@ -169,7 +169,7 @@ describe("local session, grouped style", () => {
         up: { chunks: ["up\n\n"], code: 0 },
       }),
       files: { "/cas/last-run.json": JSON.stringify({ durations: { lint: 2000 } }) },
-      clock: { now: () => 0 },
+      clock: clockAt(),
     });
     const { implementation } = defineWorkflow({
       implementation: (workflow) => {
@@ -206,14 +206,14 @@ describe("local session, grouped style", () => {
           "▷ ../up",
           "▷ /abs",
           "▷ :",
+          "▶ ✔︎ restore:cache (1ms)",
+          "    Cache not found for input keys: k",
           "▶ ✖︎ lint (1ms)",
           "    checking",
           "    \x1b[31merror\x1b[0m",
           "    ── error ──",
           "    lint exited 1",
           "[error] lint: lint exited 1",
-          "▶ ✔︎ restore:cache (1ms)",
-          "    Cache not found for input keys: k",
           "▶ ✔︎ ../up (1ms)",
           "    up",
           "▶ ✔︎ /abs (1ms)",
@@ -256,7 +256,7 @@ describe("local session, failures style", () => {
         upload: { chunks: ["ECONNREFUSED 127.0.0.1:9000\n"], code: 3 },
         pack: { chunks: ["packed\n", `${"=".repeat(600)}\n`], code: 0 },
       }),
-      clock: { now: () => 0 },
+      clock: clockAt(),
     });
     const { implementation } = defineWorkflow({
       implementation: (workflow) => {
@@ -407,7 +407,7 @@ describe("local session, failures style", () => {
           return { code, stdout: output, stderr: "", output, ok: code === 0 };
         },
       },
-      clock: { now: () => 0 },
+      clock: clockAt(),
     });
     const { implementation } = defineWorkflow({
       implementation: (workflow) => {
@@ -487,7 +487,7 @@ describe("local session, failures style", () => {
           return new Promise((resolve) => (exit = resolve));
         },
       },
-      clock: { now: () => 0 },
+      clock: clockAt(),
     });
     const { implementation } = defineWorkflow({
       implementation: (workflow) => {
@@ -649,7 +649,7 @@ describe("local session, failures style, at the edges", () => {
           );
         },
       },
-      clock: { now: () => 0 },
+      clock: clockAt(),
     });
     const upload = defineStep({
       kind: "upload",
@@ -800,7 +800,7 @@ describe("local session, failures style, at the edges", () => {
 
   test("a cancel, then a forced exit while the post pass runs", RUN_TIMEOUT, async (t) => {
     let started = () => {};
-    const saving = new Promise<void>((resolve) => (started = resolve));
+    const releasing = new Promise<void>((resolve) => (started = resolve));
     let exit = (_: ExecResult) => {};
     const { ports } = createTestPorts({
       exec: {
@@ -814,26 +814,26 @@ describe("local session, failures style, at the edges", () => {
               }),
             );
           }
-          if (cmd[0] !== "save")
+          if (cmd[0] !== "release")
             return scriptedExec({ fast: { chunks: ["fast ok\n"], code: 0 } }).run(cmd, opts);
-          opts?.onOutput?.("saving\nhalf");
+          opts?.onOutput?.("releasing\nhalf");
           started();
           // It ignores signals, so only a second Ctrl-C ends it.
           return new Promise((resolve) => (exit = resolve));
         },
       },
-      clock: { now: () => 0 },
+      clock: clockAt(),
     });
     const { implementation } = defineWorkflow({
       implementation: (workflow) => {
-        const fast = workflow.task({ name: "fast", cmd: ["fast"], cacheable: false });
-        const slow = workflow.task({ name: "slow", cmd: ["slow"], cacheable: false });
-        workflow.post({
-          name: "save",
-          main: fast,
-          cmd: ["save"],
-          deps: { slow: settled(slow) },
+        // The release waits for slow, which uses what fast set up. One try: the forced exit ends
+        // the process, which the test cannot.
+        const fast = workflow.task({
+          name: "fast",
+          cmd: ["fast"],
+          post: { name: "release", cmd: ["release"], retry: "once" },
         });
+        workflow.task({ name: "slow", cmd: ["slow"], deps: { fast }, cacheable: false });
       },
     });
     const session = localRun("failures", ports, { implementation });
@@ -841,7 +841,7 @@ describe("local session, failures style, at the edges", () => {
     const job = session.job(controller.signal);
     await waitUntil(t, () => !!session.logs()[".dag/logs/slow.log"]);
     controller.abort();
-    await saving;
+    await releasing;
     session.processEvents.emit("exit");
     const atExit = { stdout: session.stdout(), report: session.report(), logs: session.logs() };
     exit({ code: 130, stdout: "", stderr: "", output: "", ok: false });
@@ -852,7 +852,7 @@ describe("local session, failures style, at the edges", () => {
         "summary: .dag/summary.md",
         "post · 1 of 1 post steps owed",
         "",
-        "◼︎ forced exit while save ran · report .dag/failures.md",
+        "◼︎ forced exit while release ran · report .dag/failures.md",
         "",
       ],
       report: [
@@ -861,7 +861,7 @@ describe("local session, failures style, at the edges", () => {
         "status: interrupted · started 1970-01-01T00:00:00.000Z",
         "◼︎ cancelled, 1 node not run · built 1 · cached 0 · failed 0 · skipped 0 · cancelled 1",
         "",
-        "A forced exit stopped the run while `save` ran.",
+        "A forced exit stopped the run while `release` ran.",
         "",
         "No failures.",
         "",
@@ -871,7 +871,7 @@ describe("local session, failures style, at the edges", () => {
       logs: {
         ".dag/logs/fast.log": "fast ok\n",
         ".dag/logs/slow.log": "compiling\n",
-        ".dag/logs/save.log": "saving\nhalf\n",
+        ".dag/logs/release.log": "releasing\nhalf\n",
       },
     });
   });
@@ -889,21 +889,20 @@ describe("local session, failures style, at the edges", () => {
           );
         },
       },
-      clock: { now: () => 0 },
+      clock: clockAt(),
     });
     let builds = 0;
     const { implementation } = defineWorkflow({
       implementation: (workflow) => {
         // The post pass builds the graph again, which this workflow cannot.
         if (builds++ > 0) throw new Error("second build");
-        const fast = workflow.task({ name: "fast", cmd: ["fast"], cacheable: false });
-        const slow = workflow.task({ name: "slow", cmd: ["slow"], cacheable: false });
-        workflow.post({
-          name: "save",
-          main: fast,
-          cmd: ["save"],
-          deps: { slow: settled(slow) },
+        // The release waits for slow, which uses what fast set up.
+        const fast = workflow.task({
+          name: "fast",
+          cmd: ["fast"],
+          post: { name: "release", cmd: ["release"] },
         });
+        workflow.task({ name: "slow", cmd: ["slow"], deps: { fast }, cacheable: false });
       },
     });
     const session = localRun("failures", ports, { implementation });
@@ -966,7 +965,7 @@ describe("local session, live style", () => {
           "/cas.logs/k1.log": "checking src\nsrc/a.ts:1:1 error no-console\n",
           "/cas.logs/kb.log": "\x1b[1mbundled\x1b[22m 3 files\n",
         },
-        clock: { now: () => now },
+        clock: clockAt(() => now),
       });
       const session = localRun("live", ports, {
         schedulerOptions: { maxParallelism: 4, concurrencyLimits: { test: 1 } },
@@ -1136,19 +1135,17 @@ describe("local session, live style", () => {
           );
         },
       },
-      clock: { now: () => now },
+      clock: clockAt(() => now),
     });
     const { implementation } = defineWorkflow({
       implementation: (workflow) => {
-        const fast = workflow.task({ name: "fast", cmd: ["fast"], cacheable: false });
-        const slow = workflow.task({ name: "slow", cmd: ["slow"], cacheable: false });
-        workflow.post({
-          name: "teardown",
-          main: fast,
-          cmd: ["teardown"],
-          deps: { slow: settled(slow) },
+        // The release waits for slow, which uses what fast set up.
+        const fast = workflow.task({
+          name: "fast",
+          cmd: ["fast"],
+          post: { name: "teardown", cmd: ["teardown"] },
         });
-        workflow.post({ name: "save", main: fast, cmd: ["save"], deps: { slow } });
+        workflow.task({ name: "slow", cmd: ["slow"], deps: { fast }, cacheable: false });
       },
     });
     const session = localRun("live", ports, { implementation });
@@ -1181,28 +1178,26 @@ describe("local session, live style", () => {
       {
         code: 130,
         cancelling: [
-          "ci.ts · 4 nodes · logs .dag/logs/",
+          "ci.ts · 3 nodes · logs .dag/logs/",
           "✔︎ fast     0.0s · 1 line",
           "⠋ slow     31.0s  killed by SIGINT",
           "· teardown waits on slow",
-          "· save     waits on slow",
-          "[1/4] cancelling: waiting for 1 runnin…",
+          "[1/3] cancelling: waiting for 1 runnin…",
         ],
         final: [
-          "ci.ts · 4 nodes · logs .dag/logs/",
+          "ci.ts · 3 nodes · logs .dag/logs/",
           "✔︎ fast     0.0s · 1 line",
           "◼︎ slow     cancelled after 31.0s",
           "summary: .dag/summary.md",
-          // Owed, since its main ran, and skipped there: its required dep was cancelled.
-          "post · 2 of 2 post steps owed",
-          "⏭︎ save     skipped",
+          // Owed, since fast started.
+          "post · 1 of 1 post steps owed",
           "✔︎ teardown 0.0s · 1 line",
           "summary: .dag/summary.md",
           "",
-          "◼︎ cancelled, 2 nodes not run · ci.ts · w",
-          "all 31.0s",
+          "◼︎ cancelled, 1 node not run · ci.ts · wa",
+          "ll 31.0s",
           "built 2 · cached 0 · failed 0 · skipped ",
-          "1 · cancelled 1",
+          "0 · cancelled 1",
           "",
           "logs     .dag/logs/",
           "after the run",
@@ -1221,7 +1216,7 @@ describe("local session, live style", () => {
           "# Failures · ci.ts",
           "",
           "status: cancelled · started 1970-01-01T00:00:00.000Z · wall 31.0s",
-          "◼︎ cancelled, 2 nodes not run · built 2 · cached 0 · failed 0 · skipped 1 · cancelled 1",
+          "◼︎ cancelled, 1 node not run · built 2 · cached 0 · failed 0 · skipped 0 · cancelled 1",
           "",
           "No failures.",
           "",
@@ -1241,7 +1236,7 @@ describe("local session, live style", () => {
     let now = 0;
     const { ports } = createTestPorts({
       files: { "/cas.logs/k1.log": "checking src\nsrc/a.ts:1:1 error no-console\n" },
-      clock: { now: () => now },
+      clock: clockAt(() => now),
     });
     // supports-hyperlinks reads this as the session is made, as a terminal with links would.
     process.env.FORCE_HYPERLINK = "1";
@@ -1451,7 +1446,7 @@ describe("local session, live style", () => {
     RUN_TIMEOUT,
     async () => {
       let now = 0;
-      const { ports } = createTestPorts({ clock: { now: () => now } });
+      const { ports } = createTestPorts({ clock: clockAt(() => now) });
       const session = localRun("live", ports);
       const { store } = session.runOptions;
       const save: Node = { name: "save", kind: "save", deps: [] };
@@ -1511,7 +1506,7 @@ describe("local session, live style", () => {
   );
   test("the footer in other windows", async () => {
     let now = 0;
-    const { ports } = createTestPorts({ clock: { now: () => now } });
+    const { ports } = createTestPorts({ clock: clockAt(() => now) });
     const session = localRun("live", ports);
     const { store } = session.runOptions;
     const nodes = Array.from({ length: 9 }, (_, i): Node => {

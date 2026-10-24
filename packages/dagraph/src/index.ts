@@ -75,6 +75,7 @@ export {
   isSucceeded,
   tally,
   type ExecEvent,
+  type ExecListener,
   type FailedError,
   type JsonValue,
   type Result,

@@ -91,3 +91,12 @@ export type ExecEvent<Meta = unknown> = { node: string; meta?: Meta } & (
   | { type: "output"; chunk: string }
   | { type: "result"; result: Result }
 );
+
+/**
+ * Receives each `ExecEvent`. For `start` it may return a promise, and the action runs only once it
+ * resolves, so a journal records the start before any effect: `onEvent: (event) =>
+ * journal.record(event)`. A rejection fails the node without running it. The promise of an `output`
+ * is not awaited, and its rejection is dropped. That of a `dispatch` or a `result` that rejects
+ * before the execution ends rejects it at its end, as a throw does.
+ */
+export type ExecListener<Meta = unknown> = (event: ExecEvent<Meta>) => unknown;

@@ -246,8 +246,11 @@ describe("dag run", () => {
 describe("dag post", () => {
   test("a post step a stopped run's history owes that fails exits 1", LIMIT, async () => {
     const workflow = workflowOf(`
-      const up = workflow.task({ name: "up", cmd: ["true"] });
-      workflow.post({ name: "down", main: up, cmd: ["false"] });
+      workflow.task({
+        name: "up",
+        cmd: ["true"],
+        post: { name: "down", cmd: ["false"], retry: "once" },
+      });
     `);
     // A stopped run's history: it holds no lock, and names its workflow file by its real path.
     const history = (dir: string) =>

@@ -15,7 +15,7 @@ import { fileHandle } from "./file-handle.ts";
 import { graphNodes, type Graph, type GraphNode } from "./graph/graph.ts";
 import { canonical, resolveValue } from "./graph/inputs.ts";
 import { FILE_INPUT, isFileInput, requiredDeps, type Outputs } from "./graph/types.ts";
-import type { ExecEvent, FailedError, Result } from "./types.ts";
+import type { ExecListener, FailedError, Result } from "./types.ts";
 import { errorOf } from "./utils.ts";
 
 /**
@@ -45,7 +45,7 @@ export interface ProcessNodeOptions<Meta> {
    */
   acquire: () => Promise<void>;
   /** Receives the node's `start` and `output`, before its result returns. */
-  onEvent?: (event: ExecEvent<Meta>) => void;
+  onEvent?: ExecListener<Meta>;
 }
 
 /**
@@ -53,6 +53,11 @@ export interface ProcessNodeOptions<Meta> {
  * script, or a worker whose orchestrator took the node's slot already.
  */
 export const ungated = (): Promise<void> => Promise.resolve();
+
+/** A listener's promise that nothing awaits: its rejection is dropped, not left unhandled. */
+const ignoreRejection = (returned: unknown) => {
+  if (returned instanceof Promise) returned.catch(() => {});
+};
 
 /** The message of the error of a node that `cacheOnly` found no verified entry for. */
 export const NOT_CACHED = "not cached";
@@ -203,14 +208,20 @@ export async function processNode<Ports, Meta>(
   } catch (e) {
     return dropped(notRun(e));
   }
-  // Checked after the last await before the action starts: a cancel during the mkdir holds it back.
+  // A cancel during the mkdir holds the node back before it starts.
   if (cancel?.aborted) return dropped(cancelled);
-
   let open = true;
   const output = (chunk: string) => {
-    if (open) options.onEvent?.({ type: "output", node: name, ...meta, chunk });
+    if (open) ignoreRejection(options.onEvent?.({ type: "output", node: name, ...meta, chunk }));
   };
-  options.onEvent?.({ type: "start", node: name, ...meta });
+  try {
+    await options.onEvent?.({ type: "start", node: name, ...meta });
+  } catch (e) {
+    return dropped(notRun(e));
+  }
+  // Checked after the last await before the action starts: a cancel during the start's record
+  // holds it back, though the record says it started.
+  if (cancel?.aborted) return dropped(cancelled);
   const startTime = Date.now();
   const failed = (error: FailedError): Result => ({
     name,
