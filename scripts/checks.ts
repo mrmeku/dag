@@ -4,12 +4,6 @@ const TOOLCHAIN = ["package.json", "bun.lock", "tsconfig.json"];
 // A version no release uses: a pack check packs each package as a release would.
 const PACK_VERSION = "0.0.0-ci";
 const ENGINE = "packages/dagraph/src/**";
-// What scripts/reference-doc.test.ts compares, beside the sources it reads.
-const REFERENCE_SOURCES = [
-  "packages/dagworkflows/docs/reference.md",
-  "packages/dagworkflows/action/action.yml",
-  ".prettierrc",
-];
 
 /** Each package packed as a release packs it, so a change that breaks packing fails CI. */
 export async function addPackChecks(
@@ -45,13 +39,7 @@ export async function addChecks(
   const [all, engine, runner] = await Promise.all([
     workflow.glob("packages/*/src/**", "scripts/**", "eslint.config.ts", ...TOOLCHAIN),
     workflow.glob(ENGINE, ...TOOLCHAIN),
-    workflow.glob(
-      ENGINE,
-      "packages/dagworkflows/src/**",
-      "scripts/**",
-      ...REFERENCE_SOURCES,
-      ...TOOLCHAIN,
-    ),
+    workflow.glob(ENGINE, "packages/dagworkflows/src/**", "scripts/**", ...TOOLCHAIN),
   ]);
   const typecheck = workflow.task({
     name: "typecheck",

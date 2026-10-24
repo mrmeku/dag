@@ -121,6 +121,7 @@ describe("release workflow", () => {
         versions: ["1.2.3", false, "0.0.0-dev.abc1234", true],
         names: [
           "build:action",
+          "docs",
           "lint",
           "pack:dagraph",
           "pack:dagworkflows",
@@ -180,6 +181,7 @@ describe("release workflow", () => {
         saveDeps: {
           deps: [
             "build:action",
+            "docs",
             "lint",
             "pack:dagraph",
             "pack:dagworkflows",
@@ -198,6 +200,7 @@ describe("release workflow", () => {
           ],
           settled: [
             "build:action",
+            "docs",
             "lint",
             "pack:dagraph",
             "pack:dagworkflows",

@@ -1,7 +1,7 @@
 /**
  * Fills the generated sections of packages/dagworkflows/docs/reference.md from their sources: the
  * CLI's commander program, the action's action.yml and the paths in config.ts. The prose around
- * them is the file's own. `bun run docs` writes it; reference-doc.test.ts fails while it is stale.
+ * them is the file's own. `bun run docs` writes it; the release runs it with --check, which fails while it is stale.
  */
 import type { Option } from "@commander-js/extra-typings";
 import { readFileSync, writeFileSync } from "node:fs";
@@ -157,5 +157,11 @@ export async function referenceDoc(current: string): Promise<string> {
 }
 
 if (import.meta.main) {
-  writeFileSync(REFERENCE_PATH, await referenceDoc(readFileSync(REFERENCE_PATH, "utf8")));
+  const current = readFileSync(REFERENCE_PATH, "utf8");
+  const generated = await referenceDoc(current);
+  if (!process.argv.includes("--check")) writeFileSync(REFERENCE_PATH, generated);
+  else if (generated !== current) {
+    console.error(`${REFERENCE_PATH} is stale: run \`bun run docs\``);
+    process.exitCode = 1;
+  }
 }

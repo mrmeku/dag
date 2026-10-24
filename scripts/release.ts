@@ -8,7 +8,8 @@
  *   release tag saved after every other task, under the release key, or the partial key after a
  *   failure, which the restore finds as a prefix. So a re-run after a partial failure finds the
  *   receipts of what already published and skips it. A dry run saves nothing.
- * - checks: the same nodes as CI (scripts/checks.ts), so a tree CI already tested is a cache hit.
+ * - checks: the same nodes as CI (scripts/checks.ts), so a tree CI already tested is a cache hit,
+ *   and docs, which fails while docs/reference.md is stale: docs are written for a release.
  * - pack: one tarball per package, a declared output, content-addressed. One build program emits
  *   both packages, so each pack reads both packages' sources. The engine is published before the
  *   runner that depends on it.
@@ -46,7 +47,20 @@ export default defineWorkflow({
       restoreKeys: [`dag-release-${version}-`, "dag-main-"],
     });
     const afterCas = { deps: { cas: cas.restore } };
-    const requireAll = await addChecks(workflow, cas.restore);
+    const docs = workflow.task({
+      name: "docs",
+      cmd: ["node", "scripts/reference-doc.ts", "--check"],
+      inputs: await workflow.glob(
+        "packages/*/src/**",
+        "packages/dagworkflows/docs/reference.md",
+        "packages/dagworkflows/action/action.yml",
+        "scripts/reference-doc.ts",
+        ".prettierrc",
+        ...TOOLCHAIN,
+      ),
+      ...afterCas,
+    });
+    const requireAll = await addChecks(workflow, cas.restore, { docs });
 
     const sources = await workflow.glob(
       "packages/*/src/**",
