@@ -1,9 +1,9 @@
-import type { Node } from "@mrmeku/dagraph";
 import type { NodeReport } from "./report.ts";
 import type {
   FailedNodeState,
   InFlightNodeState,
   NodeState,
+  PassNode,
   RunState,
   SettledNodeState,
   SkippedNodeState,
@@ -49,7 +49,7 @@ export function runStartedAt(run: RunState): number | undefined {
 /** `nodes` as the run left them, in their order; the ones it never settled left out. */
 export function nodeReports(
   run: RunState,
-  nodes: Node[] = [...run.nodes.values()].map((nodeState) => nodeState.node),
+  nodes: PassNode[] = [...run.nodes.values()].map((nodeState) => nodeState.node),
 ): NodeReport[] {
   return nodes.flatMap((node): NodeReport[] => {
     const nodeState = run.nodes.get(node.name);
@@ -71,8 +71,8 @@ export function nodeReports(
 
 /*
  * The terminal's and failures.md's rule for which failures to fix: a node that ran its command
- * failed for its own reason, even after a failed settled dep. GitHub's log names the failures no
- * failure upstream explains instead (`rootFailures` in report.ts).
+ * failed for its own reason, even after a failed settled dep, and so did a post. GitHub's log
+ * names the failures no failure upstream explains instead (`rootFailures` in report.ts).
  */
 
 const isFailed = (
@@ -91,11 +91,14 @@ export const failedDepsOf = (run: RunState, nodeState: NodeState): string[] =>
 
 /**
  * Failed because a dep did: skipped, or failed running no command of its own, as a
- * `workflow.requireAll` node does.
+ * `workflow.requireAll` node does. A post that failed did so after all it waits for.
  */
 const isConsequence = (run: RunState, nodeState: NodeState): boolean =>
   nodeState.status === "dep-failed" ||
-  (nodeState.status === "failed" && !nodeState.command && failedDepsOf(run, nodeState).length > 0);
+  (nodeState.status === "failed" &&
+    !nodeState.command &&
+    nodeState.node.post !== true &&
+    failedDepsOf(run, nodeState).length > 0);
 
 export const isOwnFailure = (run: RunState, nodeState: NodeState): nodeState is FailedNodeState =>
   nodeState.status === "failed" && !isConsequence(run, nodeState);

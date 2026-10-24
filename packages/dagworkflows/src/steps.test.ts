@@ -2,8 +2,9 @@ import { execute, Graph, MemCache, namedOutput, settled } from "@mrmeku/dagraph"
 import assert from "node:assert/strict";
 import { describe, test } from "node:test";
 import { addCommand } from "./commands.ts";
+import { errorMessage } from "./kernel/format.ts";
 import type { Ports } from "./ports.ts";
-import { nullActionsArtifact } from "./ports/actions-artifact.ts";
+import { createActionsArtifactStore, nullArtifactStore } from "./ports/artifact-store.ts";
 import { createTestPorts } from "./ports/memory.ts";
 import { logPath, uploadArtifact } from "./steps.ts";
 
@@ -25,7 +26,7 @@ describe("uploadArtifact", () => {
     const {
       ports: p,
       fs,
-      actionsArtifact: service,
+      artifactStore: service,
     } = createTestPorts({
       exec: {
         run: async ([program, path]) => {
@@ -54,7 +55,7 @@ describe("uploadArtifact", () => {
       artifact: "tarball",
       path: ({ pack }) => [pack.tarball],
       deps: { pack },
-      options: { retentionDays: 7 },
+      retentionDays: 7,
     });
     uploadArtifact(graph, {
       name: "upload:again",
@@ -112,7 +113,7 @@ describe("uploadArtifact", () => {
     const results = await executeUnder(graph, p, CAS, cache);
     const offlineResults = await executeUnder(
       offline,
-      { ...p, actionsArtifact: nullActionsArtifact },
+      { ...p, artifactStore: nullArtifactStore },
       CAS,
       cache,
     );
@@ -162,11 +163,11 @@ describe("uploadArtifact", () => {
           "upload:again": "an artifact with this name already exists: tarball",
           "upload:overwrite": { id: 2, size: 1 },
           "upload:both": { id: 3, size: 2 },
-          "upload:report": {},
+          "upload:report": null,
           "upload:required":
             "No files were found with the provided path: no-such-dir/**. No artifacts will be uploaded.",
           "upload:partial": { id: 4, size: 1 },
-          "upload:offline": {},
+          "upload:offline": null,
         },
         logs: {
           tarball:
@@ -184,6 +185,53 @@ describe("uploadArtifact", () => {
         ],
         // Commands that declare no inputs run every time too.
         uncached: ["pack", "bundle", "bad", ...names.slice(0, -1), "pack", "upload:offline"],
+      },
+    );
+  });
+});
+
+describe("the GitHub artifact store", () => {
+  test("an overwrite deletes the run's artifact of its name first, a name the run lacks uploads as is, and another failure to delete fails it; options reach the client", async () => {
+    const uploads = new Map<string, unknown>();
+    const notFound = Object.assign(new Error("Artifact not found"), {
+      name: "ArtifactNotFoundError",
+    });
+    const store = createActionsArtifactStore({
+      uploadArtifact: async (name, _files, _root, options) => {
+        if (uploads.has(name))
+          throw new Error(`an artifact with this name already exists: ${name}`);
+        uploads.set(name, options);
+        return { id: uploads.size, size: 3 };
+      },
+      deleteArtifact: async (name) => {
+        if (name === "locked") throw new Error("403 Forbidden");
+        if (!uploads.delete(name)) throw notFound;
+        return { id: 0 };
+      },
+    });
+    const upload = (name: string, overwrite: boolean) =>
+      store.upload(name, ["a"], ".", { overwrite, retentionDays: 7 }).catch(errorMessage);
+    const outcomes = [
+      await upload("report", false),
+      await upload("report", false),
+      await upload("report", true),
+      await upload("fresh", true),
+      await upload("locked", true),
+    ];
+    assert.deepEqual(
+      { outcomes, uploads: [...uploads] },
+      {
+        outcomes: [
+          { id: 1, size: 3 },
+          "an artifact with this name already exists: report",
+          { id: 1, size: 3 },
+          { id: 2, size: 3 },
+          "403 Forbidden",
+        ],
+        uploads: [
+          ["report", { retentionDays: 7 }],
+          ["fresh", { retentionDays: 7 }],
+        ],
       },
     );
   });

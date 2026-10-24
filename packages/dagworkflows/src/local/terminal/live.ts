@@ -15,7 +15,7 @@ import {
   SPINNER_FRAMES,
   STATUS_ICON,
 } from "../../config.ts";
-import { isDebugCommand, plainLine } from "../../kernel/format.ts";
+import { isDebugCommand, isWarningCommand, plainLine } from "../../kernel/format.ts";
 import type {
   InFlightNodeState,
   NodeState,
@@ -25,7 +25,14 @@ import type {
 import * as selectors from "../../kernel/selectors.ts";
 import type { RunListener } from "../../kernel/store.ts";
 import type { Clock } from "../../ports.ts";
-import { clockOf, detailOf, type LocalContext, type Paint } from "../words.ts";
+import {
+  clockOf,
+  detailOf,
+  warningLines,
+  warningsOf,
+  type LocalContext,
+  type Paint,
+} from "../words.ts";
 import {
   failureBlockLines,
   interruptedLines,
@@ -130,7 +137,7 @@ function latestLineOf(nodeState: NodeState): string {
     LIVE_LATEST_LINE_MAX_CHARS,
   );
   const latestLine =
-    printing.trim() && !isDebugCommand(printing)
+    printing.trim() && !isDebugCommand(printing) && !isWarningCommand(printing)
       ? printing
       : nodeState.lastLine.slice(0, LIVE_LATEST_LINE_MAX_CHARS);
   // Format characters and tabs take columns a terminal and string-width disagree on.
@@ -209,9 +216,9 @@ function footerRows(
 }
 
 /**
- * The `live` style, a person's: settled nodes into the scrollback, cache hits gathered in one
- * line, and under them a footer redrawn from `getState` every LIVE_FRAME_MS once the run is
- * LIVE_FIRST_DRAW_MS old.
+ * The `live` style, a person's: settled nodes and their warnings into the scrollback, cache hits
+ * gathered in one line, and under them a footer redrawn from `getState` every LIVE_FRAME_MS once
+ * the run is LIVE_FIRST_DRAW_MS old.
  */
 export function createLiveRenderer(
   localContext: LocalContext,
@@ -261,9 +268,12 @@ export function createLiveRenderer(
       );
       if (isFirstPass) redrawTimer = setInterval(drawFooter, LIVE_FRAME_MS).unref();
     },
-    settle: (nodeState, run) => {
-      if (nodeState.status === "cached") cachedNames.push(nodeState.node.name);
-      else printLines(settledNodeLines(nodeState, run, localContext));
+    settle: (nodeState, run, log) => {
+      const warnings = warningLines(nodeState.node.name, warningsOf(log));
+      if (nodeState.status !== "cached")
+        return printLines([...settledNodeLines(nodeState, run, localContext), ...warnings]);
+      cachedNames.push(nodeState.node.name);
+      if (warnings.length > 0) printLines(warnings);
     },
     close: (run) =>
       endFooter(recapLines(run, localContext, { hint: "   (hand this to an agent)" })),

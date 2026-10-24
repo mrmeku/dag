@@ -1,5 +1,3 @@
-import type { ArtifactClient } from "@actions/artifact";
-import type * as cache from "@actions/cache";
 import type { context } from "@actions/github";
 import type { DagFs } from "@mrmeku/dagraph";
 import type * as properLockfile from "proper-lockfile";
@@ -50,27 +48,47 @@ export type SyncFs = Pick<
 >;
 
 /**
- * The cache service behind `actions/cache`: the two functions of `@actions/cache`, so that
- * module is itself an ActionsCache and so is any client with the same two. `restoreCache`
- * resolves to the key it restored, or undefined on a miss, and under `lookupOnly` restores
- * nothing; `saveCache` resolves to the new entry's id.
+ * Where `workflow.cache` keeps its paths between runs. `restore` puts `paths` back from the entry
+ * under `key`, or the newest whose key starts with `key` or a `restoreKeys` prefix, and resolves to
+ * what it restored from, or undefined on a miss. `save` keeps `paths` under `key` unless the store
+ * has an entry for it already, and resolves to whether it saved. A `ValidationError` rejection,
+ * for an invalid key or path, fails the task; any other is a warning.
  */
-export type ActionsCache = Pick<typeof cache, "restoreCache" | "saveCache">;
+export interface CacheStore {
+  restore: (paths: string[], key: string, restoreKeys: string[]) => Promise<string | undefined>;
+  save: (paths: string[], key: string) => Promise<boolean>;
+}
+
+/** What an upload takes beside its files: the inputs of `actions/upload-artifact` the service reads. */
+export interface ArtifactUploadOptions {
+  /** Delete an artifact of the same name first: a re-run of a failed job shares its run's artifacts. */
+  overwrite?: boolean;
+  retentionDays?: number;
+  compressionLevel?: number;
+}
 
 /**
- * The artifact service behind `actions/upload-artifact`: two methods of `@actions/artifact`'s
- * client, so a `DefaultArtifactClient` is itself an ActionsArtifact. `uploadArtifact` zips the
- * files with their paths relative to the root directory and resolves to the new artifact's id,
- * size and digest; `deleteArtifact` rejects with an `ArtifactNotFoundError` for an unknown name.
+ * Where `workflow.uploadArtifact` puts an artifact of the run. `upload` sends `files` as the
+ * artifact `name`, each by its path from `rootDirectory`, and resolves to the artifact's id and
+ * size, or undefined when there is no store to take it. It rejects a name the run has used
+ * already, unless `overwrite` replaces that artifact.
  */
-export type ActionsArtifact = Pick<ArtifactClient, "uploadArtifact" | "deleteArtifact">;
+export interface ArtifactStore {
+  upload: (
+    name: string,
+    files: string[],
+    rootDirectory: string,
+    options: ArtifactUploadOptions,
+  ) => Promise<{ id: number; size: number } | undefined>;
+}
 
 export type AnnotationLevel = "error" | "warning" | "notice";
 
 /**
  * What the runner knows about the event it is running for: the fields of `@actions/github`'s
  * `Context` a workflow reads, plus the two the toolkit has no notion of, since it never runs
- * anywhere but GitHub. Locally, git fills `ref`, `sha` and `actor`; the rest is `0` and `""`.
+ * anywhere but GitHub. Locally, git fills `ref` (`refs/heads/<branch>`, `""` on a detached HEAD),
+ * `sha` and `actor`; the rest is `0` and `""`.
  */
 export type CiContext = Pick<
   typeof context,
@@ -118,8 +136,8 @@ export interface Ports {
   fs: DagFs;
   clock: Clock;
   host: Host;
-  actionsCache: ActionsCache;
-  actionsArtifact: ActionsArtifact;
+  cacheStore: CacheStore;
+  artifactStore: ArtifactStore;
   lockfile: Lockfile;
   /**
    * The process's environment: `process.env` in the CLI and the action. Nothing in this package
@@ -127,3 +145,11 @@ export interface Ports {
    */
   env: Readonly<NodeJS.ProcessEnv>;
 }
+
+/**
+ * The ports a workflow and its tasks read, `workflow.ports` and an action's `ports`: every port
+ * but `exec`. A command runs only inside a node, through its shell (`run` and `runShell`, or a
+ * `cmd` or `shell` task), where its log, timeout and cancel apply; only the shell and the
+ * adapters use `exec`.
+ */
+export type WorkflowPorts = Omit<Ports, "exec">;

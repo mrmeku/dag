@@ -1,6 +1,7 @@
 import type { Result } from "@mrmeku/dagraph";
 import { stripVTControlCharacters } from "node:util";
 import { STATUS_ICON } from "../config.ts";
+import type { AnnotationLevel } from "../ports.ts";
 import { namesOf, rootFailures, type NodeReport } from "./report.ts";
 import type { NodeState } from "./run-slice.ts";
 
@@ -32,6 +33,37 @@ export const textOf = (lines: string[]): string => lines.map((line) => `${line}\
 
 /** A toolkit `::debug::` command (the globber writes one per file) is for GitHub's debug mode alone. */
 export const isDebugCommand = (text: string): boolean => text.startsWith("::debug::");
+
+/** An annotation as the local host prints it: `[warning] lint: 2 files skipped`. */
+export const annotationLine = (level: AnnotationLevel, title: string, message: string): string =>
+  `[${level}] ${title}: ${message}`;
+
+/**
+ * The message of each line of `log` that is a `::warning` workflow command, at its index, as
+ * GitHub's runner reads one: after leading whitespace, in any case, unescaped, and none while a
+ * `::stop-commands::` holds the commands off. Any other line has `undefined`.
+ */
+export function warningMessages(log: string[]): Array<string | undefined> {
+  let stopToken: string | undefined;
+  return log.map((line) => {
+    // .NET's TrimStart, which the runner uses, also strips U+0085.
+    const trimmed = line.replace(/^[\s\u0085]+/, "");
+    const end = trimmed.startsWith("::") ? trimmed.indexOf("::", 2) : -1;
+    if (end < 0) return undefined;
+    const command = trimmed.slice(2, end).split(" ")[0]?.toLowerCase();
+    const data = trimmed.slice(end + 2);
+    if (stopToken !== undefined) {
+      if (command === stopToken.toLowerCase()) stopToken = undefined;
+      return undefined;
+    }
+    if (command === "stop-commands") stopToken = data;
+    if (command !== "warning") return undefined;
+    return data.replaceAll("%0D", "\r").replaceAll("%0A", "\n").replaceAll("%25", "%");
+  });
+}
+
+/** Whether a line is a `::warning` workflow command, which the terminal prints apart. */
+export const isWarningCommand = (line: string): boolean => warningMessages([line])[0] !== undefined;
 
 /** What a terminal shows of a line: the text after its last carriage return, a trailing one aside. */
 export const textAfterLastReturn = (line: string): string =>

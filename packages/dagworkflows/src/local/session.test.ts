@@ -206,14 +206,14 @@ describe("local session, grouped style", () => {
           "▷ ../up",
           "▷ /abs",
           "▷ :",
-          "▶ ✔︎ restore:cache (1ms)",
-          "    Cache not found for input keys: k",
           "▶ ✖︎ lint (1ms)",
           "    checking",
           "    \x1b[31merror\x1b[0m",
           "    ── error ──",
           "    lint exited 1",
           "[error] lint: lint exited 1",
+          "▶ ✔︎ restore:cache (1ms)",
+          "    Cache not found for input keys: k",
           "▶ ✔︎ ../up (1ms)",
           "    up",
           "▶ ✔︎ /abs (1ms)",
@@ -611,6 +611,68 @@ describe("local session, failures style", () => {
   });
 });
 
+describe("local session, failures style, warnings", () => {
+  test("warnings have a budget of their own: a node's first few, then how many more and where, so a failure's block keeps its budget", async () => {
+    const { ports } = createTestPorts({
+      exec: scriptedExec({ lint: { chunks: ["src/a.ts: error\n"], code: 1 } }),
+      clock: clockAt(),
+    });
+    const loud = "x".repeat(300);
+    const { implementation } = defineWorkflow({
+      implementation: (workflow) => {
+        const noisy = workflow.task({
+          name: "noisy",
+          action: ({ warn }) => {
+            for (let i = 1; i <= 400; i++) warn(`w${i}`);
+          },
+        });
+        const chatty = workflow.task({
+          name: "chatty",
+          deps: { noisy: settled(noisy) },
+          action: ({ warn }) => {
+            for (let i = 0; i < 3; i++) warn(loud);
+          },
+        });
+        workflow.task({
+          name: "lint",
+          cmd: ["lint"],
+          deps: { chatty: settled(chatty) },
+          cacheable: false,
+        });
+      },
+    });
+    const session = localRun("failures", ports, { implementation });
+    await session.job();
+    assert.deepEqual(session.stdout(), [
+      "ci.ts · 3 nodes · report .dag/failures.md",
+      "[warning] noisy: w1",
+      "[warning] noisy: w2",
+      "[warning] noisy: w3",
+      "397 more warnings in .dag/logs/noisy.log",
+      `[warning] chatty: ${loud}`,
+      `[warning] chatty: ${loud}`,
+      "✖︎ lint  exit 1 · 0.0s · 1 line",
+      "│ src/a.ts: error",
+      "├ log    .dag/logs/lint.log",
+      "├ cmd    lint   (cwd .)",
+      "└ rerun  npx --no dag run ci.ts --only lint",
+      "summary: .dag/summary.md",
+      "",
+      "✖︎ lint failed · ci.ts · wall 0.0s",
+      "built 2 · cached 0 · failed 1 · skipped 0",
+      "",
+      "✖︎ lint   exit 1 · 0.0s · 1 line   .dag/logs/lint.log",
+      "",
+      "rerun    npx --no dag run ci.ts --only lint",
+      "report   .dag/failures.md",
+      "logs     .dag/logs/",
+      "1 warning line left out · each in its node's log in .dag/logs/",
+      "style: failures · every node's log inline: --output-style=grouped",
+      "",
+    ]);
+  });
+});
+
 describe("local session, failures style, at the edges", () => {
   test("a post step that printed before its cancel, then hit the cache in the post pass, has the cached log", async () => {
     const { ports } = createTestPorts({ files: { "/cas.logs/ks.log": "saved from the cache\n" } });
@@ -941,6 +1003,109 @@ describe("local session, failures style, at the edges", () => {
         ],
       },
     );
+  });
+});
+
+describe("local session, every style", () => {
+  test("a task's warnings show once in each style, in place of the raw line in grouped", async () => {
+    const { implementation } = defineWorkflow({
+      implementation: (workflow) => {
+        const lint = workflow.task({ name: "lint", cmd: ["lint"], cacheable: false });
+        workflow.task({
+          name: "upload",
+          deps: { lint: settled(lint) },
+          action: ({ log, warn }) => {
+            log("uploading");
+            warn("no files");
+          },
+        });
+      },
+    });
+    const outputs = await Promise.all(
+      (["live", "failures", "grouped"] as const).map(async (style) => {
+        const { ports } = createTestPorts({
+          exec: scriptedExec({
+            lint: { chunks: ["checking\n", "::warning title=lint::old flag\n"], code: 1 },
+          }),
+          clock: clockAt(),
+        });
+        const session = localRun(style, ports, { implementation });
+        await session.job();
+        return [style, style === "live" ? await session.screen() : session.stdout()];
+      }),
+    );
+    assert.deepEqual(Object.fromEntries(outputs), {
+      live: [
+        "ci.ts · 2 nodes · logs .dag/logs/",
+        "✖︎ lint  exit 1 · 0.0s · 2 lines",
+        "│ checking",
+        "├ log    .dag/logs/lint.log",
+        "├ cmd    lint   (cwd .)",
+        "└ rerun  npx --no dag run ci.ts --only l",
+        "int",
+        "[warning] lint: old flag",
+        "✔︎ upload 0.0s · 2 lines",
+        "[warning] upload: no files",
+        "summary: .dag/summary.md",
+        "",
+        "✖︎ lint failed · ci.ts · wall 0.0s",
+        "built 1 · cached 0 · failed 1 · skipped ",
+        "0",
+        "",
+        "✖︎ lint   exit 1 · 0.0s · 2 lines   .dag/",
+        "logs/lint.log",
+        "",
+        "rerun    npx --no dag run ci.ts --only l",
+        "int",
+        "report   .dag/failures.md   (hand this t",
+        "o an agent)",
+        "logs     .dag/logs/",
+      ],
+      failures: [
+        "ci.ts · 2 nodes · report .dag/failures.md",
+        "✖︎ lint  exit 1 · 0.0s · 2 lines",
+        "│ checking",
+        "├ log    .dag/logs/lint.log",
+        "├ cmd    lint   (cwd .)",
+        "└ rerun  npx --no dag run ci.ts --only lint",
+        "[warning] lint: old flag",
+        "[warning] upload: no files",
+        "summary: .dag/summary.md",
+        "",
+        "✖︎ lint failed · ci.ts · wall 0.0s",
+        "built 1 · cached 0 · failed 1 · skipped 0",
+        "",
+        "✖︎ lint   exit 1 · 0.0s · 2 lines   .dag/logs/lint.log",
+        "",
+        "rerun    npx --no dag run ci.ts --only lint",
+        "report   .dag/failures.md",
+        "logs     .dag/logs/",
+        "style: failures · every node's log inline: --output-style=grouped",
+        "",
+      ],
+      grouped: [
+        "▶ ci.ts · 2 nodes",
+        "    lint",
+        "    upload",
+        "▷ lint",
+        "▶ ✖︎ lint (1ms)",
+        "    checking",
+        "    [warning] lint: old flag",
+        "    ── error ──",
+        "    lint exited 1",
+        "[error] lint: lint exited 1",
+        "▷ upload",
+        "▶ ✔︎ upload (1ms)",
+        "    uploading",
+        "    [warning] upload: no files",
+        "summary: .dag/summary.md",
+        "",
+        "✖︎ lint failed · ci.ts · built 1 · cached 0 · failed 1 · skipped 0 · wall 1ms",
+        "failed: lint",
+        "reproduce: npx --no dag run ci.ts --only lint",
+        "",
+      ],
+    });
   });
 });
 

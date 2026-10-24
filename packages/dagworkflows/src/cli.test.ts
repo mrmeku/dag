@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { spawn, type ChildProcess } from "node:child_process";
+import { execFileSync, spawn, type ChildProcess } from "node:child_process";
 import {
   mkdirSync,
   mkdtempSync,
@@ -33,6 +33,8 @@ interface Invocation {
   /** Files beside ci.ts, or a function of the directory's real path that gives them. */
   files?: Record<string, string> | ((dir: string) => Record<string, string>);
   interrupts?: string[];
+  /** A git checkout to run in, instead of a directory of its own with no git repository. */
+  dir?: string;
 }
 
 // A regression that leaves a run waiting fails its test here instead of hanging the suite.
@@ -48,8 +50,8 @@ after(() => {
 
 /**
  * `dag <command> ci.ts`, `run` unless given, in a directory of its own holding `workflow`
- * as ci.ts and `files`, with no environment but `env` and no git repository. Each of `interrupts`
- * is a ctrl-c sent once stdout shows its text, after the last one's.
+ * as ci.ts and `files`, with no environment but `env` and no git repository, or in `dir`. Each
+ * of `interrupts` is a ctrl-c sent once stdout shows its text, after the last one's.
  */
 function cli(
   workflow: string,
@@ -60,9 +62,10 @@ function cli(
     tty = false,
     files = {},
     interrupts = [],
+    dir: checkout,
   }: Invocation = {},
 ) {
-  const dir = mkdtempSync(join(root, "run-"));
+  const dir = checkout ?? mkdtempSync(join(root, "run-"));
   const given = typeof files === "function" ? files(realpathSync(dir)) : files;
   for (const [path, text] of Object.entries({ "ci.ts": workflow, ...given })) {
     mkdirSync(dirname(join(dir, path)), { recursive: true });
@@ -71,7 +74,14 @@ function cli(
   const child = spawn(
     process.execPath,
     [...(tty ? AS_IF_A_TERMINAL : []), CLI, command, "ci.ts", ...args],
-    { cwd: dir, env: { PATH: process.env.PATH, GIT_DIR: join(dir, "no-git"), ...env } },
+    {
+      cwd: dir,
+      env: {
+        PATH: process.env.PATH,
+        ...(checkout === undefined && { GIT_DIR: join(dir, "no-git") }),
+        ...env,
+      },
+    },
   );
   children.add(child);
   let stdout = "";
@@ -241,6 +251,79 @@ describe("dag run", () => {
       },
     );
   });
+});
+
+describe("dag run's cache, what the checkouts hold on disk", () => {
+  test(
+    "the main checkout's CAS warms a new worktree, and the worktree keeps its own after",
+    LIMIT,
+    async () => {
+      const clone = mkdtempSync(join(root, "clone-"));
+      const git = (cwd: string, ...args: string[]) =>
+        execFileSync("git", ["-c", "user.name=t", "-c", "user.email=t@t", ...args], {
+          cwd,
+          env: { PATH: process.env.PATH, GIT_CONFIG_GLOBAL: "/dev/null", GIT_CONFIG_NOSYSTEM: "1" },
+          stdio: "pipe",
+        });
+      const main = join(clone, "main");
+      mkdirSync(main);
+      git(main, "init", "-q");
+      git(main, "commit", "-q", "--allow-empty", "-m", "first");
+      git(main, "worktree", "add", "-q", "--detach", "../worktree");
+      // The CAS carry: a cached task, whose entry the main checkout's CAS holds.
+      const workflow = workflowOf(`
+      const cas = workflow.cache({ name: "cas", path: [".dag/cas"], key: "cas-1" });
+      workflow.task({
+        name: "build",
+        shell: "echo built",
+        inputs: { version: "build-v1" },
+        deps: { cas: cas.restore },
+      });
+      cas.save();
+    `);
+      const logs = async (dir: string) => {
+        const run = cli(workflow, { dir });
+        const { code, stdout } = await run.exited;
+        const build = stdout.find((line) => line.startsWith("▶ ✔︎ build"));
+        return {
+          code,
+          restore: run.read(".dag/logs/restore/cas.log"),
+          build: build?.endsWith("(cached)") ? "cached" : build && "built",
+          save: run.read(".dag/logs/save/cas.log"),
+        };
+      };
+      const inMain = await logs(main);
+      const inWorktree = await logs(join(clone, "worktree"));
+      const again = await logs(join(clone, "worktree"));
+      const notFound = "Cache not found for input keys: cas-1\n";
+      const notSaved = "Cache not saved with key: cas-1\n";
+      assert.deepEqual(
+        { inMain, inWorktree, again },
+        {
+          inMain: {
+            code: 0,
+            restore: notFound,
+            build: "built",
+            save: notSaved,
+          },
+          // The run makes .dag/cas empty before its restore, which fills it.
+          inWorktree: {
+            code: 0,
+            restore: `Cache restored from: ${realpathSync(main)}\nRestored: .dag/cas\n`,
+            build: "cached",
+            save: notSaved,
+          },
+          // The next run finds the worktree's CAS there, and keeps it.
+          again: {
+            code: 0,
+            restore: `${notFound}Kept, already there: .dag/cas\n`,
+            build: "cached",
+            save: notSaved,
+          },
+        },
+      );
+    },
+  );
 });
 
 describe("dag post", () => {

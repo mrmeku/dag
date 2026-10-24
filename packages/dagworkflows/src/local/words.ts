@@ -1,12 +1,15 @@
 import type { styleText } from "node:util";
 import { quote } from "shlex";
-import { STATUS_ICON } from "../config.ts";
+import { SCROLLBACK_LINE_MAX_CHARS, STATUS_ICON } from "../config.ts";
 import {
+  annotationLine,
   cancelledHeadline,
   countsLine,
   logLines,
+  plainLine,
   plural,
   reportHeadline,
+  warningMessages,
 } from "../kernel/format.ts";
 import { namesOf, wallTimeOf } from "../kernel/report.ts";
 import type { FailedNodeState, RunState, SettledNodeState } from "../kernel/run-slice.ts";
@@ -55,6 +58,27 @@ export function detailOf(nodeState: SettledNodeState): string {
 /** The error says no more than the exit status does: `<cmd> exited <code>`. */
 export const errorSaysOnlyExitCode = (nodeState: FailedNodeState): boolean =>
   !!nodeState.command?.code && !nodeState.timedOut;
+
+/** The messages of a node's warnings, from its log. */
+export const warningsOf = (log: string[]): string[] =>
+  warningMessages(log).filter((message) => message !== undefined);
+
+/**
+ * A node's warnings as the terminal prints them once it settles: each as the local host prints an
+ * annotation, `[warning] lint: 2 files skipped`, plain.
+ */
+export const warningLines = (nodeName: string, messages: string[]): string[] =>
+  messages.flatMap((message) =>
+    logLines(annotationLine("warning", nodeName, message)).map((line) =>
+      plainLine(line, SCROLLBACK_LINE_MAX_CHARS),
+    ),
+  );
+
+/** A log without its warnings, which the terminal prints apart. */
+export const withoutWarnings = (log: string[]): string[] => {
+  const messages = warningMessages(log);
+  return log.filter((_line, index) => messages[index] === undefined);
+};
 
 export const rerunLine = (rerunCommand: string, nodeNames: string[]): string =>
   `${rerunCommand} --only ${quote(nodeNames.join(","))}`;

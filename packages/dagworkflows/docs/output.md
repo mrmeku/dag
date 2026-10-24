@@ -3,7 +3,7 @@
 dagworkflows shows each run in the format that its reader needs:
 
 - **In a terminal**, a person watches the run live and reads each failure once.
-- **An AI agent** gets only the failures, in plain text, in a fixed budget of characters.
+- **An AI agent** gets only the failures and the warnings, in plain text, in a fixed budget of characters.
 - **On GitHub**, each task gets a log group, a check run and a line in the step summary.
 
 All formats come from one store of the run. To draw a run in your own format, see [Run store API](api.md).
@@ -12,11 +12,11 @@ All formats come from one store of the run. To draw a run in your own format, se
 
 A local run selects one of three styles:
 
-| Style      | Selected when                                                                        | What it prints                                                                                   |
-| ---------- | ------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------ |
-| `live`     | stdout is a terminal.                                                                | One line for each task, a block for each failure, and a live footer.                             |
-| `failures` | An AI agent runs the command, as [std-env](https://github.com/unjs/std-env) detects. | The failure blocks and the recap, in approximately 10,000 characters. The rest is in the report. |
-| `grouped`  | The run is in CI or stdout is a pipe.                                                | The full log of each task, as GitHub groups it.                                                  |
+| Style      | Selected when                                                                        | What it prints                                                                                                 |
+| ---------- | ------------------------------------------------------------------------------------ | -------------------------------------------------------------------------------------------------------------- |
+| `live`     | stdout is a terminal.                                                                | One line for each task, a block for each failure, and a live footer.                                           |
+| `failures` | An AI agent runs the command, as [std-env](https://github.com/unjs/std-env) detects. | The failure blocks, the warnings and the recap, in approximately 10,000 characters. The rest is in the report. |
+| `grouped`  | The run is in CI or stdout is a pipe.                                                | The full log of each task, as GitHub groups it.                                                                |
 
 To select a style, use `--output-style` or `DAG_OUTPUT_STYLE`.
 
@@ -52,6 +52,8 @@ The block holds these lines:
 4. The command, in a format that a shell accepts.
 5. The command that runs the task again.
 
+A task's warning is a `::warning` line in its log. Each style prints it once, as `[warning] <task>: <message>`, when the task finishes. `live` and `failures` print it after the task's line or block, and `grouped` prints it in place of the `::warning` line. `failures` prints the first three warnings of each task, then how many more there are and where. Its warnings have a budget of their own, so they never take the place of a failure.
+
 ### The footer
 
 Below the scrollback, a footer shows the tasks that run now. For each task, it shows the time, the time of the last run, and the last line that the task printed. A task that did not start yet shows "checking cache". A task that waits shows why it waits.
@@ -66,7 +68,7 @@ The footer has these limits:
 
 ### Which failure is the cause
 
-A task's failure is its own when the task ran its command. This is true also after a dependency that it takes with `settled` failed. A task that failed only because a dependency failed, for example `require-all`, shows under the failure that caused it. The skipped tasks also show there.
+A task's failure is its own when the task ran its command. This is true also after a dependency that it takes with `settled` failed. The failure of a post step is always its own. A task that failed only because a dependency failed, for example `require-all`, shows under the failure that caused it. The skipped tasks also show there.
 
 ## Log files and the failures report
 
@@ -116,7 +118,7 @@ skipped, dependency failed: deploy
 reproduce: npx --no dag run scripts/ci.ts --only test:unit
 ```
 
-The cause of a failure is a failed task that has no failed dependency. Above, `require-all` failed because `test:unit` failed. Thus the first line and the `reproduce` line name only `test:unit`.
+The cause of a failure is a failed task that has no failed dependency, or a failed post step. Above, `require-all` failed because `test:unit` failed. Thus the first line and the `reproduce` line name only `test:unit`.
 
 ## Check runs
 

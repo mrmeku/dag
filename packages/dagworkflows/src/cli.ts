@@ -12,10 +12,10 @@ import {
   OUTPUT_STYLE_ENV,
   OUTPUT_STYLES,
 } from "./config.ts";
-import { createLocalHost } from "./ports/local.ts";
+import { createLocalHost, createWorktreeCacheStore } from "./ports/local.ts";
 import { abortOnSignals, createExec, systemClock } from "./ports/real.ts";
 import { runJob, runPost, type RunOptions } from "./runner.ts";
-import { peer, pickActionsArtifact, pickActionsCache } from "./services.ts";
+import { peer, pickArtifactStore, pickCacheStore } from "./services.ts";
 import { workflowDefOf } from "./workflow.ts";
 
 export const program = new Command("dag").description(
@@ -50,6 +50,8 @@ async function runOptionsFor(
   const def = workflowDefOf(await import(resolve(file)), file);
   const exec = createExec();
   const fs = createNodeDagFs();
+  const clock = systemClock();
+  const lockfile = { lock, check };
   // The GitHub adapter loads Octokit; a local run never needs it.
   const host = isGithubActions
     ? (await peer(() => import("./ports/github.ts"))).createGithubHost({
@@ -63,11 +65,13 @@ async function runOptionsFor(
     ports: {
       exec,
       fs,
-      clock: systemClock(),
+      clock,
       host,
-      actionsCache: await pickActionsCache(process.env, host),
-      actionsArtifact: await pickActionsArtifact(process.env, host),
-      lockfile: { lock, check },
+      cacheStore: isGithubActions
+        ? await pickCacheStore(process.env, host)
+        : createWorktreeCacheStore({ exec, lockfile }),
+      artifactStore: await pickArtifactStore(process.env, host),
+      lockfile,
       env: process.env,
     },
     casBaseDir: opts.casDir,

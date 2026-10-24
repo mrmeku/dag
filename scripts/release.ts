@@ -4,9 +4,10 @@
  * CAS, nothing is published.
  *
  * - version: a `v1.2.3` tag releases 1.2.3; any other ref is a dry run of `0.0.0-dev.<sha>`.
- * - cache: the CAS restored from this release's own earlier attempt first, then main's, and
- *   saved under the release key whatever happened, so a re-run after a partial failure finds the
- *   receipts of what already published and skips it.
+ * - cache: the CAS restored from this release's own earlier attempt first, then main's, and on a
+ *   release tag saved after every other task, under the release key, or the partial key after a
+ *   failure, which the restore finds as a prefix. So a re-run after a partial failure finds the
+ *   receipts of what already published and skips it. A dry run saves nothing.
  * - checks: the same nodes as CI (scripts/checks.ts), so a tree CI already tested is a cache hit.
  * - pack: one tarball per package, a declared output, content-addressed. One build program emits
  *   both packages, so each pack reads both packages' sources. The engine is published before the
@@ -124,7 +125,7 @@ export default defineWorkflow({
     });
 
     const release = workflow.requireAll({ name: "release", deps: { ...published, action } });
-    cas.save();
+    if (!dryRun) cas.save();
     return { version, dryRun, release };
   },
 });

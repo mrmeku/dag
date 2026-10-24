@@ -13,8 +13,12 @@ import { resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { check, lock } from "proper-lockfile";
 import { DEFAULT_CAS_DIR, DEFAULT_HISTORY_DIR } from "../config.ts";
-import { artifactServiceAvailable, nullActionsArtifact } from "../ports/actions-artifact.ts";
-import { nullActionsCache } from "../ports/actions-cache.ts";
+import {
+  artifactServiceAvailable,
+  createActionsArtifactStore,
+  nullArtifactStore,
+} from "../ports/artifact-store.ts";
+import { createActionsCacheStore, nullCacheStore } from "../ports/cache-store.ts";
 import { createGithubHost } from "../ports/github.ts";
 import { createExec, systemClock } from "../ports/real.ts";
 import type { RunOptions } from "../runner.ts";
@@ -52,10 +56,10 @@ export async function actionOptions(bundleUrl: string): Promise<RunOptions> {
       fs: createNodeDagFs(),
       clock: systemClock(),
       host,
-      actionsCache: cache.isFeatureAvailable() ? cache : nullActionsCache,
-      actionsArtifact: artifactServiceAvailable(process.env)
-        ? new DefaultArtifactClient()
-        : nullActionsArtifact,
+      cacheStore: cache.isFeatureAvailable() ? createActionsCacheStore(cache) : nullCacheStore,
+      artifactStore: artifactServiceAvailable(process.env)
+        ? createActionsArtifactStore(new DefaultArtifactClient())
+        : nullArtifactStore,
       lockfile: { lock, check },
       env: process.env,
     },

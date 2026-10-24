@@ -1,5 +1,3 @@
-// The toolkit's own type for `UploadArtifactSpec.options`, so a published declaration can name it.
-export type { UploadArtifactOptions } from "@actions/artifact";
 export {
   file,
   settled,
@@ -43,9 +41,10 @@ export type {
 export * as selectors from "./kernel/selectors.ts";
 export { createRunStore, type RunListener, type RunStore } from "./kernel/store.ts";
 export type {
-  ActionsArtifact,
-  ActionsCache,
   AnnotationLevel,
+  ArtifactStore,
+  ArtifactUploadOptions,
+  CacheStore,
   CheckUpdate,
   CiContext,
   Clock,
@@ -54,18 +53,21 @@ export type {
   Host,
   Lockfile,
   Ports,
+  WorkflowPorts,
 } from "./ports.ts";
 export {
   artifactServiceAvailable,
-  createMemoryActionsArtifact,
-  nullActionsArtifact,
-  type MemoryActionsArtifact,
-} from "./ports/actions-artifact.ts";
+  createActionsArtifactStore,
+  createMemoryArtifactStore,
+  nullArtifactStore,
+  type MemoryArtifactStore,
+} from "./ports/artifact-store.ts";
 export {
-  createMemoryActionsCache,
-  nullActionsCache,
-  type MemoryActionsCache,
-} from "./ports/actions-cache.ts";
+  createActionsCacheStore,
+  createMemoryCacheStore,
+  nullCacheStore,
+  type MemoryCacheStore,
+} from "./ports/cache-store.ts";
 export { createLocalHost, nullHost } from "./ports/local.ts";
 export {
   clockAt,

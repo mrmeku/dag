@@ -5,7 +5,7 @@ import { describe, test } from "node:test";
 import { STATUS_ICON } from "./config.ts";
 import { readRunHistory } from "./history.ts";
 import type { Exec } from "./ports.ts";
-import { createMemoryActionsCache } from "./ports/actions-cache.ts";
+import { createMemoryCacheStore } from "./ports/cache-store.ts";
 import {
   clockAt,
   createMemoryLockfile,
@@ -46,8 +46,8 @@ describe("cancel, then post", () => {
   test("a cancelled run records what settled in its history; the post pass stops the service from that history, under the workflow's summary, and saves no cache; a second pass finds nothing", async () => {
     const controller = new AbortController();
     const calls: string[][] = [];
-    const service = createMemoryActionsCache(["bun-old"]);
-    const { ports, fs, rec } = createTestPorts({ actionsCache: service });
+    const service = createMemoryCacheStore(["bun-old"]);
+    const { ports, fs, rec } = createTestPorts({ cacheStore: service });
     // `db start` writes the pid it is asked for; `db stop` reads it from PID; `slow` runs until
     // the cancel interrupts it.
     let stoppedPid: string | undefined;
@@ -488,8 +488,8 @@ describe("--only", () => {
   });
 
   test("saves the CAS after lint alone when lint depends on its restore: the save waits for every node of the selection", async () => {
-    const service = createMemoryActionsCache();
-    const { ports } = createTestPorts({ actionsCache: service });
+    const service = createMemoryCacheStore();
+    const { ports } = createTestPorts({ cacheStore: service });
     const events: string[] = [];
     ports.exec = {
       run: async (cmd) => {
@@ -499,8 +499,8 @@ describe("--only", () => {
         return { code: 0, stdout: "", stderr: "", output: "", ok: true };
       },
     };
-    const save = service.saveCache;
-    service.saveCache = async (paths, key) => (events.push(`save ${key}`), save(paths, key));
+    const save = service.save;
+    service.save = async (paths, key) => (events.push(`save ${key}`), save(paths, key));
     const implementation = defineWorkflow({
       implementation: (workflow) => {
         const cas = workflow.cache({ name: "cas", path: [".dag/cas"], key: "cas-1" });
@@ -927,11 +927,11 @@ describe("a step's time", () => {
 describe("cancel during a save", () => {
   test("a save the cancel lands on is stopped with the run, and nothing owes it: the post pass does not run it again", async () => {
     const controller = new AbortController();
-    const service = createMemoryActionsCache();
-    const { ports } = createTestPorts({ actionsCache: service });
+    const service = createMemoryCacheStore();
+    const { ports } = createTestPorts({ cacheStore: service });
     let saves = 0;
-    const save = service.saveCache;
-    service.saveCache = async (paths, key) => {
+    const save = service.save;
+    service.save = async (paths, key) => {
       saves++;
       controller.abort();
       return save(paths, key);

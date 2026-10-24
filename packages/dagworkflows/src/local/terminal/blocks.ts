@@ -19,6 +19,7 @@ import {
   rerunLine,
   runHeadline,
   tallyOf,
+  withoutWarnings,
   type LocalContext,
 } from "../words.ts";
 
@@ -51,12 +52,16 @@ export function tailLines(log: string[], maxCharacters = Infinity): string[] {
   return tail;
 }
 
+/** A failure's log as its block shows it: its warnings print after the block. */
+export const blockLog = (nodeState: FailedNodeState): string[] =>
+  withoutWarnings(nodeState.log ?? []);
+
 /** An own failure: how it ended, its log's tail and error, then what to read, run and rerun. */
 export function failureBlockLines(
   nodeState: FailedNodeState,
   run: RunState,
   localContext: LocalContext,
-  tail = tailLines(nodeState.log ?? []),
+  tail = tailLines(blockLog(nodeState)),
 ): string[] {
   const { paint } = localContext;
   const name = nodeState.node.name;
@@ -72,7 +77,7 @@ export function failureBlockLines(
   if (alsoFailedDeps.length > 0)
     labelledRows.push(["deps", `${alsoFailedDeps.join(", ")} also failed`]);
   labelledRows.push(["rerun", rerunLine(localContext.rerunCommand, [name])]);
-  const earlierLineCount = (nodeState.log?.length ?? 0) - tail.length;
+  const earlierLineCount = blockLog(nodeState).length - tail.length;
   return [
     `${paint("red", STATUS_ICON.failed)} ${paint("bold", name)}  ${paint("dim", detailOf(nodeState))}`,
     ...[

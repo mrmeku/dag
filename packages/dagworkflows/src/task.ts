@@ -14,7 +14,7 @@ import {
 import { isAbsolute } from "node:path";
 import { defineStep } from "./define-step.ts";
 import { errorMessage } from "./kernel/format.ts";
-import type { Exec, ExecResult, Ports } from "./ports.ts";
+import type { Exec, ExecResult, Ports, WorkflowPorts } from "./ports.ts";
 import { warningLine, writeLog, type CommandCause } from "./step-records.ts";
 
 /** Each role of `deps` with its dep, leaving out a role whose dep is `undefined`. */
@@ -42,7 +42,9 @@ export type TaskContext<
   D extends DepRecord,
   O extends string,
   I extends InputRecord<unknown>,
-> = Omit<EngineContext<D, I>, "inputs" | "output"> & {
+> = Omit<EngineContext<D, I>, "inputs" | "output" | "ports"> & {
+  /** The run's ports, as `workflow.ports`: a command runs through `run` and `runShell`. */
+  ports: WorkflowPorts;
   /** Its `inputs`: a file as a handle, a value as written. */
   inputs: Omit<EngineContext<D, I>["inputs"], typeof DECLARED_OUTPUTS>;
   /** Its declared outputs by role, as absolute paths in `outputDir`: write each before returning. */
@@ -65,10 +67,17 @@ export interface TaskFields<
   D extends DepRecord,
   O extends string,
   I extends InputRecord<unknown> = Record<never, never>,
-> extends Pick<
-  ActionSpec<Ports, Record<O, string>, DepSpecsOf<D>, I, DeclaredOutputs>,
-  "invalidateOn" | "cacheable" | "timeoutMs"
-> {
+>
+  extends
+    Pick<
+      ActionSpec<Ports, Record<O, string>, DepSpecsOf<D>, I, DeclaredOutputs>,
+      "cacheable" | "timeoutMs"
+    >,
+    // A fingerprint reads the ports a workflow does: a command runs only in a node's shell.
+    Pick<
+      ActionSpec<WorkflowPorts, Record<O, string>, DepSpecsOf<D>, I, DeclaredOutputs>,
+      "invalidateOn"
+    > {
   /** Its address in logs, check runs and `--only`, unique in the graph. */
   name: string;
   /** The nodes it depends on, by role: `deps: { pack }`, or `settled(test)` to run after a failure. */

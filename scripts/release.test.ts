@@ -1,6 +1,6 @@
 import { Graph, namedOutput } from "@mrmeku/dagraph";
 import {
-  createMemoryActionsCache,
+  createMemoryCacheStore,
   createTestPorts,
   createWorkflow,
   logPath,
@@ -17,16 +17,16 @@ import release from "./release.ts";
 const BASH = ["bash", "--noprofile", "--norc", "-eo", "pipefail", "-c"];
 
 describe("release workflow", () => {
-  test("a tag releases its version, any other ref dry-runs; packs are outputs, publishes are receipts after require-all, the engine before the runner", async () => {
+  test("a version tag releases its version and saves its CAS, any other ref dry-runs and saves none; packs are outputs, publishes are receipts after require-all, the engine before the runner", async () => {
     const build = async (ref: string) => {
       // An earlier attempt of this release, and main's CAS before it.
-      const actionsCache = createMemoryActionsCache(["dag-release-1.2.3-0", "dag-main-1"]);
+      const cacheStore = createMemoryCacheStore(["dag-release-1.2.3-0", "dag-main-1"]);
       // The $TARBALL each shell line got.
       const tarballs = new Map<string | undefined, string | undefined>();
       // pack and build:action write the files they declare.
-      const { ports, fs, actionsArtifact } = createTestPorts({
+      const { ports, fs, artifactStore } = createTestPorts({
         context: { ref, sha: "abc1234def" },
-        actionsCache,
+        cacheStore,
         exec: {
           run: async (cmd, opts) => {
             const [, script, pkg, version, dir] = cmd;
@@ -66,8 +66,8 @@ describe("release workflow", () => {
         output,
         restored:
           restored?.status === "done" && (await fs.readText(logPath(CAS, restored.actionKey))),
-        saved: [...actionsCache.entries].slice(2),
-        uploads: [...actionsArtifact.uploads].map(([name, { files }]) => [
+        saved: [...cacheStore.entries].slice(2),
+        uploads: [...artifactStore.uploads].map(([name, { files }]) => [
           name,
           files.map((file) => basename(file)),
         ]),
@@ -75,6 +75,8 @@ describe("release workflow", () => {
     };
     const tagged = await build("refs/tags/v1.2.3");
     const branch = await build("refs/heads/main");
+    // A tag that names no version is a dry run too.
+    const otherTag = await build("refs/tags/vnext");
     const nodesByName = new Map(tagged.nodes.map((n) => [n.name, n]));
     const by = (name: string) => {
       const node = nodesByName.get(name);
@@ -87,7 +89,7 @@ describe("release workflow", () => {
         versions: [tagged.version, tagged.dryRun, branch.version, branch.dryRun],
         names: tagged.nodes.map((n) => n.name).sort(),
         restored: [tagged.restored, branch.restored],
-        saved: [tagged.saved, branch.saved],
+        saved: [tagged.saved, branch.saved, otherTag.saved],
         packCmd: tagged.ran("pack:dagraph"),
         packOutputs:
           pack?.status === "done" &&
@@ -138,13 +140,11 @@ describe("release workflow", () => {
         ],
         // A release restores its own earlier attempt first, a dry run main's.
         restored: [
-          "Cache restored from key: dag-release-1.2.3-0\n",
-          "Cache restored from key: dag-main-1\n",
+          "Cache restored from: dag-release-1.2.3-0\n",
+          "Cache restored from: dag-main-1\n",
         ],
-        saved: [
-          [["dag-release-1.2.3-abc1234def", [".dag/cas"]]],
-          [["dag-release-0.0.0-dev.abc1234-abc1234def", [".dag/cas"]]],
-        ],
+        // A release saves its attempt; a dry run saves nothing.
+        saved: [[["dag-release-1.2.3-abc1234def", [".dag/cas"]]], [], []],
         packCmd: ["bun", "scripts/pack.ts", "dagraph", "1.2.3", "<outputDir>"],
         packOutputs: [["tarball", "mrmeku-dagworkflows-1.2.3.tgz"]],
         packInputs: true,

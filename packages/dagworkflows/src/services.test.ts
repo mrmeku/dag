@@ -20,12 +20,12 @@ describe("the services the CLI picks", () => {
             return next(specifier, context);
           },
         });
-        const { pickActionsArtifact, pickActionsCache } = await import(${url("./services.ts")});
-        const { createRecordingHost, nullActionsArtifact, nullActionsCache } = await import(${url("./index.ts")});
+        const { pickArtifactStore, pickCacheStore } = await import(${url("./services.ts")});
+        const { createRecordingHost, nullArtifactStore, nullCacheStore } = await import(${url("./index.ts")});
         const rec = createRecordingHost();
         const env = { GITHUB_ACTIONS: "true" };
-        const cache = (await pickActionsCache(env, rec.host)) === nullActionsCache;
-        const artifact = (await pickActionsArtifact(env, rec.host)) === nullActionsArtifact;
+        const cache = (await pickCacheStore(env, rec.host)) === nullCacheStore;
+        const artifact = (await pickArtifactStore(env, rec.host)) === nullArtifactStore;
         console.log(JSON.stringify({ cache, artifact, notices: rec.annotations.map((a) => a.message) }));
         `,
       ],

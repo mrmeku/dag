@@ -154,7 +154,7 @@ dagworkflows shows each run in the format that its reader needs. It selects the 
 | Where it runs  | What it shows                                                                                                  |
 | -------------- | -------------------------------------------------------------------------------------------------------------- |
 | A terminal     | One line for each task that finishes, a block for each failure, and a live footer with the tasks that run now. |
-| An AI agent    | Only the failures and a recap, in plain text, in approximately 10,000 characters.                              |
+| An AI agent    | Only the failures, the warnings and a recap, in plain text, in approximately 10,000 characters.                |
 | A pipe or CI   | The full log of each task, in groups, as GitHub shows it.                                                      |
 | GitHub Actions | A log group, an annotation and a check run for each task, and a step summary with a timeline and the graph.    |
 

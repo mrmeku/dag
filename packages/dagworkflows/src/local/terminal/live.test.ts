@@ -133,6 +133,39 @@ describe("live terminal", () => {
   beforeEach(() => mock.timers.enable({ apis: ["setInterval"] }));
   afterEach(() => mock.timers.reset());
 
+  test("the footer never shows a warning command as a node's latest line", async () => {
+    const run = liveRun(
+      defineWorkflow({
+        implementation: (workflow) => {
+          workflow.task({ name: "lint", cmd: ["lint"], cacheable: false });
+        },
+      }),
+      ["lint"],
+    );
+    await run.at(0);
+    run.print("lint", "checking src\n::warning title=lint::deprecated rule");
+    const printing = await run.at(600);
+    run.print("lint", "\n");
+    const ended = await run.at(700);
+    run.exit("lint");
+    await run.job;
+    assert.deepEqual(
+      { printing: printing.window, ended: ended.window },
+      {
+        printing: [
+          "ci.ts · 1 node · logs .dag/logs/",
+          "⠦ lint 0.6s  checking src",
+          "[0/1] 1 running · ctrl-c cancels",
+        ],
+        ended: [
+          "ci.ts · 1 node · logs .dag/logs/",
+          "⠧ lint 0.7s  checking src",
+          "[0/1] 1 running · ctrl-c cancels",
+        ],
+      },
+    );
+  });
+
   test("during a build: the footer under the scrollback, a node settling above it", async () => {
     const run = liveRun(
       defineWorkflow({

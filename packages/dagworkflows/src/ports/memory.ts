@@ -11,8 +11,8 @@ import type {
   Ports,
   SyncFs,
 } from "../ports.ts";
-import { createMemoryActionsArtifact, type MemoryActionsArtifact } from "./actions-artifact.ts";
-import { createMemoryActionsCache, type MemoryActionsCache } from "./actions-cache.ts";
+import { createMemoryArtifactStore, type MemoryArtifactStore } from "./artifact-store.ts";
+import { createMemoryCacheStore, type MemoryCacheStore } from "./cache-store.ts";
 
 export interface RecordedHost {
   host: Host;
@@ -93,36 +93,36 @@ export function createMemoryLockfile(): MemoryLockfile {
 export function createTestPorts(
   opts: Partial<Pick<Ports, "exec" | "clock" | "env">> & {
     files?: Record<string, string>;
-    actionsCache?: MemoryActionsCache;
-    actionsArtifact?: MemoryActionsArtifact;
+    cacheStore?: MemoryCacheStore;
+    artifactStore?: MemoryArtifactStore;
     context?: Partial<CiContext>;
   } = {},
 ): {
   ports: Ports;
   fs: MemoryDagFs;
   rec: RecordedHost;
-  actionsCache: MemoryActionsCache;
-  actionsArtifact: MemoryActionsArtifact;
+  cacheStore: MemoryCacheStore;
+  artifactStore: MemoryArtifactStore;
 } {
   const fs = createMemoryDagFs(opts.files);
   const rec = createRecordingHost(opts.context);
-  const actionsCache = opts.actionsCache ?? createMemoryActionsCache();
-  const actionsArtifact = opts.actionsArtifact ?? createMemoryActionsArtifact();
+  const cacheStore = opts.cacheStore ?? createMemoryCacheStore();
+  const artifactStore = opts.artifactStore ?? createMemoryArtifactStore();
   return {
     ports: {
       exec: opts.exec ?? okExec,
       fs,
       clock: opts.clock ?? steppingClock(),
       host: rec.host,
-      actionsCache,
-      actionsArtifact,
+      cacheStore,
+      artifactStore,
       lockfile: createMemoryLockfile(),
       env: opts.env ?? {},
     },
     fs,
     rec,
-    actionsCache,
-    actionsArtifact,
+    cacheStore,
+    artifactStore,
   };
 }
 

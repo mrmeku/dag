@@ -26,6 +26,16 @@ export const STREAM_DRAIN_GRACE_MS = 1000;
  * delay in turn, so three tries in all, inside its own `timeoutMs`.
  */
 export const POST_RETRY_DELAYS_MS: readonly number[] = [1_000, 4_000];
+/**
+ * What a cache save puts between its key and the run id after a run where a task did not
+ * succeed, `<key>-partial-<run id>`.
+ */
+export const PARTIAL_KEY_MARKER = "-partial-";
+/**
+ * How often a local restore tries again for another's lock on the path it fills, until the
+ * holder releases it or the lock goes stale after a kill (proper-lockfile's 10 s).
+ */
+export const CACHE_LOCK_RETRY_MS = 100;
 /** Where the local adapter writes the markdown summary GitHub would render on the run page. */
 export const DEFAULT_SUMMARY_PATH = ".dag/summary.md";
 /** Each node's output as it arrives, in `<dir>/<node>.log`. */
@@ -55,6 +65,13 @@ export const FAILURE_TAIL_LINES = 20;
 export const AGENT_FAILURE_BLOCKS = 3;
 export const AGENT_TAIL_BUDGET_CHARS = 4000;
 export const AGENT_OUTPUT_BUDGET_CHARS = 7000;
+/**
+ * Warnings in the `failures` style have a budget of their own, so they never take a failure
+ * block's: AGENT_WARNINGS_SHOWN of each node's, then how many more and where, within
+ * AGENT_WARNING_BUDGET_CHARS for the run.
+ */
+export const AGENT_WARNINGS_SHOWN = 3;
+export const AGENT_WARNING_BUDGET_CHARS = 1000;
 /** The recap names this many of the nodes a failure brought down, then counts the rest. */
 export const RECAP_NAMES_SHOWN = 5;
 /** A longer line of a command's output is cut in the terminal; the log file keeps it whole. */

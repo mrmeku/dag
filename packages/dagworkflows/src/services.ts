@@ -2,9 +2,13 @@
  * The toolkit's services as the CLI picks them, apart from cli.ts so that a test can load them on
  * any Node. On GitHub they are optional peer dependencies, loaded only when a service is there.
  */
-import type { ActionsArtifact, ActionsCache, Host, Ports } from "./ports.ts";
-import { artifactServiceAvailable, nullActionsArtifact } from "./ports/actions-artifact.ts";
-import { nullActionsCache } from "./ports/actions-cache.ts";
+import type { ArtifactStore, CacheStore, Host, Ports } from "./ports.ts";
+import {
+  artifactServiceAvailable,
+  createActionsArtifactStore,
+  nullArtifactStore,
+} from "./ports/artifact-store.ts";
+import { createActionsCacheStore, nullCacheStore } from "./ports/cache-store.ts";
 
 /**
  * A module of the actions toolkit, which the CLI loads on GitHub alone and the package lists as
@@ -25,36 +29,35 @@ export async function peer<T>(load: () => Promise<T>): Promise<T> {
 }
 
 /**
- * `@actions/cache` is the cache service when this process can reach it. That takes the service
- * URL only a JavaScript action receives, so a `run:` step gets a notice and no cache, and need
- * not install the package; the toolkit's isFeatureAvailable decides once one is there. Locally
- * there is no service, so every restore misses.
+ * On GitHub, `@actions/cache` is the cache store when this process can reach its service. That takes the
+ * service URL only a JavaScript action receives, so a `run:` step gets a notice and no cache, and
+ * need not install the package; the toolkit's isFeatureAvailable decides once one is there.
+ * Locally the cache is what the worktrees hold on disk (`createWorktreeCacheStore`).
  */
-export async function pickActionsCache(env: Ports["env"], host: Host): Promise<ActionsCache> {
-  if (env.GITHUB_ACTIONS !== "true") return nullActionsCache;
+export async function pickCacheStore(env: Ports["env"], host: Host): Promise<CacheStore> {
   if (env.ACTIONS_CACHE_URL || env.ACTIONS_RESULTS_URL) {
     const cache = await peer(() => import("@actions/cache"));
-    if (cache.isFeatureAvailable()) return cache;
+    if (cache.isFeatureAvailable()) return createActionsCacheStore(cache);
   }
   host.annotate(
     "notice",
     "dag",
     "actions/cache is off: this step cannot reach the cache service; use the action instead of `dag run`",
   );
-  return nullActionsCache;
+  return nullCacheStore;
 }
 
 /** `@actions/artifact` likewise: the service takes the runtime token only the action receives. */
-export async function pickActionsArtifact(env: Ports["env"], host: Host): Promise<ActionsArtifact> {
-  if (env.GITHUB_ACTIONS !== "true") return nullActionsArtifact;
+export async function pickArtifactStore(env: Ports["env"], host: Host): Promise<ArtifactStore> {
+  if (env.GITHUB_ACTIONS !== "true") return nullArtifactStore;
   if (artifactServiceAvailable(env)) {
     const { DefaultArtifactClient } = await peer(() => import("@actions/artifact"));
-    return new DefaultArtifactClient();
+    return createActionsArtifactStore(new DefaultArtifactClient());
   }
   host.annotate(
     "notice",
     "dag",
     "actions/upload-artifact is off: this step cannot reach the artifact service; use the action instead of `dag run`",
   );
-  return nullActionsArtifact;
+  return nullArtifactStore;
 }

@@ -9,7 +9,7 @@ import {
 } from "@mrmeku/dagraph";
 import { cache, type ActionsCacheSpec, type ActionsCacheTasks } from "./cache.ts";
 import { addCommand, type CmdTaskSpec, type ShellTaskSpec } from "./commands.ts";
-import type { CiContext, Ports } from "./ports.ts";
+import type { CiContext, Ports, WorkflowPorts } from "./ports.ts";
 import { addPost, type PostField } from "./post.ts";
 import type { Implementation } from "./runner.ts";
 import { glob, hashFiles, requireAll, uploadArtifact, type UploadArtifactSpec } from "./steps.ts";
@@ -42,7 +42,7 @@ export type GroupsOf<S> = S extends { concurrencyLimits: infer C }
  */
 export interface Workflow<G extends string = never> {
   graph: Graph<Ports>;
-  ports: Ports;
+  ports: WorkflowPorts;
   ctx: CiContext;
   /**
    * The files the patterns match as `actions/cache`'s `path:` does, less `DEFAULT_EXCLUDES`, as

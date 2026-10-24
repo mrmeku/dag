@@ -4,7 +4,7 @@ import { describe, test } from "node:test";
 import type { SaveSpec } from "./cache.ts";
 import { STATUS_ICON } from "./config.ts";
 import type { ExecResult, Ports } from "./ports.ts";
-import { createMemoryActionsCache } from "./ports/actions-cache.ts";
+import { createMemoryCacheStore } from "./ports/cache-store.ts";
 import { createTestPorts, type RecordedHost } from "./ports/memory.ts";
 import { runPost, runWorkflow } from "./runner.ts";
 import { selectNodes } from "./select.ts";
@@ -462,8 +462,8 @@ describe("a cache's save", () => {
   });
 
   test("of a run where a task failed keeps what succeeded under a partial key, which the next run restores, or nothing with partial: skip; only a green run takes the key", async () => {
-    const service = createMemoryActionsCache();
-    const skipping = createMemoryActionsCache();
+    const service = createMemoryCacheStore();
+    const skipping = createMemoryCacheStore();
     /** A run on a fresh machine, as CI's, with `e2e` failing if `failing`. */
     const runOnCi = async (
       runId: number,
@@ -471,7 +471,7 @@ describe("a cache's save", () => {
       on = service,
       partial: SaveSpec["partial"] = "save",
     ) => {
-      const { ports, rec } = createTestPorts({ actionsCache: on, context: { runId } });
+      const { ports, rec } = createTestPorts({ cacheStore: on, context: { runId } });
       ports.exec = { run: async ([program]) => exited(program === "e2e" && failing ? 1 : 0) };
       const def = defineWorkflow({
         implementation: (workflow) => {
@@ -499,7 +499,7 @@ describe("a cache's save", () => {
           saved: ["deps-1-partial-101"],
         },
         green: {
-          restored: ["Cache restored from key: deps-1-partial-101"],
+          restored: ["Cache restored from: deps-1-partial-101"],
           saved: ["deps-1-partial-101", "deps-1"],
         },
         skipped: { restored: ["Cache not found for input keys: deps-1"], saved: [] },
@@ -508,8 +508,8 @@ describe("a cache's save", () => {
   });
 
   test("never runs after a cancel: the post pass runs the releases alone", async () => {
-    const service = createMemoryActionsCache();
-    const { ports } = createTestPorts({ actionsCache: service });
+    const service = createMemoryCacheStore();
+    const { ports } = createTestPorts({ cacheStore: service });
     const controller = new AbortController();
     const calls: string[] = [];
     ports.exec = {

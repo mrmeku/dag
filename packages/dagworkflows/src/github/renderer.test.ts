@@ -90,4 +90,52 @@ describe("GitHub renderer", () => {
       },
     );
   });
+
+  test("a failed post beside a failed check: both in the headline, the summary and the reproduce line, and requireAll and the cache save under their deps", async () => {
+    const { ports, rec, cacheStore } = createTestPorts({
+      exec: { run: async (cmd) => exited(cmd[0] === "up" ? 0 : 1, `${cmd[0]}\n`) },
+    });
+    // The save, an ordinary task now, fails after the check it waits for.
+    cacheStore.save = async () => {
+      throw Object.assign(new Error("Key Validation Error: k cannot contain commas."), {
+        name: "ValidationError",
+      });
+    };
+    const { implementation } = defineWorkflow({
+      implementation: (workflow) => {
+        workflow.cache({ name: "cas", path: [".cas"], key: "k" }).save();
+        const db = workflow.task({
+          name: "up:db",
+          cmd: ["up"],
+          post: { name: "down:db", cmd: ["down"], retry: "once" },
+        });
+        const test = workflow.task({ name: "test", cmd: ["test"], deps: { db } });
+        workflow.requireAll({ deps: { test } });
+      },
+    });
+    await runWorkflow({
+      implementation,
+      workflowFile: "ci.ts",
+      ports,
+      casBaseDir: "/cas",
+      historyDir: "/history",
+    });
+    assert.deepEqual(
+      {
+        recap: rec.log.slice(-3),
+        summary: rec.summaries
+          .join("")
+          .split("\n")
+          .find((line) => line.startsWith("### ")),
+      },
+      {
+        recap: [
+          "✖︎ test, down:db failed · ci.ts · built 2 · cached 0 · failed 4 · skipped 0 · wall 15.0s",
+          "failed: test, require-all, down:db, save:cas",
+          "reproduce: npx --no dag run ci.ts --only test,down:db",
+        ],
+        summary: "### ✖︎ test, down:db failed",
+      },
+    );
+  });
 });

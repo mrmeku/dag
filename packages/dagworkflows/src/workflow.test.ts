@@ -132,7 +132,7 @@ describe("defineWorkflow", () => {
 describe("two of every node the facade adds", () => {
   test("that differ in their work each have a key, a log and outputs of their own", async () => {
     // A command prints its last argument, so its log shows which command ran.
-    const { ports, fs, actionsCache } = createTestPorts({
+    const { ports, fs, cacheStore } = createTestPorts({
       exec: {
         run: async (argv) => {
           const output = `${argv.at(-1) ?? ""}\n`;
@@ -220,7 +220,7 @@ describe("two of every node the facade adds", () => {
     });
     const pair = (x: string, id: number) => ({
       [`restore:${x}`]: node(`Cache not found for input keys: ${x}-1, ${x}-\n`, {}),
-      [`save:${x}`]: node(`Cache saved with key: ${x}-1\n`, { cacheId: String(id) }),
+      [`save:${x}`]: node(`Cache saved with key: ${x}-1\n`, { saved: "true" }),
       [`cmd:${x}`]: node(`cmd ${x}\n`, {}),
       [`shell:${x}`]: node(`echo shell ${x}\n`, {}),
       [`action:${x}`]: node(`action ${x}\n`, { note: x }),
@@ -239,7 +239,7 @@ describe("two of every node the facade adds", () => {
       [`clean:${x}`]: node(`echo clean ${x}\n`, {}),
     });
     assert.deepEqual(
-      { nodes, saved: Object.fromEntries(actionsCache.entries) },
+      { nodes, saved: Object.fromEntries(cacheStore.entries) },
       {
         nodes: { ...pair("a", 1), ...pair("b", 2) },
         saved: { "a-1": ["a"], "b-1": ["b"] },
@@ -402,5 +402,37 @@ export function uploadPathsReadHandles(workflow: Workflow) {
     artifact: "c",
     deps: { pack: settled(pack) },
     path: ({ pack }) => [pack?.tarball],
+  });
+}
+
+/** Typechecked, never run: each line marked @ts-expect-error must not compile. */
+export function execIsOutOfReach(workflow: Workflow) {
+  // @ts-expect-error a command while the graph is built, which no node logs or cancels
+  void workflow.ports.exec;
+  workflow.task({
+    name: "a",
+    action: async ({ ports, run }) => {
+      // @ts-expect-error a command past the task's shell, which its log and cancel miss
+      void ports.exec;
+      await run(["true"]);
+    },
+  });
+  workflow.task({
+    name: "c",
+    cmd: ["true"],
+    post: {
+      name: "b",
+      // @ts-expect-error a post's action gets the same ports
+      action: ({ ports }) => void ports.exec,
+    },
+  });
+  const pack = workflow.task({ name: "pack", cmd: ["pack"], outputs: { tarball: "pkg.tgz" } });
+  workflow.task({
+    name: "d",
+    deps: { pack },
+    inputs: { version: "d-v1" },
+    // @ts-expect-error a fingerprint gets the same ports
+    invalidateOn: { pack: (_outputs, ports) => String(ports.exec) },
+    action: () => {},
   });
 }

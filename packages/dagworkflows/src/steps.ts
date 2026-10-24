@@ -1,4 +1,3 @@
-import type { UploadArtifactOptions, UploadArtifactResponse } from "@actions/artifact";
 import {
   isFileHandle,
   settled,
@@ -7,7 +6,7 @@ import {
   type Graph,
   type NodeRef,
 } from "@mrmeku/dagraph";
-import type { Ports } from "./ports.ts";
+import type { ArtifactUploadOptions, Ports } from "./ports.ts";
 import { addTask, type TaskContext } from "./task.ts";
 
 export { logPath, type CommandCause } from "./step-records.ts";
@@ -113,8 +112,11 @@ export function requireAll(
  */
 type PathItem = string | FileHandle | FileHandle[] | undefined;
 
-/** The inputs of `actions/upload-artifact`: `name`, `path`, `if-no-files-found`, `overwrite`, and the client's own options. */
-export interface UploadArtifactSpec<D extends DepRecord = DepRecord> {
+/**
+ * The inputs of `actions/upload-artifact`: `name`, `path`, `if-no-files-found`, and those the
+ * store reads, `overwrite`, `retention-days` and `compression-level`.
+ */
+export interface UploadArtifactSpec<D extends DepRecord = DepRecord> extends ArtifactUploadOptions {
   /** The node's name; `artifact` is the artifact's. */
   name: string;
   /** The artifact's name on the run page: no `"`, `:`, `<`, `>`, `|`, `*`, `?`, `\\` or `/`. */
@@ -131,10 +133,6 @@ export interface UploadArtifactSpec<D extends DepRecord = DepRecord> {
   deps?: D;
   /** What an empty `path` does: a warning and no artifact (the default), a failure, or nothing. */
   ifNoFilesFound?: "warn" | "error" | "ignore";
-  /** Delete an artifact of the same name first: a re-run of a failed job shares its run's artifacts. */
-  overwrite?: boolean;
-  /** Handed to `@actions/artifact` as is: `retentionDays`, `compressionLevel`, `skipArchive`. */
-  options?: UploadArtifactOptions;
 }
 
 /** The deepest directory every file is under, the archive's root: `a/b/x` and `a/c/y` give `a`. */
@@ -151,8 +149,8 @@ function commonDir(files: string[]): string {
 
 /**
  * `actions/upload-artifact` as an `action` task. Artifacts belong to a run, so it runs every
- * time, never from the cache, and its `response`, `artifact.json`, holds what `@actions/artifact`
- * returned: the id, size and digest, or `{}` when nothing went up. `path` names the files when it
+ * time, never from the cache, and its `response`, `artifact.json`, holds the artifact's id and
+ * size, or `null` when nothing went up. `path` names the files when it
  * runs: a glob is matched then, and a dep's handle is the file it produced, so `path: ({ pack })
  * => [pack.tarball]` uploads a tarball straight from the CAS. The archive is rooted at the
  * deepest directory holding every file, as the action roots it, so one node's outputs sit at the
@@ -177,33 +175,25 @@ export function uploadArtifact<D extends DepRecord>(
         isFileHandle(item) ? [item.path] : Array.isArray(item) ? item.map((file) => file.path) : [],
       );
       const files = [...(patterns.length ? await glob(patterns) : []), ...named];
-      const done = (uploaded: UploadArtifactResponse) =>
-        ports.fs.writeText(out.response, JSON.stringify(uploaded, null, 2));
+      const done = (uploaded: { id: number; size: number } | undefined) =>
+        ports.fs.writeText(out.response, JSON.stringify(uploaded ?? null, null, 2));
       if (files.length === 0) {
         const searched = patterns.length ? `: ${patterns.join(", ")}` : "";
         const line = `No files were found with the provided path${searched}. No artifacts will be uploaded.`;
         if (ifNoFilesFound === "error") throw new Error(line);
         if (ifNoFilesFound === "warn") warn(line);
         else log(line);
-        return done({});
+        return done(undefined);
       }
-      if (spec.overwrite) {
-        try {
-          await ports.actionsArtifact.deleteArtifact(spec.artifact);
-        } catch (e) {
-          if (!(e instanceof Error && e.name === "ArtifactNotFoundError")) throw e;
-        }
-      }
-      const uploaded = await ports.actionsArtifact.uploadArtifact(
-        spec.artifact,
-        files,
-        commonDir(files),
-        spec.options,
-      );
+      const uploaded = await ports.artifactStore.upload(spec.artifact, files, commonDir(files), {
+        ...(spec.overwrite !== undefined && { overwrite: spec.overwrite }),
+        ...(spec.retentionDays !== undefined && { retentionDays: spec.retentionDays }),
+        ...(spec.compressionLevel !== undefined && { compressionLevel: spec.compressionLevel }),
+      });
       log(
-        uploaded.id === undefined
+        uploaded === undefined
           ? `Artifact ${spec.artifact} not uploaded: no artifact service`
-          : `Artifact ${spec.artifact} has been successfully uploaded! Final size is ${uploaded.size ?? 0} bytes. Artifact ID is ${uploaded.id}`,
+          : `Artifact ${spec.artifact} has been successfully uploaded! Final size is ${uploaded.size} bytes. Artifact ID is ${uploaded.id}`,
       );
       return done(uploaded);
     },

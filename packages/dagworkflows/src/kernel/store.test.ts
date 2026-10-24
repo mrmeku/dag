@@ -2,9 +2,10 @@ import type { ExecEvent, JsonValue, Node, Result } from "@mrmeku/dagraph";
 import assert from "node:assert/strict";
 import { describe, test } from "node:test";
 import { createTestPorts, steppingClock } from "../ports/memory.ts";
-import { errorMessage, formatDuration, reportHeadline } from "./format.ts";
+import { errorMessage, formatDuration, reportHeadline, warningMessages } from "./format.ts";
 import type { NodeReport } from "./report.ts";
 import { completedLines, initialNodeState, nodeReducer, type NodeState } from "./run-slice.ts";
+import * as selectors from "./selectors.ts";
 import { createRunStore, type RunListener } from "./store.ts";
 
 const node = (name: string, deps: string[] = []): Node => ({ name, kind: name, deps });
@@ -331,6 +332,7 @@ describe("run store", () => {
         controls: feed(["step\u0085done\x07\tok\n", "soft\u00adhyphen\n"]),
         debug: feed(["tsc ok\n::debug::walking src\n", "::debug::walking lib"]),
         unfinished: feed(["compiling\n", "50%"]),
+        warning: feed(["building\n", "::warning title=build::careful\n"]),
       },
       {
         blank: { completed: ["a", "", "b"], unfinishedLine: "", lastLine: "b" },
@@ -354,6 +356,12 @@ describe("run store", () => {
           lastLine: "tsc ok",
         },
         unfinished: { completed: ["compiling"], unfinishedLine: "50%", lastLine: "compiling" },
+        // The terminal prints a warning apart, so it is never a node's last line.
+        warning: {
+          completed: ["building", "::warning title=build::careful"],
+          unfinishedLine: "",
+          lastLine: "building",
+        },
       },
     );
   });
@@ -387,6 +395,51 @@ describe("run store", () => {
         ],
         outcomes: ["✔︎ 1 node succeeded", "⏭︎ 1 node skipped, a dependency failed"],
       },
+    );
+  });
+
+  test("the warnings in a log, as GitHub's runner reads them", () => {
+    assert.deepEqual(
+      warningMessages([
+        "  ::warning title=lint%3Aa::50%25 done,%0Ano more",
+        "::WARNING file=a.ts,line=3::shout",
+        "::notice::a notice",
+        "echo ::warning::not a command",
+        "::stop-commands::pause",
+        "::warning::held",
+        "::pause::",
+        "::warning::after",
+      ]),
+      [
+        "50% done,\nno more",
+        "shout",
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        "after",
+      ],
+    );
+  });
+
+  test("in the terminal's rule a failed post is its own failure, though it ran no command after failed nodes, and requireAll is not", () => {
+    const db = node("up:db");
+    const check = node("test", ["up:db"]);
+    const requireAll = node("require-all", ["test"]);
+    // An `action` post, which waits for every node downstream of its main.
+    const down = { ...node("down:db", ["up:db", "test", "require-all"]), post: true as const };
+    const { store, events } = storeOf([]);
+    store.begin({ title: "main", nodes: [db, check, requireAll, down] });
+    events(
+      built(db, "kdb"),
+      failed(check, "kt", "make b exited 2", command),
+      failed(requireAll, "kr", "failed: test"),
+      failed(down, "kd", "connect ECONNREFUSED"),
+    );
+    assert.deepEqual(
+      selectors.ownFailures(store.getState()).map((failure) => failure.node.name),
+      ["test", "down:db"],
     );
   });
 });

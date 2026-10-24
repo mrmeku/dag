@@ -13,8 +13,9 @@ import {
   type OutputStyle,
 } from "../config.ts";
 import { createGithubRenderer } from "../github/renderer.ts";
-import { createRunStore, type RunStore } from "../kernel/store.ts";
-import type { SyncFs } from "../ports.ts";
+import { annotationLine, logLines, warningMessages } from "../kernel/format.ts";
+import { createRunStore, type RunListener, type RunStore } from "../kernel/store.ts";
+import type { Host, SyncFs } from "../ports.ts";
 import { createLocalHost } from "../ports/local.ts";
 import { syncFs as nodeSyncFs } from "../ports/real.ts";
 import type { RunOptions } from "../runner.ts";
@@ -31,6 +32,24 @@ function outputStyleFor(chosenStyle: OutputStyle | undefined, isTerminal: boolea
   if (isCI) return "grouped";
   if (isAgent) return "failures";
   return isTerminal && process.env.TERM !== "dumb" ? "live" : "grouped";
+}
+
+/** The `grouped` style: GitHub's renderer on the local host, each warning in place as the host prints it. */
+function createGroupedRenderer(host: Host): RunListener {
+  const githubRenderer = createGithubRenderer(host);
+  return {
+    ...githubRenderer,
+    settle: (nodeState, run, log) => {
+      const messages = warningMessages(log);
+      const shown = log.flatMap((line, index) => {
+        const message = messages[index];
+        return message === undefined
+          ? [line]
+          : logLines(annotationLine("warning", nodeState.node.name, message));
+      });
+      githubRenderer.settle?.(nodeState, run, shown);
+    },
+  };
 }
 
 /**
@@ -91,7 +110,7 @@ export function createLocalSession(
     casBaseDir: runOptions.casBaseDir,
     lastRunAtBegin: true,
     listeners: [
-      terminalRenderer ?? createGithubRenderer(host),
+      terminalRenderer ?? createGroupedRenderer(host),
       createFailuresReport(localContext, syncFs, warn),
       logFiles,
     ],

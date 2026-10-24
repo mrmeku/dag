@@ -4,17 +4,23 @@ import {
   depFailedMessage,
   formatDuration,
   isDebugCommand,
+  isWarningCommand,
   plainLine,
   textAfterLastReturn,
 } from "./format.ts";
 import { isSettled, startedAtOf } from "./selectors.ts";
 
-/** What every node has: the graph's node and what its command printed. */
+/** A node of a pass: the graph's node, marked `post` when it is a post, whose failure no dep explains. */
+export interface PassNode extends Node {
+  readonly post?: true;
+}
+
+/** What every node has: the pass's node and what its command printed. */
 interface NodeLines {
-  readonly node: Node;
+  readonly node: PassNode;
   /** The line not yet ended, from its last carriage return: what a terminal still shows. */
   readonly unfinishedLine: string;
-  /** The last line with text the node ended in this pass, plain. */
+  /** The last line with text the node ended in this pass, plain, a warning command aside. */
   readonly lastLine: string;
   /** Whether the node ended a line in this pass. */
   readonly printed: boolean;
@@ -96,7 +102,7 @@ export interface RunState {
 export interface Pass {
   banner?: { title: string; lines: string[] };
   title: string;
-  nodes: Node[];
+  nodes: PassNode[];
   rerunCommand?: string;
 }
 
@@ -120,7 +126,7 @@ export type RunAction =
 
 export const initialRunState: RunState = { nodes: new Map(), lifecycle: { status: "running" } };
 
-export const initialNodeState = (node: Node): PendingNodeState => ({
+export const initialNodeState = (node: PassNode): PendingNodeState => ({
   node,
   status: "pending",
   unfinishedLine: "",
@@ -173,7 +179,7 @@ function linesAfter(state: NodeState, chunk: string) {
   const ended = completedLines(state.unfinishedLine, chunk);
   return {
     unfinishedLine: unfinishedLineAfter(state.unfinishedLine, chunk),
-    lastLine: ended.findLast((line) => line.trim()) ?? state.lastLine,
+    lastLine: ended.findLast((line) => line.trim() && !isWarningCommand(line)) ?? state.lastLine,
     printed: state.printed || ended.length > 0,
   };
 }
