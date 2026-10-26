@@ -1,10 +1,16 @@
 /**
- * Fills the generated sections of packages/dagworkflows/docs/reference.md from their sources: the
- * CLI's commander program, the action's action.yml and the paths in config.ts. The prose around
- * them is the file's own. `bun run docs` writes it; the release runs it with --check, which fails while it is stale.
+ * Regenerates what the packages' docs do not hold by hand: each package's API reference in
+ * docs/api/, written by TypeDoc from the TSDoc of each entry of its exports map (typedoc.json), and
+ * the `<!-- generated:name -->` sections of the dagworkflows README and the action's README, from
+ * the CLI's commander program, the action's action.yml and the paths in config.ts. `bun run docs`
+ * writes them. With --check it writes them into a copy instead and fails while the copy differs:
+ * the release runs it so, as docs are written for a release.
  */
 import type { Option } from "@commander-js/extra-typings";
-import { readFileSync, writeFileSync } from "node:fs";
+import { spawnSync } from "node:child_process";
+import { cpSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { format, resolveConfig } from "prettier";
 import { parse } from "yaml";
@@ -19,12 +25,11 @@ import {
 } from "../packages/dagworkflows/src/config.ts";
 import { logPath } from "../packages/dagworkflows/src/step-records.ts";
 
-export const REFERENCE_PATH = fileURLToPath(
-  new URL("../packages/dagworkflows/docs/reference.md", import.meta.url),
-);
-const ACTION_YML_PATH = fileURLToPath(
-  new URL("../packages/dagworkflows/action/action.yml", import.meta.url),
-);
+const DAG_DIR = fileURLToPath(new URL("..", import.meta.url));
+const PACKAGES = ["dagraph", "dagworkflows"];
+const TYPEDOC = fileURLToPath(new URL("bin/typedoc", import.meta.resolve("typedoc/package.json")));
+const ACTION_YML_PATH = join(DAG_DIR, "packages/dagworkflows/action/action.yml");
+const docsDir = (root: string, pkg: string) => join(root, "packages", pkg, "docs");
 
 interface ActionInput {
   description: string;
@@ -131,37 +136,75 @@ function fileLines(): string[] {
   );
 }
 
-const SECTIONS: Record<string, () => string[]> = {
-  cli: cliLines,
-  action: actionLines,
-  files: fileLines,
+const PAGES: Record<string, Record<string, () => string[]>> = {
+  "packages/dagworkflows/README.md": { cli: cliLines, files: fileLines },
+  "packages/dagworkflows/action/README.md": { action: actionLines },
 };
+/** Everything the generator writes, relative to the dag directory. */
+const GENERATED = [...PACKAGES.map((pkg) => join("packages", pkg, "docs")), ...Object.keys(PAGES)];
 
-/** The document with each `<!-- generated:name -->` section filled again from its source. */
-export async function referenceDoc(current: string): Promise<string> {
+/**
+ * The page with each of its sections filled again, formatted as the page in the tree is, wherever
+ * the copy is; one it lacks, or one it has no generator for, throws.
+ */
+async function filledPage(
+  file: string,
+  sections: Record<string, () => string[]>,
+  current: string,
+): Promise<string> {
+  const path = join(DAG_DIR, file);
   const filled = new Set<string>();
-  const doc = current.replace(
+  const page = current.replace(
     /(<!-- generated:(\w+) -->)[\s\S]*?(<!-- \/generated:\2 -->)/g,
     (_, open: string, name: string, close: string) => {
-      const lines = SECTIONS[name];
-      if (!lines) throw new Error(`${REFERENCE_PATH}: no generator for section "${name}"`);
+      const lines = sections[name];
+      if (!lines) throw new Error(`${path}: no generator for section "${name}"`);
       filled.add(name);
       return `${open}\n\n${lines().join("\n")}\n\n${close}`;
     },
   );
-  const missing = Object.keys(SECTIONS).filter((name) => !filled.has(name));
-  if (missing.length > 0)
-    throw new Error(`${REFERENCE_PATH}: no section for ${missing.join(", ")}`);
-  const options = await resolveConfig(REFERENCE_PATH);
-  return format(doc, { ...options, filepath: REFERENCE_PATH });
+  const missing = Object.keys(sections).filter((name) => !filled.has(name));
+  if (missing.length > 0) throw new Error(`${path}: no section for ${missing.join(", ")}`);
+  return format(page, { ...(await resolveConfig(path)), filepath: path });
 }
 
-if (import.meta.main) {
-  const current = readFileSync(REFERENCE_PATH, "utf8");
-  const generated = await referenceDoc(current);
-  if (!process.argv.includes("--check")) writeFileSync(REFERENCE_PATH, generated);
-  else if (generated !== current) {
-    console.error(`${REFERENCE_PATH} is stale: run \`bun run docs\``);
-    process.exitCode = 1;
-  }
+/** TypeDoc infers a package's entry points from the package.json in its working directory. */
+function writeApiReference(pkg: string, out: string): void {
+  const args = [TYPEDOC, "--options", join(DAG_DIR, "typedoc.json"), "--out", out];
+  const { error, status } = spawnSync(process.execPath, args, {
+    cwd: join(DAG_DIR, "packages", pkg),
+    stdio: "inherit",
+  });
+  if (error) throw error;
+  if (status !== 0) throw new Error(`typedoc exited ${status} for ${pkg}`);
 }
+
+async function writeDocs(root: string): Promise<void> {
+  for (const [file, sections] of Object.entries(PAGES)) {
+    const path = join(root, file);
+    writeFileSync(path, await filledPage(file, sections, readFileSync(path, "utf8")));
+  }
+  for (const pkg of PACKAGES) writeApiReference(pkg, join(docsDir(root, pkg), "api"));
+}
+
+if (process.argv.includes("--check")) {
+  const copy = mkdtempSync(join(tmpdir(), "dag-docs-"));
+  try {
+    for (const path of GENERATED)
+      cpSync(join(DAG_DIR, path), join(copy, path), { recursive: true });
+    await writeDocs(copy);
+    const stale = GENERATED.filter((path) => {
+      const diff = spawnSync("diff", ["-rq", join(DAG_DIR, path), join(copy, path)], {
+        stdio: "inherit",
+      });
+      if (diff.error) throw diff.error;
+      return diff.status !== 0;
+    });
+    if (stale.length > 0) {
+      console.error(`${stale.join(", ")}: stale, run \`bun run docs\``);
+      process.exitCode = 1;
+    }
+  } finally {
+    rmSync(copy, { recursive: true, force: true });
+  }
+} else await writeDocs(DAG_DIR);

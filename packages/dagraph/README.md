@@ -1,175 +1,98 @@
-<div align="center">
-
 # dagraph
 
-**Directed Acyclic Action Graph. _Da graph._**
-
-[![npm](https://img.shields.io/npm/v/@mrmeku/dagraph.svg)](https://www.npmjs.com/package/@mrmeku/dagraph)
+[![npm](https://img.shields.io/npm/v/@mrmeku/dagraph)](https://www.npmjs.com/package/@mrmeku/dagraph)
 [![CI](https://github.com/mrmeku/dag/actions/workflows/ci.yml/badge.svg)](https://github.com/mrmeku/dag/actions/workflows/ci.yml)
-[![License: MIT](https://img.shields.io/npm/l/@mrmeku/dagraph.svg)](https://github.com/mrmeku/dag/blob/main/LICENSE)
+[![license](https://img.shields.io/npm/l/@mrmeku/dagraph)](https://github.com/mrmeku/dag/blob/main/LICENSE)
 
-</div>
+Typed task graphs for TypeScript. A job that's been taken care of stays taken care of, until what it was handed changes.
 
 ## Why dagraph
 
-You got jobs. Jobs got dependencies. Somebody's gotta keep track of who owes what to who. dagraph runs file-producing work as a graph, and it skips every job whose answer is already on disk. Three things make it worth your while:
+You've got a chain of steps, each one slow or costly, each one reading what the last one wrote. Most of them bring back the same thing as last time, so why pay for them twice? dagraph sees to it that only the work that changed gets done. And a mistake in the wiring gets caught before the job starts, not halfway through it.
 
-- **Nobody does the same job twice.** Each job gets a cache key from what it declares: its kind, its inputs and the content of its dependencies' outputs. If the cache has a result for that key and its files are unchanged, the job does not run. Two jobs of one kind that declare the same work share one result. A job that runs again and makes the same files stops there.
-- **Jobs start as soon as they can.** A job starts when its dependencies finish, within the limits you set. A cache hit never waits in line for a busy group.
-- **The compiler enforces the graph shape.** Each dependency carries its job's output type. Connect the wrong job, or forget an input, and TypeScript reports it before anything runs.
+- **A content-addressed cache with early cutoff.** A node runs again when its inputs or its dependencies' content change. A node that reruns to the same bytes stops the change there.
+- **Group limits that a cache hit never takes.** `throttledScheduler` caps how many nodes are processed at once. It also caps each **concurrency group**, a named limit that actions join, such as `network: 2`. A hit never takes a group's slot, so the slots go only to work that really runs.
+- **Wiring checked early.** A dependency of the wrong output type does not compile. A missing dependency is refused the moment the node is added. And the graph cannot hold a cycle.
 
-## Contents
+## Quick start
 
-- [Install](#install)
-- [Quick start](#quick-start)
-- [Features](#features)
-- [How it works](#how-it-works)
-- [The rules of the family](#the-rules-of-the-family)
-- [Compared to other tools](#compared-to-other-tools)
-- [Documentation](#documentation)
-
-## Install
+Install the package:
 
 ```sh
 npm install @mrmeku/dagraph
 ```
 
-dagraph runs on Node 22 or later, and on Bun.
+Two actions: `count` counts the words of its text, and `report` writes a sentence from that count. The program runs the same graph three times against one cache on disk, the third time with new text. Save it as `quick.ts`:
 
-## Quick start
-
-Two jobs. `count` counts the words in `notes.txt`. `report` writes them up. `report` needs what `count` made, so that's the edge.
-
-```typescript
-import { writeFile } from "node:fs/promises";
-import {
-  actionsFor,
-  execute,
-  file,
-  FsCache,
-  Graph,
-  nodeInputs,
-  type FileInput,
-} from "@mrmeku/dagraph";
+```ts
+import { mkdtemp, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { defineAction, execute, FsCache, Graph, nodeInputs } from "@mrmeku/dagraph";
 import { createNodeDagFs } from "@mrmeku/dagraph/fs/node";
 
-const ports = { writeFile };
-type Ports = typeof ports;
-const defineActionWithPorts = actionsFor<Ports>();
-
-const count = defineActionWithPorts({
+const count = defineAction({
   kind: "count",
-  nodeInputs: nodeInputs<{ notes: FileInput }>,
-  inputs: { version: "count-v1" },
-  action: async ({ inputs, ports, outputDir }) => {
-    const text = await inputs.notes.text();
-    const out = `${outputDir}/count.txt`;
-    await ports.writeFile(out, String(text.split(/\s+/).filter(Boolean).length));
-    return out;
+  inputs: { version: 1 },
+  nodeInputs: nodeInputs<{ text: string }>,
+  action: async ({ inputs, outputDir }) => {
+    const path = join(outputDir, "count.txt");
+    await writeFile(path, String(inputs.text.split(/\s+/).length));
+    return path;
   },
 });
-
-const report = defineActionWithPorts({
+const report = defineAction({
   kind: "report",
   deps: { count },
-  inputs: { version: "report-v1" },
-  action: async ({ depOutputs, ports, outputDir }) => {
-    const words = await depOutputs.count.text();
-    const out = `${outputDir}/report.md`;
-    await ports.writeFile(out, `# Report\n\n${words} words\n`);
-    return out;
+  action: async ({ depOutputs, outputDir }) => {
+    const path = join(outputDir, "report.txt");
+    await writeFile(path, `${await depOutputs.count.text()} words`);
+    return path;
   },
 });
 
-const graph = new Graph<Ports>();
-const words = count.addNode(graph, { inputs: { notes: file("notes.txt") } });
-report.addNode(graph, { deps: { count: words } });
-
+const casBaseDir = join(await mkdtemp(join(tmpdir(), "quick-")), "cas");
 const fs = createNodeDagFs();
-const cache = new FsCache(".dagraph", fs);
-const results = await execute(graph, { ports, cache, fs, casBaseDir: ".dagraph" });
-for (const result of results) console.log(result.name, result.status);
+const context = { cache: new FsCache(casBaseDir, fs), fs, casBaseDir };
+async function run(text: string) {
+  const graph = new Graph();
+  report.addNode(graph, { deps: { count: count.addNode(graph, { inputs: { text } }) } });
+  for (const r of await execute(graph, context)) console.log(r.name, r.status);
+}
+await run("hello big world");
+await run("hello big world");
+await run("goodbye small world");
 ```
 
-Run it once. Both jobs get done:
+Run `node quick.ts` or `bun quick.ts`. It prints:
 
 ```
 count done
 report done
-```
-
-Run it again. Nobody lifts a finger:
-
-```
 count cached
 report cached
-```
-
-Now change a word in `notes.txt`, but keep the count the same. `count` goes back to work, because its input changed. It comes back with the same number, so `report` stays home:
-
-```
 count done
 report cached
 ```
 
-## Features
-
-- **Typed dependencies.** A job says which jobs it reads from, and its types come from what it says and what it returns. Wire the wrong job into a slot, or forget one, and the compiler tells you before anything runs. [Graphs](https://github.com/mrmeku/dag/blob/main/packages/dagraph/docs/graphs.md)
-- **Named inputs.** A job declares what decides its output from outside the graph: a `file()`, or any JSON value, each under a name. Hand it a `Map` or a `Date`, and the compiler hands it back. [Graphs](https://github.com/mrmeku/dag/blob/main/packages/dagraph/docs/graphs.md#inputs)
-- **A content-addressed cache.** A job runs again only when its kind, its inputs or its dependencies' outputs change. Its name is its address, never its key. Before it trusts a cached answer, da graph hashes the files again. [Caching](https://github.com/mrmeku/dag/blob/main/packages/dagraph/docs/caching.md)
-- **Early cutoff.** A job that runs again and makes the same files does not send its dependents back to work.
-- **Settled dependencies.** A job can run without a dependency that failed, and runs again once that dependency comes through. [Graphs](https://github.com/mrmeku/dag/blob/main/packages/dagraph/docs/graphs.md#settled-dependencies)
-- **Limits.** Cap how many jobs run at once, in total and for each group, or write your own scheduler. [Execution](https://github.com/mrmeku/dag/blob/main/packages/dagraph/docs/execution.md#schedulers)
-- **Timeouts and cancellation.** Each job gets an `AbortSignal`. A job that ran out of time fails; a job you called off is cancelled. Neither is cached. [Execution](https://github.com/mrmeku/dag/blob/main/packages/dagraph/docs/execution.md#timeouts-and-cancellation)
-- **One event stream.** Every dispatch, start, line printed and result comes to one callback, for progress bars, logs and live checks. [Execution](https://github.com/mrmeku/dag/blob/main/packages/dagraph/docs/execution.md#events)
-- **Jobs anywhere.** A node's description is plain data. Keep the scheduling with `orchestrate`, and process each job in another process with `processNode`. [Executors](https://github.com/mrmeku/dag/blob/main/packages/dagraph/docs/executors.md)
-- **Diagrams.** `@mrmeku/dagraph/mermaid` draws the graph as a Mermaid flowchart. [Graphs](https://github.com/mrmeku/dag/blob/main/packages/dagraph/docs/graphs.md#draw-a-graph)
+The first time, both of them do the job. The second time nothing changed, so nobody lifts a finger: both come back `cached`. The third time `count` gets new text and goes back to work. But it brings back `3`, same as before, so `report` stays put. That's early cutoff.
 
 ## How it works
 
-Every job in da graph is a node. A node reads its inputs and its dependencies' files, writes files out, and gets a key that says exactly what it read.
+An **action** is a kind of work, defined once with `defineAction`. Its `kind` names its logic. Its `deps` name the actions whose outputs it reads, each under a **role**. Its function returns the files it wrote. A **node** is one use of an action in a `Graph`. `addNode` returns a typed **ref** that you hand to the nodes that depend on it. A node can depend only on refs that already exist, so no cycle can be written.
 
-| Term       | Meaning                                                                                                                 |
-| ---------- | ----------------------------------------------------------------------------------------------------------------------- |
-| Action     | A kind of work, defined once with `defineAction`: its `kind`, its deps and inputs, and the function that does the work. |
-| Node       | One job in the graph: an action added with `addNode`. Its name, by default its `kind`, is its address.                  |
-| Dependency | A node whose outputs another node reads, under a role. Put its `NodeRef` in `deps`.                                     |
-| Input      | Something outside the graph that decides a node's output: a `file()` or a JSON value, under a name.                     |
-| Output     | The file paths that a node's action returns, written to its own output directory.                                       |
-| Action key | A hash of the node's kind, its inputs by name and its dependencies' content by role. Nothing else.                      |
-| CAS        | The content-addressed store: each node's outputs under `<casBaseDir>/<action key>/out-<content hash>`.                  |
+A node's **action key** is a hash of its action's kind, its inputs and its dependencies' content by role, and nothing else. So when you change an action's logic, bump an input such as `version`. Outputs live in a content-addressed store, the **CAS**, under the context's `casBaseDir`. A dependent keys on what its dependency produced, not on whether it ran. That is **early cutoff**, and it is why `report` stayed `cached` on the third run.
 
-Before a node runs, da graph calculates its action key. If the cache has an entry for the key and the files still hash the same, the node does not run.
-
-The keys form a Merkle tree. Change one input, and the key of every node downstream changes with it. But if a node runs again and makes the same files, the chain stops there.
-
-## The rules of the family
-
-The engine stays small by one rule: **if a node could do it, add a node.**
-
-A check, for example, is a node. It reads another node's outputs and writes the defects it finds. It is cached by its subject's content, so it runs once for each version of the subject. The engine does not know it is a check, and it does not need to.
-
-A new primitive gets in only when a node cannot do the job without breaking the one contract: a node's key covers everything that decides its output. `settled()`, `cacheable: false`, `force`, `cacheOnly`, `inputs` and `invalidateOn` each made it in that way. Nothing else did.
-
-When in doubt, build it as a node first. If it works, it was never a primitive. See [Design](https://github.com/mrmeku/dag/blob/main/packages/dagraph/docs/design.md).
-
-## Compared to other tools
-
-- **[Make](https://www.gnu.org/software/make/)** decides what to rebuild from file timestamps. dagraph decides from content hashes, so a touched file with the same content changes nothing, and an output that comes back the same stops the rebuild.
-- **[Turborepo](https://turborepo.com) and [Nx](https://nx.dev)** run the scripts of a monorepo from a config file. dagraph is a library: the graph is TypeScript, and a node is any async function that writes files.
-- **[Bazel](https://bazel.build)** runs hermetic builds from rules in its own language, with sandboxes and remote execution. dagraph has no sandbox and no build language. It keys on what you declare, and trusts you to declare it.
-- **[p-graph](https://github.com/microsoft/p-graph)** runs a graph of promises with a concurrency limit. dagraph adds the cache, typed dependencies, timeouts and cancellation.
-
-[dagworkflows](https://github.com/mrmeku/dag/tree/main/packages/dagworkflows) is da graph's own crew: a CI runner that runs a GitHub Actions job as a dagraph graph.
+Running a graph has two halves. Orchestration decides when each node runs and does no I/O. Processing looks up a node's key and, on a miss, runs the action and stores what it wrote. `execute` joins the two in one process. The engine itself starts no processes and reads no environment variables. Commands and credentials reach actions through **ports**, passed as `ports` in the context and never in the graph.
 
 ## Documentation
 
-- [Graphs](https://github.com/mrmeku/dag/blob/main/packages/dagraph/docs/graphs.md): actions, nodes, names, dependencies, inputs, output refs, validation and diagrams.
-- [Caching](https://github.com/mrmeku/dag/blob/main/packages/dagraph/docs/caching.md): the action key, the CAS, the caches, `invalidateOn`, `cacheable` and `force`.
-- [Execution](https://github.com/mrmeku/dag/blob/main/packages/dagraph/docs/execution.md): `execute`, the execution context, schedulers, results, events, timeouts and cancellation.
-- [Executors](https://github.com/mrmeku/dag/blob/main/packages/dagraph/docs/executors.md): process nodes elsewhere with `orchestrate` and `processNode`.
-- [Design](https://github.com/mrmeku/dag/blob/main/packages/dagraph/docs/design.md): what belongs in the engine, and what belongs in a node.
+- Writing actions and wiring nodes: [Build a graph](https://github.com/mrmeku/dag/blob/main/packages/dagraph/docs/graphs.md).
+- A node ran again, or did not: [When a node runs again](https://github.com/mrmeku/dag/blob/main/packages/dagraph/docs/caching.md).
+- Limits, failures, cancellation, events, or an executor of your own: [Run a graph](https://github.com/mrmeku/dag/blob/main/packages/dagraph/docs/execution.md).
+- Every export: [the API reference](https://github.com/mrmeku/dag/blob/main/packages/dagraph/docs/api/README.md).
+- CI as a graph: [`@mrmeku/dagworkflows`](https://github.com/mrmeku/dag/blob/main/packages/dagworkflows/README.md), a CI runner whose workflows run as dagraph graphs.
 
 ## License
 
-[MIT](https://github.com/mrmeku/dag/blob/main/LICENSE)
+[MIT](https://github.com/mrmeku/dag/blob/main/LICENSE).

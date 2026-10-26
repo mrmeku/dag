@@ -1,135 +1,50 @@
-# Caching
+# When a node runs again
 
-The engine does not run a node when the cache has a correct result for it. To find that result, it calculates the node's action key from what the node declares. If the cache has an entry for the key, and the entry's files are not changed, the node does not run.
+A node is `cached` when the cache holds a verified entry for its action key. Otherwise its action runs. The [quick start](../README.md#quick-start) shows both over three executions. This page says what the key holds, how to steer it, and what to check when a node reran, or did not, against your expectations. Every export it names is in the [API reference](api/index.md).
 
-## The action key
+## What the key holds
 
-The action key is a SHA-256 hash of these items:
+A node's **action key** is a SHA-256 hash of what defines its work. When the action succeeds, its **cache entry** records the files it returned and their **content hash**, a hash of the outputs and their bytes. The files live in the **CAS**, a content-addressed store under the execution context's `casBaseDir`.
 
-- the action's `kind`, which names its logic;
-- each input, the action's and the node's own, by name: a file's path and the hash of its content, or a value as JSON with sorted keys, each [output ref](graphs.md#output-refs) as its role and output name;
-- each dependency, by role: the content hash of its outputs; or, under `invalidateOn`, the hash of its fingerprint; or, for a settled dependency that did not succeed, a mark for missing.
+In the quick start, `count`'s key holds its kind, its own input `version: 1` and its node input `text`. `report`'s key holds its kind and, under the role `count`, the content hash of what `count` wrote. In full, the key joins:
 
-A node's content hash covers each output's name, each file's path relative to its output directory, and each file's content. The names and paths are in it because a dependent reads paths: an output's name decides which file the dependent reads. These rules follow:
+- the action's `kind`;
+- each input by name, from the action's own inputs and the node's together ([how to declare each](graphs.md#inputs)): a value input as JSON, and a `file(path)` as its path and the file's bytes;
+- each dependency by role: its content hash, or the hash of its [fingerprint](#key-on-part-of-a-dependency) where `invalidateOn` gives one for the role.
 
-- The hash does not change when the output directory moves.
-- The hash changes when two outputs swap their files.
-- Renaming an output, or the file that it names, runs the dependents again, even when the bytes are the same.
+Nothing else joins it. Not the node's name or its `meta`. Not the action's function. Not the working directory or the machine. And not anything the action reads without declaring it, such as a file at a path it builds itself, an environment variable or a network call.
 
-The engine sorts the inputs by name and the dependencies by role. Thus their order does not change the key.
+So renaming a node leaves the key alone. Two nodes declared the same way share one key and one entry, even in different graphs. A lookup re-hashes an entry's files before it counts as a hit, so a node whose outputs were changed or deleted runs again.
 
-Nothing else is part of the key: not the node's name or the names of its dependencies, not the action's function, not `meta`, not `cacheable`, `concurrencyGroup` or `timeoutMs`. Thus renaming a node changes no key, and swapping two dependencies between roles does.
+## Make a logic change rerun
 
-The keys form a Merkle tree. A change to an input changes the key of the node, and the keys of all nodes downstream of it, until [early cutoff](#early-cutoff) stops it.
+The action's function is not in its key, so editing it reruns nothing by itself. Give the action a version input, such as `inputs: { version: 1 }`, and bump it whenever the logic changes. Every node of the action then gets a new key. Its dependents rerun only if its new output differs, by [early cutoff](../README.md#how-it-works).
 
-### Change a version input when the logic changes
+## Key on part of a dependency
 
-The function is not part of the key. If you change what an action does, for example a filter or a prompt, change a value input that stands for its logic:
+By default a dependent reruns whenever any byte of a dependency changes. If it reads only part of one, declare `invalidateOn: { <role>: (outputs, ports) => string | Promise<string> }` on the action. The string it returns is the **fingerprint**, and its hash replaces that role's content hash in the key. `outputs` are the dependency's outputs as file handles, which you read with `text()`, `json(guard)` or `hash()`.
 
-```typescript
-const transcode = defineActionWithPorts({
-  kind: "transcode",
-  deps: { source: fetch },
-  inputs: { version: "transcode-v2", bitrate: "128k" },
-  action: async ({ inputs, depOutputs, ports, outputDir }) => {
-    // ...
-  },
-});
-```
+A summary that reads only the page id inside its fetched source declares `invalidateOn: { source: async (source) => idOf(await source.text()) }`, where `idOf` is your own function that reads the id. It stays `cached` when the source is fetched again with different bytes but the same page id. It runs again when the id changes.
 
-If you do not change it, the engine continues to use the results of the old logic.
+## Run a node every time
 
-A version change invalidates each result of that action. If only some results are incorrect, run those nodes again with `force` from an executor. See [Executors](executors.md#choose-for-each-node).
+An action defined with `cacheable: false` never reads or writes its entry, so its nodes run in every execution. Their dependents still key on their content hash and cache as usual. So a probe that writes the same bytes each time runs every time, while the report built from it stays `cached`.
 
-### Nodes that share a key
+## Force a run
 
-Caching is content-addressed. Two nodes of one kind that declare the same inputs and the same dependency content have one key and share one entry, whatever their names. When one has run, the other gets its result. This is correct for deterministic work, and it is the reason that a value that tells two nodes apart must be an input.
-
-One key can occur twice in one execution. Each node is processed as any other: one whose key has a verified entry gets it, and one whose key has none runs. When two such nodes miss together, both run:
-
-- Deterministic work makes the same files, and the two attempts publish one directory.
-- Nondeterministic work can make different files. Attempts of one key that run at the same time both keep their directories, and the later entry replaces the earlier one in the cache. Neither attempt removes the other's directory, so no dependent loses a file.
-
-The engine does not process a key only once in each execution.
-
-### Early cutoff
-
-When a node runs again, the engine hashes its new outputs. If the content hash is the same as before (the same outputs, naming files at the same paths with the same bytes), the keys of its dependents do not change. Thus they come from the cache. A node with no outputs always has the same content hash, the hash of zero files.
-
-## Output verification
-
-Before the engine uses a cache entry, it hashes the entry's files again. If a file is missing, or its hash is different, the entry is a miss and the node runs again.
-
-## Where the files go
-
-Each attempt of a node writes its outputs to an empty directory of its own, `<casBaseDir>/<action key>/tmp-<uuid>`. When the action succeeds, the engine renames it to `<casBaseDir>/<action key>/out-<content hash>` and rewrites the returned paths to match. Nothing writes that directory again, so two executions that share a CAS never change a file the other reads. At worst, both do the work and the later entry wins.
-
-- The action sees the output directory as an absolute path. A returned path under it can be absolute or relative to the working directory. The engine compares paths in their normal form, so a path made with `path.join` matches. A returned path that is not under the output directory fails the node.
-- The entry and the result hold each path in the form of `casBaseDir`. Thus under a relative `casBaseDir`, they hold relative paths, and a CAS directory restored under another working directory still hits. A key built from a handle's absolute `path`, in a fingerprint or in an output's content, would make it miss.
-- The engine never removes a published directory. Thus no attempt removes the files of another attempt. A key whose content changes, as after `force`, keeps its old directories until you delete them.
-- An attempt that does not succeed has its directory removed. An attempt that is killed outright leaves its `tmp-<uuid>` directory.
-
-`FsCache` writes its entry to `<baseDir>/<action key>/manifest.json`. You can give `FsCache` the same directory as `casBaseDir`. The output directory and the manifest do not collide.
-
-## Caches
-
-A cache has two functions: `get(key)` and `put(key, entry)`. An entry, a `CacheEntry`, holds the output paths and their content hash. An entry that cannot be read or parsed is a miss, never a failure, and so is a `get` that fails.
-
-| Cache         | Behavior                                                                                                          |
-| ------------- | ----------------------------------------------------------------------------------------------------------------- |
-| `MemCache`    | Holds entries in memory. They go away when the process ends. Use it in tests.                                     |
-| `FsCache`     | Holds entries as JSON files on disk. They stay between runs.                                                      |
-| `TieredCache` | Reads the local cache first, then the remote cache. A remote hit is copied to the local cache. It writes to both. |
-
-To use your own storage, implement the `Cache` interface.
-
-> [!NOTE]
-> An entry holds file paths, not file content. It is valid wherever its files are at these paths from the working directory. A remote cache shares results only if it also carries the files to the same paths, or the CAS directory is shared.
-
-## Run a node each time
-
-`cacheable: false` stops the engine from reading or writing the cache for a node. The node runs in each execution. Use it for work that must run each time: a read of state that no key can see, such as the latest release list or a tool's own state, or an effect such as an upload. Work that is not deterministic can be cached: its entry keeps one of its results.
-
-The engine still calculates the node's key and hashes its outputs. Thus its dependents still use the cache by content.
-
-## Read part of a dependency
-
-The action key includes the full content hash of each dependency. If the nodes of an action read only part of a dependency's outputs, give a fingerprint of that part with `invalidateOn`, by role. The engine hashes the fingerprint into the key, in place of the content hash:
-
-```typescript
-const summarize = defineActionWithPorts({
-  kind: "summarize",
-  deps: { fetch },
-  inputs: { version: "summarize-v1" },
-  invalidateOn: {
-    fetch: async (outputs) => (await outputs.meta.json(isMeta)).description,
-  },
-  action: async ({ depOutputs, ports, outputDir }) => {
-    const { description } = await depOutputs.fetch.meta.json(isMeta);
-    const out = `${outputDir}/summary.txt`;
-    await ports.writeFile(out, await ports.summarize(description));
-    return out;
-  },
-});
-```
-
-The fingerprint holds what the action reads: the description. While it does not change, `summarize` comes from the cache, also when other fields of `meta` change. A fingerprint runs where the node is processed, with the execution's ports, and only for a dependency that succeeded.
-
-A fingerprint that includes all that the action reads is as correct as the content hash. A fingerprint that leaves out something on purpose is a trade-off. For example, a transcript can be keyed on the identity and length of a video, but not on its encoding. Make that trade-off in `invalidateOn`, where the action declares it.
-
-A constant fingerprint, `() => ""`, makes a node wait for a dependency but keeps that dependency out of the key.
-
-## Run again
-
-`execute`'s `force` option is `true` or `false`. `true` runs every node of the execution, also when it is in the cache, and writes the new entries.
-
-To force some nodes and not others, or to look nodes up without running them (`cacheOnly`), use an executor that chooses for each node. See [Executors](executors.md#choose-for-each-node). The dependents of a forced node run again only if its outputs changed.
+`execute(graph, context, { force: true })` makes every node skip the lookup, run, and replace its entry. The next plain execution hits the new entries. A forced node's dependents key on its new content, so they rerun only if that content changed.
 
 ## What is never cached
 
-The engine does not cache these results:
+A node writes no entry when its action throws, times out or is cancelled, or when a required dependency failed and it settled `dep-failed`. The next execution tries it again. So an execution after a partial failure resumes: the nodes that succeeded are `cached`, and the failed node and the nodes it held back run.
 
-- a failure,
-- a node that timed out,
-- a node that was cancelled,
-- a node with `cacheable: false`.
+## If a node reran, or did not
+
+A result is plain JSON, so save each execution's results and compare the node's `actionKey` in the two. Then find the symptom below.
+
+- **It ran again with a new key.** Something in the key changed. Compare each dependency's `contentHash` in the two saved results. If they all match, the change is in the node itself: its `kind`, an input's value or a `file()`'s bytes. A dependency that writes different bytes on every run, such as a timestamp, reruns its dependents every time. Make its output deterministic, or key on the part that matters with `invalidateOn`.
+- **It ran again with the same key.** It was forced, its action is `cacheable: false`, or one of its outputs was changed or deleted on disk.
+- **It did not rerun after you changed its code.** The function is not in the key. Bump its version input.
+- **It did not rerun after a file, an environment variable or a remote service changed.** The action read it without declaring it. Declare a `file()` input, a value input, or a dependency on a node that fetches it.
+- **A dependent stayed `cached` when its dependency ran.** That is early cutoff: the dependency wrote the same bytes, or gave the same fingerprint.
+- **A new node was `cached` the first time it ran.** Another node with the same kind, inputs and dependency content already stored that entry, perhaps in another graph. To keep two nodes apart, give each a distinguishing input, such as its name as an `id`.

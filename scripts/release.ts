@@ -9,7 +9,8 @@
  *   failure, which the restore finds as a prefix. So a re-run after a partial failure finds the
  *   receipts of what already published and skips it. A dry run saves nothing.
  * - checks: the same nodes as CI (scripts/checks.ts), so a tree CI already tested is a cache hit,
- *   and docs, which fails while docs/reference.md is stale: docs are written for a release.
+ *   and docs, which fails while anything scripts/docs.ts generates is stale: docs are written for
+ *   a release.
  * - pack: one tarball per package, a declared output, content-addressed. One build program emits
  *   both packages, so each pack reads both packages' sources. The engine is published before the
  *   runner that depends on it.
@@ -49,12 +50,16 @@ export default defineWorkflow({
     const afterCas = { deps: { cas: cas.restore } };
     const docs = workflow.task({
       name: "docs",
-      cmd: ["node", "scripts/reference-doc.ts", "--check"],
+      cmd: ["node", "scripts/docs.ts", "--check"],
       inputs: await workflow.glob(
         "packages/*/src/**",
-        "packages/dagworkflows/docs/reference.md",
+        "packages/*/package.json",
+        "packages/*/docs/**",
+        "packages/dagworkflows/README.md",
+        "packages/dagworkflows/action/README.md",
         "packages/dagworkflows/action/action.yml",
-        "scripts/reference-doc.ts",
+        "scripts/docs.ts",
+        "typedoc.json",
         ".prettierrc",
         ...TOOLCHAIN,
       ),

@@ -1,0 +1,14 @@
+{
+  "$schema": "https://typedoc.org/schema.json",
+  "plugin": ["typedoc-plugin-markdown"],
+  "tsconfig": "./tsconfig.json",
+  "readme": "none",
+  "router": "module",
+  "disableSources": true,
+  "cleanOutputDir": true,
+  "formatWithPrettier": true,
+  "prettierConfigFile": "./.prettierrc",
+  "validation": { "notExported": false },
+  "treatValidationWarningsAsErrors": true,
+  "logLevel": "Warn"
+}

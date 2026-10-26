@@ -1,315 +1,168 @@
-# Workflows
+# Write a workflow
 
-A workflow is a TypeScript file that default-exports `defineWorkflow`. Its `implementation` function adds tasks to a graph through the facade, `workflow`. Each task declares three things:
+This page takes a workflow file past the [quick start](../README.md#quick-start). A workflow file default-exports `defineWorkflow({ implementation })`. The implementation gets a `workflow` object and only describes nodes. It runs before any node starts, and again when dag pays owed [post steps](#post-steps), so it must be a pure description that runs no commands. Conditional work is plain code over `workflow.ctx`, such as `if (workflow.ctx.ref === "refs/heads/main")`. A task has no `if:` field.
 
-- the tasks that it needs (`deps`),
-- what it reads from outside the graph (`inputs`),
-- the files that it writes (`outputs`).
+Here is one workflow that uses most of it, in a git repository holding `src/a.ts` and `src/b.txt`:
 
-From these declarations, dagworkflows knows which tasks can run in parallel and which tasks can come from the cache.
-
-## A complete example
-
-```typescript
-import { defineWorkflow } from "@mrmeku/dagworkflows";
+```ts
+import { defineWorkflow, settled } from "@mrmeku/dagworkflows";
 
 export default defineWorkflow({
-  schedulerOptions: { maxParallelism: 4, concurrencyLimits: { test: 2 } },
+  schedulerOptions: { maxParallelism: 2, concurrencyLimits: { test: 1 } },
   implementation: async (workflow) => {
-    const pnpm = workflow.cache({
-      name: "pnpm",
-      path: ["~/.local/share/pnpm/store"],
-      key: `pnpm-${process.platform}-${await workflow.hash("pnpm-lock.yaml")}`,
-      restoreKeys: [`pnpm-${process.platform}-`],
+    const src = await workflow.glob("src/**");
+    const pack = workflow.task({
+      name: "pack",
+      inputs: { version: "pack-v1", ...src },
+      outputs: { tarball: "src.tgz" },
+      cmd: ({ out }) => ["tar", "-czf", out.tarball, "src"],
     });
-    const install = workflow.task({
-      name: "install",
-      cmd: ["pnpm", "install"],
-      deps: { pnpm: pnpm.restore },
+    const list = workflow.task({
+      name: "list",
+      deps: { pack },
+      inputs: { version: "list-v1" },
+      outputs: { listing: "listing.txt" },
+      shell: 'tar -tzf "$TARBALL" | sort > "$OUT"',
+      env: ({ pack, out }) => ({ TARBALL: pack.tarball, OUT: out.listing }),
     });
-    const src = await workflow.glob("src/**", "package.json", "tsconfig.json");
-    const typecheck = workflow.task({
-      name: "typecheck",
-      cmd: ["pnpm", "typecheck"],
-      inputs: src,
-      deps: { install },
-    });
-    const lint = workflow.task({
-      name: "lint",
-      cmd: ["pnpm", "lint"],
-      inputs: src,
-      deps: { install },
-    });
-    const test = workflow.task({
-      name: "test",
-      cmd: ["pnpm", "test"],
-      inputs: src,
-      deps: { install },
+    const count = workflow.task({
+      name: "count",
+      deps: { list },
+      inputs: { version: "count-v1" },
+      outputs: { count: "count.txt" },
       concurrencyGroup: "test",
+      action: async ({ depOutputs, out, ports, log }) => {
+        const n = (await depOutputs.list.listing.text()).trim().split("\n").length;
+        log(`${n} entries`);
+        await ports.fs.writeText(out.count, String(n));
+      },
     });
-    workflow.requireAll({ deps: { typecheck, lint, test } });
-    pnpm.save({ partial: "skip" });
+    const flaky = workflow.task({ name: "flaky", shell: "exit 3", outputs: { report: "r.txt" } });
+    workflow.task({
+      name: "report",
+      deps: { flaky: settled(flaky) },
+      shell: 'if [ -n "${REPORT+set}" ]; then echo has; else echo none; fi',
+      env: ({ flaky }) => ({ REPORT: flaky.report }),
+    });
+    workflow.requireAll({ deps: { count, flaky } });
   },
 });
 ```
 
-The sections that follow explain each part of this example.
+Run it with `npx --no dag run ci.ts --output-style=grouped`, which prints every node's log. `pack` and `flaky` have no dependencies, so they start together. `flaky` exits 3 and fails. `report` depends on it through `settled`, so it runs anyway and prints `none`. `list` and `count` follow `pack`, and `count` logs `3 entries`. Last, `require-all` fails with `failed: flaky`, and the run exits 1.
+
+Run it again with nothing changed. `pack`, `list` and `count` declared inputs, so they come from the CAS. `flaky` and `report` declared none, so they run again. So does `require-all`, because a failure is never cached.
+
+Now append a line to `src/b.txt` and run `npx --no dag run ci.ts --only count`, which runs `count` and everything it depends on. `pack` rebuilds because a file input changed, and `list` because its dependency's content did. But `list` writes the same listing, so `count` stays cached. A dependent keys on what its dependency wrote, not on whether it ran. That's early cutoff.
+
+The sections below take each part of this workflow in turn.
 
 ## Tasks
 
-Each node of the graph is a task. `workflow.task` adds a task whose work is exactly one of `action`, `cmd` or `shell`. A task that gives two of them does not compile. A task that sets up something to release, such as a database container, gives its release as its `post` field. See [Lifecycle](lifecycle.md#post-steps). The other functions add tasks for a common case.
-
-| Function                  | Adds                                                                                                                |
-| ------------------------- | ------------------------------------------------------------------------------------------------------------------- |
-| `workflow.task`           | A task. Its work is a TypeScript function (`action`), one program (`cmd`) or a string that bash runs (`shell`).     |
-| `workflow.requireAll`     | A task that runs no command. It fails if one of its dependencies fails. Use it for many deps.                       |
-| `workflow.cache`          | An `actions/cache` restore, and its save after every other task. See [Cache and artifacts](cache-and-artifacts.md). |
-| `workflow.uploadArtifact` | An upload of an `actions/upload-artifact` artifact.                                                                 |
+A task's work is exactly one of three fields. `cmd` is an argv run with no shell, as in `pack`. `shell` is a string run under bash with `-eo pipefail`, so any failing stage of a pipe fails the task. Use it for pipes, as in `list`. `action` is a TypeScript function, which makes `count` a function task.
 
-`workflow.requireAll` names its task `require-all` unless you give it a `name`. To add many tasks of one shape, call a function in a loop.
+A function task gets its inputs as `inputs`, its dependencies' outputs as `depOutputs` and its own output paths as `out`. It writes to its log with `log` and `warn`, and reads and writes files with `ports.fs`. It runs commands with `run` and `runShell`: `await run(["tar", "-tzf", path])` runs a program with no shell, and `await runShell('tar -tzf "$TARBALL" | sort', { env: { TARBALL } })` runs a string under bash. Both resolve with stdout and throw on a nonzero exit.
 
-### Commands: `cmd` and `shell`
+Run a program as a command when you can. A command's line, `cwd` and declared `env` are part of its cache key, so editing the command reruns it with no version to bump. Write a function task for TypeScript logic: reading a dependency's files, using `ports`, or running several programs with decisions in between. Neither its code nor the commands it runs through `run` are in its key, so bump its `version` input whenever either changes.
 
-A task with `cmd` runs one program. `cmd` is a list: the program and its arguments. No shell runs it, and nothing in it is expanded. A non-zero exit code fails the task.
+## Dependencies and outputs
 
-A task with `shell` runs one string under `bash --noprofile --norc -eo pipefail -c`. This is the `shell: bash` of a `run:` step in a GitHub workflow:
+`deps` names each dependency by a role. In `deps: { pack }` the role is `pack`, and that is the name `list` reads it by. A task waits for its dependencies to succeed, whether they ran or came from the CAS. If one fails or is skipped, the task is skipped too.
 
-- The first command that fails stops the string and fails the task.
-- A pipe fails when one of its commands fails: `npm test | tee test.log` fails when the tests fail.
-- The user's shell configuration stays out.
-- A machine without bash fails the task. dagworkflows never uses `sh` instead.
+Tasks pass files through declared outputs. `outputs: { tarball: "src.tgz" }` names a file in the task's own output directory, which moves into the CAS when the task succeeds. An output still missing when the task ends fails it. A dependent reads the file by role. A command reads it through the refs its `cmd` or `env` function receives, such as `pack.tarball`. A function task reads it through a file handle, such as `depOutputs.list.listing`, with `path`, `text()`, `hash()` and `json(guard)`. `json(guard)` checks the parsed value with the type guard you pass.
 
-```typescript
-workflow.task({ name: "lint", cmd: ["bun", "run", "lint"], inputs: await workflow.glob("src/**") });
-workflow.task({ name: "smoke", shell: "curl -fsS localhost:4000/health | grep -q ok" });
-```
+A ref becomes an absolute path only when the command starts. So it is a whole argument or a whole `env` value, never part of a string. A `shell` string never holds a ref either: pass each path through `env` and read it quoted, as `list` reads `"$TARBALL"`.
 
-Both commands take these fields:
+`settled(flaky)` waits for the dependency to end however it ends, like GitHub's `always()`. When it did not succeed, its outputs are unset in `env` and `undefined` in `depOutputs`. So test them, as `report` tests `${REPORT+set}`.
 
-| Field              | Meaning                                                                                        |
-| ------------------ | ---------------------------------------------------------------------------------------------- |
-| `name`             | The task's name. It is unique in the graph, and it is not part of the cache key.               |
-| `cmd` or `shell`   | `cmd` is a list, or a function that returns one. `shell` is a string. See [Outputs](#outputs). |
-| `deps`             | The tasks that it needs, by role.                                                              |
-| `inputs`           | What it reads from outside the graph. See [Inputs](#inputs).                                   |
-| `outputs`          | The files that it writes to its output directory, by role.                                     |
-| `cwd`              | The directory that it runs in, from the repository root.                                       |
-| `env`              | Variables set over the environment that it inherits. A record, or a function.                  |
-| `cacheable`        | `true` or `false`. See [When a task runs](#when-a-task-runs).                                  |
-| `concurrencyGroup` | A group of `concurrencyLimits`.                                                                |
-| `timeoutMs`        | The time that it can run, in milliseconds. See [Lifecycle](lifecycle.md#timeouts).             |
-| `invalidateOn`     | For a dependency that it reads only in part, that part. See [The cache key](#the-cache-key).   |
+## Inputs and when a task runs
 
-A command gets the whole environment of the process. Its `env` sets variables over it.
+`inputs` names what, besides its dependencies, decides a task's result. A file input, `file(path)`, imported from `@mrmeku/dagworkflows`, joins the key with its path as written and its content. You usually spread them from `workflow.glob("src/**")`, which leaves out `.git`, `node_modules` and `.dag`. A value input is JSON. It is a `version` string you bump when a function task's logic changes, or an environment variable read at build time, such as `mixEnv: workflow.ports.env.MIX_ENV ?? null`.
 
-### Functions: `action`
+A task is cached exactly when its inputs hold at least one defined value. With none, as `flaky` has, it runs every time. `cacheable: true` caches a task without inputs, and `cacheable: false` runs one with inputs every time.
 
-A task with `action` runs a TypeScript function:
+A cacheable task comes from the CAS when an entry exists for its action key. The key hashes the task's kind, its inputs and its declared `outputs`. For a command it also hashes the line, the `cwd` and the `env` it declares. And it hashes each dependency's content by role. Nothing else joins it: not a function's code, and not the environment a command inherits. So changing a program's source reruns nothing unless its files are inputs. `--force` ignores the CAS for one run. The rest of the contract is in dagraph's [When a node runs again](../../dagraph/docs/caching.md).
 
-```typescript
-const notes = workflow.task({
-  name: "release-notes",
-  deps: { pack },
-  inputs: { version: "release-notes-v1", changelog: file("CHANGELOG.md") },
-  outputs: { notes: "notes.md" },
-  action: async ({ inputs, depOutputs, out, ports, run }) => {
-    const files = await run(["tar", "-tzf", depOutputs.pack.tarball.path]);
-    const changes = await inputs.changelog.text();
-    await ports.fs.writeText(out.notes, `${changes}\n\n${files}`);
-  },
-});
-```
+## Side effects: receipts
 
-The function receives these values:
+A deploy or a publish has nothing to write, yet must not repeat while what it ships is unchanged. Give it the dependencies whose content it ships and `cacheable: true`, as in `deps: { build }, cacheable: true`. Its entry in the CAS then holds no outputs and serves as a receipt: proof that this command succeeded with this content. The next run with an unchanged `build` finds the receipt and does nothing. A changed `build` deploys again. A failure leaves no receipt, so the next run tries again.
 
-| Value                    | What it is                                                                                                                             |
-| ------------------------ | -------------------------------------------------------------------------------------------------------------------------------------- |
-| `inputs`                 | Each input by name: a file as a handle, a value as written.                                                                            |
-| `depOutputs`             | The outputs of each dependency, by role, as handles: `path`, `text()` and `json(is)`. A settled dependency that failed is `undefined`. |
-| `out`                    | Each declared output, by role, as its absolute path in `outputDir`. Write each one before you return.                                  |
-| `outputDir`              | A new, empty directory for this attempt, as an absolute path.                                                                          |
-| `ports`                  | The run's ports, as `workflow.ports`.                                                                                                  |
-| `signal`                 | Fires when the task times out or the run is cancelled.                                                                                 |
-| `run(argv, options)`     | Runs a program with no shell. It returns what the program writes to stdout.                                                            |
-| `runShell(cmd, options)` | Runs a string as a `shell` task does. It returns what the string writes to stdout.                                                     |
-| `log(line)`              | Writes a line to the task's log.                                                                                                       |
-| `warn(message)`          | Writes a GitHub warning to the task's log, with the task's name as its title.                                                          |
+A failed attempt's effect is not undone, so a retry can do it twice. Make the effect idempotent, or guard it: `npm view <pkg>@<version> version || npm publish …` never publishes a version twice. A receipt also lasts only as long as the CAS. On GitHub, that means [keeping the CAS between runs](github.md#keep-the-cas-between-runs).
 
-`run` and `runShell` take a `cwd`, and an `env` that is set over the inherited environment, where `undefined` removes a variable. A handle's `path`, `out` and `outputDir` are absolute, so a command with its own `cwd` finds them. They write the command's output to the task's log, and they throw when the command exits with a non-zero code. A path goes into a shell string only through `env`: `runShell('tar -tzf "$TARBALL"', { env: { TARBALL: path } })`.
+## Post steps
 
-If the function throws an error, the task fails with that error. If a declared output is missing when the function returns, the task fails.
+A task that starts something gives its release as `post`, as a GitHub action's `post:` undoes its `main:`. Here `up:db` stands in for a database by writing an id, and creating `fail-down` or `fail-test` makes a step fail:
 
-The function is not part of the cache key. Thus each value that the function reads must be in `inputs`, and the function reads it back from there. Give a task a version input, and change it when you change the function. See [The cache key](#the-cache-key).
-
-## Dependencies
-
-Each function returns a reference to its task. To make task B wait for task A, put the reference to A in the `deps` of B. This is the only way to order tasks. Tasks without a dependency between them start at the same time.
-
-If a dependency fails, dagworkflows skips the dependent task. To run the dependent task also when the dependency fails, wrap the dependency in `settled`. This is the `if: always()` of a GitHub workflow:
-
-```typescript
-import { settled } from "@mrmeku/dagworkflows";
-
-workflow.uploadArtifact({
-  name: "upload:junit",
-  artifact: "junit",
-  path: ["reports/**/*.xml"],
-  deps: { test: settled(test) },
-});
-```
-
-## Scheduler options
-
-`schedulerOptions` controls how many tasks run at the same time:
-
-- `maxParallelism` is the maximum number of tasks that run at the same time.
-- `concurrencyLimits` gives a maximum for each named group.
-
-A task joins a group with `concurrencyGroup`. The group must be a key of `concurrencyLimits`. If it is not, the workflow does not compile.
-
-## Inputs
-
-`inputs` is a record of what a task reads from outside the graph, by name. Each input is part of the task's cache key:
-
-| Input   | Example                        | The task reads | The key holds                        |
-| ------- | ------------------------------ | -------------- | ------------------------------------ |
-| A file  | `file("bun.lock")`             | a handle       | its path and the hash of its content |
-| A value | `"lint-v1"`, `{ os: "linux" }` | the value      | the value as JSON                    |
-
-`file` and `settled` are exports of `@mrmeku/dagworkflows`. A file input is its own input, and it is never part of a string, as refs are not. `` `--config=${file("eslint.config.ts")}` `` does not compile, and its conversion to a string throws.
-
-An environment variable that decides a task's output is a value input, read while the graph is built: `inputs: { mixEnv: workflow.ports.env.MIX_ENV ?? null }`. An unset variable is then `null`, apart from an empty one. The input does not change what a command receives: a command inherits the whole environment.
-
-If a task reads something that is not in `inputs`, a change to it does not run the task again.
-
-Use `workflow.glob` to declare many files, and `workflow.hash` to hash files for a cache key:
-
-- `workflow.glob(...patterns)` returns a `file()` input for each file that the patterns match, named by its path. Spread it into `inputs`: `inputs: { version: "v1", ...(await workflow.glob("src/**")) }`. It matches what the `path:` of `actions/cache` matches, hidden files included.
-- `workflow.hash(...patterns)` returns the same hash as the `hashFiles()` expression, byte for byte. It gives the patterns to `hashFiles()` as they are.
-
-Both functions are `@actions/glob`. Only `workflow.glob` excludes the directories in `DEFAULT_EXCLUDES`: `.git`, `node_modules` and `.dag`. To exclude another directory, add a negated pattern, such as `!dist/**`.
-
-> [!WARNING]
-> An exclusion removes files from the result, but `@actions/glob` still reads the excluded directory. Thus `**` reads all of `node_modules`, which can take 30 seconds. Start each pattern below the directories that you need, for example `src/**`.
-
-Two input names are taken. A task keys its declared outputs under `declaredOutputs`, and a command keys its `cmd` or `shell`, `cwd` and `env` under `command`. Thus no task's `inputs` can use the first name, and no command's `inputs` the second.
-
-## When a task runs
-
-A task that declares no inputs runs each time, as a GitHub step does. A task whose `inputs` is not empty comes from the cache when its key did not change. `cacheable` changes this:
-
-| `cacheable` | The task                                                                           |
-| ----------- | ---------------------------------------------------------------------------------- |
-| not given   | Comes from the cache if it declares inputs. Else it runs each time.                |
-| `true`      | Comes from the cache when its key did not change, also with no inputs.             |
-| `false`     | Runs each time. Use it for an install on a new runner, or for an integration test. |
-
-A command's own `cmd` or `shell`, `cwd` and `env` are part of its key, but they do not count as inputs. Thus a glob that matches no file gives a task that runs each time.
-
-A receipt is a side effect that a run again must skip, such as an `npm publish`. It declares `cacheable: true`, so the same tarball does not publish twice:
-
-```typescript
-workflow.task({
-  name: "publish",
-  deps: { pack },
-  cmd: ({ pack }) => ["npm", "publish", pack.tarball],
-  cacheable: true,
-});
-```
-
-> [!IMPORTANT]
-> A failed task writes nothing that another task can read. To upload a report after a failure, write it to the working tree and upload it with a glob. A command that writes the working tree for another task to read, as `bun install` writes `node_modules`, must run each time: give it no inputs, as `install` above, or `cacheable: false` beside them.
-
-## The cache key
-
-The cache key of a task is a hash of these items:
-
-- its kind: the task's name, or for a command `run` (`cmd`), `run-shell` (`shell`) or `post` (in a post step),
-- each input, by name,
-- for a command, its `cmd` or `shell`, `cwd` and `env`,
-- the role and file name of each declared output,
-- the content of the outputs of each dependency, by its role in `deps`.
-
-If the CAS has an entry for the key, the task does not run. dagworkflows uses the stored outputs. The order of `deps` and `inputs` does not change the key.
-
-A command's name is not in its key: it is the command's address, for `--only`, the logs and the check runs. Thus a renamed command does not run again, and two commands that run the same command on the same inputs and dependencies share one entry, and one log.
-
-An `action` task's function is not in its key, but its name is, as its kind. Thus a renamed `action` task runs again once, and two `action` tasks never share an entry, since their names differ.
-
-If a task runs again but writes the same outputs, its dependents do not run again. Thus a change that does not change a task's outputs stops at that task.
-
-These options change how a task uses the cache:
-
-| Option              | Use it when                                                                                                      |
-| ------------------- | ---------------------------------------------------------------------------------------------------------------- |
-| a version input     | The result depends on the task's own logic. Change the value, for example to `"lint-v2"`, to run the task again. |
-| `cacheable`         | The default is not correct for the task. See [When a task runs](#when-a-task-runs).                              |
-| `invalidateOn`      | The task reads only part of a dependency's outputs. Give a function that returns the part that the task reads.   |
-| `--force` (the CLI) | You want to ignore the cache for one run.                                                                        |
-
-## Outputs
-
-A command writes its output files to its output directory, and declares them by role in `outputs`. If a declared file is missing, the command fails.
-
-A command names a path only through a function. `cmd` and `env` can each be a function of the dependencies that the command declares, each with its outputs, and of its own `out` and `outputDir`:
-
-```typescript
-const pack = workflow.task({
-  name: "pack",
-  cmd: ({ outputDir }) => ["npm", "pack", "--pack-destination", outputDir],
-  outputs: { tarball: "pkg-1.0.0.tgz" },
-});
-workflow.task({ name: "list", deps: { pack }, cmd: ({ pack }) => ["tar", "-tzf", pack.tarball] });
-workflow.task({
-  name: "size",
-  deps: { pack },
-  shell: 'gzip -c "$TARBALL" | wc -c',
-  env: ({ pack }) => ({ TARBALL: pack.tarball }),
-});
-```
-
-Each value that the function receives is a ref, as `steps.pack.outputs.tarball` is in a GitHub workflow. When the command starts, a ref becomes the absolute path of the file. Thus a command with its own `cwd` sees the same file. These rules apply:
-
-- A ref is never part of a string: it is its own argument or its own `env` value. A ref in a template string or with `+` does not compile. A shell string reads the ref from `env`, quoted: `"$TARBALL"`.
-- A command names an output only through the dependencies that it declares, and a ref goes only in what the call that received it returns. Thus TypeScript refuses a dependency that is not in `deps`, a misspelt output, and a ref or an `out` kept from another command's function.
-- A settled dependency's output may be missing. It is only an `env` value. When the dependency did not succeed, the variable is unset, also when the command would inherit it. A shell string tests it: `if [ -n "$REPORT" ]; then cat "$REPORT"; fi`.
-- `out` holds the command's own outputs, and `outputDir` its output directory. A dependency cannot take the role `out` or `outputDir`.
-- An output that holds a list of paths becomes the absolute paths, joined with `:`.
-- A dependency that can be `undefined`, as in `deps: { pack: release ? pack : undefined }`, gives a record that can be `undefined`. Check it before you use it.
-- The cache key holds a ref as the dependency's role and the output's name, never the path or the name of the task that writes it. Thus renaming `pack` does not run `list` again.
-
-A task's function reads its dependencies' files from `depOutputs`, as handles, and writes its own outputs to `out`.
-
-## Composing workflows
-
-`workflow.compose(other)` puts another workflow into this one. It calls the other workflow's implementation with this workflow's graph, and returns what that implementation returns:
-
-```typescript
-import checks from "./checks.ts";
+```ts
+import { defineWorkflow } from "@mrmeku/dagworkflows";
 
 export default defineWorkflow({
-  schedulerOptions: { concurrencyLimits: { test: 2 } },
-  implementation: async (workflow) => {
-    const { lint, test } = await workflow.compose(checks);
-    workflow.requireAll({ deps: { lint, test } });
+  implementation: (workflow) => {
+    const db = workflow.task({
+      name: "up:db",
+      shell: 'echo "db-$$" > "$ID"; echo started db',
+      env: ({ out }) => ({ ID: out.id }),
+      outputs: { id: "id" },
+      post: {
+        name: "down:db",
+        shell: 'if [ -n "${ID:-}" ]; then echo "stopping $(cat "$ID")"; fi; [ ! -e fail-down ]',
+        env: ({ main }) => ({ ID: main.id }),
+      },
+    });
+    workflow.task({ name: "test", shell: "[ ! -e fail-test ]", deps: { db } });
   },
 });
 ```
 
-The other workflow's `schedulerOptions` do not apply. Each concurrency group that it declares must be in this workflow's `schedulerOptions`, or the workflow does not compile. A helper that adds tasks can also be a plain function of `workflow`.
+`down:db` is owed the moment `up:db` starts, whatever `up:db` then does, and stays owed until it succeeds. It runs after everything downstream of its task, here after `test` whether `test` passed or not. After a cancel, dag still runs the owed post steps before it exits. `--only test` runs `up:db`, `test` and `down:db`, because `--only` brings along the post steps of the tasks it runs.
 
-## The actions toolkit
+A failed post step is retried. If every try fails, the run goes red. The next run of the same file pays the debt before any task, or `npx --no dag post ci.ts` pays it: see [A post step failed, or an earlier run owes one](runs.md#a-post-step-failed-or-an-earlier-run-owes-one).
 
-dagworkflows uses the [actions toolkit](https://github.com/actions/toolkit). It does not make its own copy of it:
+The post step reads its task's outputs under the role `main`. A task that failed or was stopped passes none, so `ID` is unset and the script tests `${ID:-}`. Write the release so it is safe to run twice and safe when nothing was set up. A post step takes no dependencies. Its task takes no `inputs` or `cacheable` and is never cached, because a cache hit starts nothing, so there would be nothing to release.
 
-| Package             | Use in dagworkflows                           |
-| ------------------- | --------------------------------------------- |
-| `@actions/core`     | Log groups, annotations and the step summary. |
-| `@actions/github`   | The run's context and the check runs.         |
-| `@actions/cache`    | `workflow.cache`.                             |
-| `@actions/artifact` | `workflow.uploadArtifact`.                    |
-| `@actions/glob`     | `workflow.glob` and `workflow.hash`.          |
+## Limits and the required check
 
-Each JSON output of a cache or artifact task holds the value that the toolkit returned, without changes.
+In the first workflow, `schedulerOptions` lets at most two nodes be processed at once (`maxParallelism`). It also lets at most one task of the `test` group run at a time (`concurrencyLimits`). A task joins a group with `concurrencyGroup: "test"`. Without `schedulerOptions`, every ready node starts at once.
 
-Only `@actions/glob` is a dependency. The other packages are optional peer dependencies: the action bundles them, and `dag run` in a `run:` step needs `@actions/core` and `@actions/github`. Importing `@mrmeku/dagworkflows` loads none of them; the GitHub adapter, `createGithubHost`, is the subpath `@mrmeku/dagworkflows/github`. A typecheck needs none of them either: the published declarations hold the toolkit's types.
+`workflow.requireAll({ deps: { count, flaky } })` adds one node, `require-all`. It waits for each dependency however it ends, and fails naming those that did not succeed, as in `failed: flaky`. Point branch protection at this one check instead of at each task.
+
+## Compose workflows
+
+`workflow.compose(other)` adds another workflow's nodes to this graph and resolves to what its implementation returns. Say `checks.ts` exports `const checks = defineWorkflow({ … })`, whose implementation adds `lint` and `test` and returns `{ lint, test }`. A workflow file then imports it with `import { checks } from "./checks.ts"` and builds on its tasks with `const { lint, test } = await workflow.compose(checks)`. Node names share one namespace, so a name both use fails the graph build. Rename one of them.
+
+## Test a workflow
+
+A test runs a workflow against in-memory ports. `createTestPorts` builds them around an `exec` you script, whose `run` gets each command's argv. `runWorkflow` resolves to the results and the exit code. Here `npm test` fails, and the test checks that the database was still stopped:
+
+```ts
+import assert from "node:assert/strict";
+import { createTestPorts, defineWorkflow, runWorkflow } from "@mrmeku/dagworkflows";
+
+const ci = defineWorkflow({
+  implementation: (workflow) => {
+    const db = workflow.task({
+      name: "up:db",
+      cmd: ["docker", "compose", "up", "-d"],
+      post: { name: "down:db", cmd: ["docker", "compose", "down"] },
+    });
+    const test = workflow.task({ name: "test", cmd: ["npm", "test"], deps: { db } });
+    workflow.requireAll({ deps: { test } });
+  },
+});
+
+const calls: string[] = [];
+const { ports } = createTestPorts({
+  exec: {
+    run: async (argv) => {
+      calls.push(argv.join(" "));
+      const ok = argv[1] !== "test";
+      return { code: ok ? 0 : 1, stdout: "", stderr: "", output: "", ok };
+    },
+  },
+});
+const outcome = await runWorkflow({ ...ci, ports, casBaseDir: "/cas", historyDir: "/history" });
+assert.deepEqual(calls, ["docker compose up -d", "npm test", "docker compose down"]);
+assert.equal(outcome.exitCode, 1);
+```
+
+Save it as `ci.test.ts` and run `node --test ci.test.ts`. `workflow.glob` still reads the real disk. So a workflow that globs needs the in-memory file system to hold the same paths, as a map from path to text: `createTestPorts({ files: { "src/a.ts": "…" } })`. The other doubles, and every export, are in the [API reference](api/index/README.md).

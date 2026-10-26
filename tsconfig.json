@@ -47,5 +47,6 @@
       "@mrmeku/dagworkflows/github": ["./packages/dagworkflows/src/ports/github.ts"]
     }
   },
-  "exclude": ["node_modules"]
+  // The action's bundle is build output: in the program it would reorder unions in the API reference.
+  "exclude": ["node_modules", "packages/dagworkflows/action/dist"]
 }

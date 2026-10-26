@@ -1,375 +1,177 @@
-# Graphs
+# Build a graph
 
-A graph is a set of nodes and the dependencies between them. You make it in three steps:
+This page shows how to write the actions and nodes that [How it works](../README.md#how-it-works) describes. It starts from one whole program: two pages, each fetched, translated and summarised, where translating may fail. Every export it uses is in the [API reference](api/index.md).
 
-1. Define each kind of work once, with `defineAction`, bound to your ports by `actionsFor<Ports>()`.
-2. Add one node for each job, with the action's `addNode`. Give each node the references to the nodes that it needs.
-3. Give the graph to `execute`. See [Execution](execution.md).
+```ts
+import {
+  actionsFor,
+  createMemoryDagFs,
+  execute,
+  file,
+  Graph,
+  maybe,
+  MemCache,
+  nodeInputs,
+  settled,
+  type DagFs,
+  type FileInput,
+  type OutputRef,
+} from "@mrmeku/dagraph";
 
-The graph checks each node when you add it. A dependency must be in the graph before the node that needs it, so a graph cannot hold a cycle.
-
-## Actions
-
-An action is a kind of work. `defineAction` takes these fields:
-
-| Field              | Meaning                                                                                                                        |
-| ------------------ | ------------------------------------------------------------------------------------------------------------------------------ |
-| `kind`             | What kind of work it is, as Bazel's mnemonic. It names the action's logic, and it is part of the key.                          |
-| `deps`             | Optional. The [dependencies](#dependencies) that each node gives, by role, and what each one returns.                          |
-| `nodeInputs`       | Optional. The [inputs](#inputs) that each node gives when it is added, by name and type: `nodeInputs<{ width: number }>`.      |
-| `inputs`           | Optional. The [inputs](#inputs) that every node of the action has, such as a version that names the action's logic.            |
-| `action`           | `(actionContext) => Promise<outputs>`, the function that does the work. See [The action context](#the-action-context).         |
-| `invalidateOn`     | Optional. Fingerprints for dependencies that the nodes read only in part. See [Caching](caching.md#read-part-of-a-dependency). |
-| `cacheable`        | Optional. `false` runs the node in each execution. See [Caching](caching.md#run-a-node-each-time).                             |
-| `concurrencyGroup` | Optional. One of the groups `actionsFor<Ports, Group>()` names. See [Execution](execution.md#schedulers).                      |
-| `timeoutMs`        | Optional. How long the action can run, from 1 to 2,147,483,647 ms. See [Execution](execution.md#timeouts-and-cancellation).    |
-
-The last three fields tell how a node runs, not what it makes. None of them is part of the key.
-
-Each type of an action comes from its fields: its dependencies from `deps`, its inputs from `nodeInputs` and `inputs`, and its outputs from what `action` returns. A field that names only a type takes a generic function uncalled, as `nodeInputs<{ width: number }>`: the engine reads the type and never calls it. Called, as `nodeInputs<{ width: number }>()`, it means the same. The one type that no field gives is the ports. Bind them once, with `actionsFor<Ports>()`, and use the function that it returns for each action. TypeScript cannot infer some type parameters of a call while you write the others, so the ports come in a call of their own. An action that needs no ports can use `defineAction` from the package.
-
-```typescript
 interface Ports {
-  images: ImageTool;
+  fs: DagFs;
 }
+const limits = { network: 2 };
+const defineActionWithPorts = actionsFor<Ports, keyof typeof limits>();
 
-const defineActionWithPorts = actionsFor<Ports>();
-
-const resize = defineActionWithPorts({
-  kind: "resize",
-  deps: { source: fetch },
-  nodeInputs: nodeInputs<{ width: number }>,
-  inputs: { version: "resize-v1" },
-  action: async ({ inputs, depOutputs, ports, outputDir }) => {
-    const out = `${outputDir}/resized.jpg`;
-    await ports.images.resize(depOutputs.source.path, out, inputs.width);
-    return out;
-  },
-});
-```
-
-> [!IMPORTANT]
-> The action's function is not part of the key, but its `kind` is. Two actions of different kinds never share a cache entry, and two actions of one kind that declare the same inputs and dependencies do. Give each action a version input that names its revision, such as `"resize-v1"`, and change it when the logic changes. A function that makes many actions of one kind puts what differs between them in their inputs.
-
-### The action context
-
-The action function gets one argument, the action context. Each part of it is keyed, a tool, or this attempt's own:
-
-| Field        | Content                                                                                                                           |
-| ------------ | --------------------------------------------------------------------------------------------------------------------------------- |
-| `inputs`     | Each input, by name: a file as a [file handle](#file-handles), a value as written, with each [output ref](#output-refs) resolved. |
-| `depOutputs` | The outputs of each dependency, by the role that `deps` gives it, as file handles in the shape of the outputs.                    |
-| `ports`      | The tools from the execution context. See [Execution](execution.md#the-execution-context).                                        |
-| `outputDir`  | The absolute path of a new, empty directory that only this attempt writes.                                                        |
-| `signal`     | An `AbortSignal` that fires on the node's timeout or the execution's cancel.                                                      |
-| `output`     | A function for the text that the action prints, in chunks as printed. It adds no line ending.                                     |
-
-The action does not get the node's name or its `meta`. A value that decides the output reaches the action only as an input.
-
-The function writes its files to `outputDir` and returns their paths: a path, a list of paths, or a record of paths and lists of paths. These are the node's outputs. A path can be absolute, as `outputDir` is, or relative to the working directory. The engine stores each one in the form of `casBaseDir`. See [Caching](caching.md#where-the-files-go).
-
-> [!IMPORTANT]
-> Write outputs only to `outputDir`. A returned path that is not under `outputDir` fails the node. So does a returned path with no file, and the error names the output and its file: `output "thumb" (audio.jpg) was not written`. The engine moves the directory after the action succeeds, so no output can hold its own absolute path or the path of another output. A file that names another output names it relative to itself.
-
-### File handles
-
-An action reads each file through a `FileHandle`: a file input, an output of a dependency, or an output that an output ref names. An [output ref](#output-refs) names an output before its node runs. A handle is the file itself, inside an action. Where the file is, the engine decides.
-
-| Member     | Content                                                                                                      |
-| ---------- | ------------------------------------------------------------------------------------------------------------ |
-| `path`     | The file's absolute path while the action runs. Give it to a command or a library that takes a path.         |
-| `text()`   | The file's contents.                                                                                         |
-| `json(is)` | The file's contents as JSON, checked by the type guard `is`. A file that `is` refuses throws, with its path. |
-| `hash()`   | The SHA256 of the file's bytes. Use it to fingerprint a binary file.                                         |
-
-The handles have the shape of the outputs. `Handles<T>` gives their type for an output type `T`:
-
-| The dependency returns      | Its role in `depOutputs` holds           |
-| --------------------------- | ---------------------------------------- |
-| A path                      | a `FileHandle`                           |
-| A list of paths             | a list of `FileHandle`                   |
-| A record of paths and lists | a record of handles and lists of handles |
-
-The role of a settled dependency that did not succeed holds `undefined`, and so does a `maybe` role that the node left out. An `invalidateOn` fingerprint gets the same handles as the action.
-
-In this graph, `entry` reads JSON from one output of `source`, gives the path of the other to `stat`, and reads the text of `caption`, a settled dependency that fails:
-
-```typescript
-import { stat, writeFile } from "node:fs/promises";
-import { actionsFor, execute, Graph, MemCache, nodeInputs, settled } from "@mrmeku/dagraph";
-import { createNodeDagFs } from "@mrmeku/dagraph/fs/node";
-
-const ports = { stat, writeFile };
-type Ports = typeof ports;
-const defineActionWithPorts = actionsFor<Ports>();
-
-const isMeta = (value: unknown): value is { title: string } =>
-  typeof value === "object" &&
-  value !== null &&
-  "title" in value &&
-  typeof value.title === "string";
-
-const source = defineActionWithPorts({
-  kind: "source",
-  nodeInputs: nodeInputs<{ title: string }>,
-  inputs: { version: "source-v1" },
-  action: async ({ inputs, ports, outputDir }) => {
-    const fetched = { meta: `${outputDir}/meta.json`, image: `${outputDir}/image.jpg` };
-    await ports.writeFile(fetched.meta, JSON.stringify({ title: inputs.title }));
-    await ports.writeFile(fetched.image, "not really a jpeg");
-    return fetched;
+const fetchPage = defineActionWithPorts({
+  kind: "fetch",
+  nodeInputs: nodeInputs<{ url: string }>,
+  inputs: { version: 1 },
+  concurrencyGroup: "network",
+  action: async ({ inputs, outputDir, ports }) => {
+    const html = `${outputDir}/page.html`;
+    await ports.fs.writeText(html, `<p>${inputs.url}</p>`);
+    return { html };
   },
 });
 
-const caption = defineActionWithPorts({
-  kind: "caption",
-  nodeInputs: nodeInputs<{ title: string }>,
-  inputs: { version: "caption-v1" },
-  action: async (): Promise<string> => {
-    throw new Error("no caption yet");
-  },
-});
-
-const entry = defineActionWithPorts({
-  kind: "entry",
-  deps: { source, caption: settled(caption) },
-  inputs: { version: "entry-v1" },
-  action: async ({ depOutputs, ports, outputDir }) => {
-    const { title } = await depOutputs.source.meta.json(isMeta);
-    const { size } = await ports.stat(depOutputs.source.image.path);
-    const text = (await depOutputs.caption?.text()) ?? "no caption";
-    const out = `${outputDir}/entry.txt`;
-    await ports.writeFile(out, `${title}: ${size} bytes, ${text}\n`);
+const translate = defineActionWithPorts({
+  kind: "translate",
+  deps: { page: fetchPage },
+  action: async ({ depOutputs, outputDir, ports }) => {
+    const out = `${outputDir}/fr.html`;
+    await ports.fs.writeText(out, (await depOutputs.page.html.text()).toUpperCase());
     return out;
   },
 });
 
-const graph = new Graph<Ports>();
-const fetched = source.addNode(graph, { inputs: { title: "Dawn" } });
-const captioned = caption.addNode(graph, { inputs: { title: "Dawn" } });
-entry.addNode(graph, { deps: { source: fetched, caption: settled(captioned) } });
+const summarize = defineActionWithPorts({
+  kind: "summarize",
+  deps: { page: fetchPage, translation: settled(translate), notes: maybe<string> },
+  nodeInputs: nodeInputs<{ style: FileInput; argv: (string | OutputRef<string>)[] }>,
+  action: async ({ inputs, depOutputs, outputDir, ports }) => {
+    const style = await inputs.style.text();
+    const argv = inputs.argv.map((a) => (typeof a === "string" ? a : a.path));
+    const translated = depOutputs.translation ? await depOutputs.translation.text() : "none";
+    const out = `${outputDir}/summary.txt`;
+    await ports.fs.writeText(
+      out,
+      [style, argv.length, translated, depOutputs.notes?.path ?? "no notes"].join(" | "),
+    );
+    return out;
+  },
+});
 
-const fs = createNodeDagFs();
-const context = { ports, cache: new MemCache(), fs, casBaseDir: ".dagraph" };
-for (const result of await execute(graph, context)) console.log(result.name, result.status);
-```
-
-It prints `caption failed`, `source done` and `entry done`, and `entry.txt` holds `Dawn: 17 bytes, no caption`.
-
-These rules apply:
-
-- A handle is never part of a string. TypeScript refuses it in a template string, with `+`, and where a string goes. `String(handle)` and `JSON.stringify(handle)` compile, but they throw. To put a file in a string, use its path: `` `--input=${source.path}` ``.
-- To tell a handle from a list or a record of handles, use `isFileHandle`. Never use `typeof`: the type of a handle is a symbol's, but the handle is an object.
-- A handle's `path` changes with the machine and the working directory. Never key on it: build no `invalidateOn` fingerprint and no output's content from it. Otherwise a CAS restored elsewhere misses.
-
-## Nodes
-
-`addNode(graph, params)` adds one node and returns a `NodeRef<R>`. `params` holds only these four fields:
-
-| Field    | Meaning                                                                                                             |
-| -------- | ------------------------------------------------------------------------------------------------------------------- |
-| `name`   | The node's address. The default is the action's `kind`.                                                             |
-| `deps`   | Its dependencies, in the roles that its action declares. See [Dependencies](#dependencies).                         |
-| `inputs` | Its own inputs, added to the action's: a record, or a function of its deps that returns one. See [Inputs](#inputs). |
-| `meta`   | Data about the node for the code that reads the graph. See [Metadata](#metadata).                                   |
-
-```typescript
-const graph = new Graph<Ports>();
-const source = fetch.addNode(graph, { inputs: { url } });
-resize.addNode(graph, { deps: { source }, inputs: { width: 640 } });
-```
-
-A graph has two type parameters: the ports its actions need, and the metadata its nodes carry, `Graph<Ports, Meta>`. `addNode` accepts an action only when the graph's ports satisfy the action's. `new Graph()` holds actions that need no ports, and nodes with no metadata.
-
-### Names and subgraphs
-
-Each name must be unique in the graph. To add more than one node of the same kind, give each a name, or add each group through a subgraph. `graph.subgraph(prefix, meta)` returns a view of the graph that adds `prefix:` to the name of each node added through it:
-
-```typescript
-for (const id of imageIds) {
-  const image = graph.subgraph(id, { image: id });
-  const source = fetch.addNode(image, { inputs: { url: urlOf(id) } });
-  resize.addNode(image, { deps: { source }, inputs: { width: 640 } });
+type Meta = { page: string } | { site: true };
+const graph = new Graph<Ports, Meta>();
+for (const id of ["home", "about"]) {
+  const pageGraph = graph.subgraph(id, { page: id });
+  const page = fetchPage.addNode(pageGraph, { inputs: { url: `https://example.com/${id}` } });
+  const translation = translate.addNode(pageGraph, { deps: { page } });
+  summarize.addNode(pageGraph, {
+    deps: { page, translation: settled(translation) },
+    inputs: ({ page }) => ({ style: file("/style.txt"), argv: ["render", page.html] }),
+  });
 }
+
+const fs = createMemoryDagFs({ "/style.txt": "terse" });
+const results = await execute(graph, {
+  ports: { fs },
+  fs,
+  cache: new MemCache(),
+  casBaseDir: "/cas",
+});
 ```
 
-These nodes have the names `<id>:fetch` and `<id>:resize`. A subgraph can contain subgraphs. `subgraph(prefix)` without `meta` gives its nodes the `meta` of the graph it was made from. A subgraph holds the nodes under its prefix and every node they depend on, so `execute(graph.subgraph(id))` runs only those.
+All six nodes succeed, and `home:summarize` writes `terse | 2 | <P>HTTPS://EXAMPLE.COM/HOME</P> | no notes`. This is the graph it builds, drawn as shown under [Draw a graph](#draw-a-graph). A dashed edge is a settled dependency. Each section below explains one part of the program.
 
-A name is an address only. It is not part of any key. Two nodes of one kind that declare the same work have the same key and share one entry. So a value that tells two nodes apart must be an input, not only a part of the name. In the example, each `fetch` has its own `url` input.
+```mermaid
+flowchart LR
+  subgraph s0 ["home"]
+    n0["fetch"]
+    n1["translate"]
+    n2["summarize"]
+  end
+  subgraph s1 ["about"]
+    n3["fetch"]
+    n4["translate"]
+    n5["summarize"]
+  end
+  n0 --> n1
+  n0 --> n2
+  n1 -.-> n2
+  n3 --> n4
+  n3 --> n5
+  n4 -.-> n5
+```
 
-### Metadata
+## Actions and nodes
 
-A node's `meta` is data about it for the code that reads the graph, such as `{ image: id }`. The engine does not read it, key it or check it. It passes it through `describe()` and the events. A node's `meta` is its `params.meta`. Without one, it is the `meta` of the innermost subgraph that gave one.
+`defineAction(spec)` defines an action that needs no tools. A program with tools binds its own once, as `actionsFor<Ports, keyof typeof limits>()` does above. Its actions get `ports: Ports` in their context, and may join only the concurrency groups it names. The limit itself belongs to the scheduler that runs the graph ([Run a graph](execution.md)).
 
-Read `meta` instead of parsing names: a node's image is `node.meta.image`, not the text before the colon.
+In the spec, `kind` names the action's logic and joins every node's cache key. `action` is `async (context) => outputs`. `deps` declares the roles each node fills, `nodeInputs` the inputs each node gives, and `inputs` the ones every node shares, such as `{ version: 1 }`. `invalidateOn` and `cacheable` change what the key covers and whether a node is cached at all ([When a node runs again](caching.md)). `concurrencyGroup` and `timeoutMs` change how it runs ([Run a graph](execution.md)).
+
+The action's context holds `inputs`, `depOutputs`, `ports`, `outputDir`, a `signal` that fires on a timeout or a cancel, and `output(chunk)` for text it prints. The action returns its outputs: one path, a list of paths, or a record whose values are a path or a list. The output type is exactly what it returns. So `fetchPage` has outputs `{ html: string }`, and `translate` can read `depOutputs.page.html`. Only `inputs` and `depOutputs` join the key, not the function, so a change to the action's logic needs a bump to an input such as `version`.
+
+You add a node through its action, never the graph: `fetchPage.addNode(graph, { name, meta, deps, inputs })`. It returns a ref, the typed handle you give to the nodes that depend on it.
 
 ## Dependencies
 
-An action declares its dependencies in `deps`, by role. Each node gives a `NodeRef` in each role. The role is the key of the dependency's outputs in `depOutputs`. A role holds one of these:
+A role is the name under which an action reads a dependency: `page` in `deps: { page: fetchPage }`. Each node fills it with a ref, and the action reads that node's files as `depOutputs.page`.
 
-| Role                              | The node gives                                        | `depOutputs` holds          |
-| --------------------------------- | ----------------------------------------------------- | --------------------------- |
-| An action: `{ fetch }`            | A node of an action that returns what `fetch` returns | its handles                 |
-| `dep<T>`                          | A node of any action that returns `T`                 | its handles                 |
-| `settled(fetch)`, or `settled<T>` | `settled(ref)`, a node that it runs without           | its handles, or `undefined` |
-| `maybe(fetch)`, or `maybe<T>`     | A node, `undefined`, or nothing                       | its handles, or `undefined` |
+A role is required unless marked. When a required dependency fails, the node is held back and settles `dep-failed`, naming the dependency. A `settled(...)` role works like `Promise.allSettled`: the node waits for the dependency, then runs whether it succeeded or not. A node fills it with `settled(ref)`, as the example fills `translation`. Had `translate` thrown, both summarize nodes would still run, reading `depOutputs.translation` as `undefined`.
 
-Name the action when one action fills the role, and call `settled` and `maybe` around it. When more than one action can fill the role, name its outputs instead: `dep<T>`, `settled<T>` or `maybe<T>`, uncalled, since each names only a type. Use these for a transcript from `transcribe` or from `captions`, or when a function makes the action, as a factory of actions does.
-
-```typescript
-const entry = defineActionWithPorts({
-  kind: "entry",
-  deps: { source: fetch, transcript: settled<{ srt: string }>, summary: maybe(summarize) },
-  action: async ({ depOutputs }) => {
-    // ...
-  },
-});
-```
-
-`NodeRef<T>` carries the output type of the node. If you give a node whose outputs are not what the role declares, the program does not compile. These do not compile either: a missing dependency, a role that the action does not declare, and a misspelt output in `depOutputs` or in a fingerprint.
-
-The key holds each dependency by its role, never by its node's name. Thus renaming a node changes no key, and swapping two dependencies between roles does. `deps` in the action declares types and roles only. The dependencies, and the key, come from the node's `deps`.
-
-Two roles can refer to the same node. The node is then one dependency.
-
-Code that knows a node only by its name, such as a selection of a graph, gets a reference from `nodeRefNamed(name)`. Its outputs are untyped. If the graph holds no node of that name, `addNode` refuses the dependency.
-
-An action that takes a dependency in any role, such as a step that its caller wires, declares `deps` as a record of type `DepSpecs`, whose roles are each a `Dep`, a `SettledDep` or `undefined`, or an uncalled marker: `const anyRole: DepSpecs = {}`, then `deps: anyRole`. Each node then gives the roles that it names, and its `inputs` function gets the refs of those roles.
-
-### Settled dependencies
-
-A settled dependency is a dependency that the node can run without. Declare its role with `settled` in the action, `settled(captions)` or `settled<T>`, and wrap the node's reference in `settled()`:
-
-```typescript
-const entry = defineActionWithPorts({
-  kind: "entry",
-  deps: { captions: settled(captions) },
-  action,
-});
-entry.addNode(graph, { deps: { captions: settled(captionsRef) } });
-```
-
-The node waits for a settled dependency to settle, as `Promise.allSettled` waits for each promise. If `captions` fails, `entry` runs, and `depOutputs.captions` is `undefined`. These rules apply:
-
-- The key records a settled dependency that did not succeed as missing. The engine does not cache a failure, so a later execution runs `captions` again. When it succeeds, `entry` runs again with its output.
-- A required dependency that did not succeed keeps its dependents from running. They settle `dep-failed`.
-- A `NodeRef` cannot fill a `SettledRef` role, and a `SettledRef` cannot fill a required role.
-- If two roles refer to the same node and one role is required, the dependency is required.
+A `maybe(...)` role is one a node may leave out, as these nodes leave out `notes`, which then reads `undefined`. Both kinds of role are typed `| undefined`, so the compiler makes the action check before reading. The [API reference](api/index.md) gives each marker's forms.
 
 ## Inputs
 
-An input is something outside the graph that decides a node's output, under a name that the action reads it by. Each input is one of these:
+A node's inputs are its action's own `inputs` merged with the node's. The key reads every one by name, so changing one runs the node again. `nodeInputs<T>` declares what each node gives, and a missing or mistyped input doesn't compile.
 
-| Input   | Example                              | The action reads                | The key holds                        |
-| ------- | ------------------------------------ | ------------------------------- | ------------------------------------ |
-| A file  | `file("bun.lock")`                   | a [handle](#file-handles) on it | its path and the hash of its content |
-| A value | `2`, `"en"`, `{ languages: ["en"] }` | the value as written            | the value as JSON, with sorted keys  |
+Value inputs are JSON only: strings, finite numbers, booleans, `null`, and arrays and plain records of these.
 
-An action declares inputs for all its nodes in `inputs`, and the inputs that each node gives in `nodeInputs`. A node adds its own:
+`file(path)` is a file input. The path as written and the file's bytes join the key, so editing the file runs the node again. The action reads it as a handle, as `summarize` reads `inputs.style`.
 
-```typescript
-const lint = defineActionWithPorts({
-  kind: "lint",
-  nodeInputs: nodeInputs<{ eslint: FileInput; lock: FileInput }>,
-  inputs: { version: "lint-v1" },
-  action,
-});
-lint.addNode(graph, { inputs: { eslint: file("eslint.config.ts"), lock: file("bun.lock") } });
-```
+To put a dependency's output into a value, such as an argv list for a command, give `inputs` as a function, as each summarize node does. The function gets each role's output refs. So `page.html` here is a ref to the fetched html, not the node ref `page` passed in `deps`. `["render", page.html]` puts that ref in the list, and the action reads the item as a handle on the fetched file.
 
-These rules apply:
+## Files and outputs
 
-- A node gives each input that `nodeInputs` declares, of its type. A missing one does not compile.
-- A node cannot declare an input again that its action declares. This does not compile. A record built at run time, as by `Object.fromEntries`, names no input in its type, so `addNode` refuses the repeat when the node is added.
-- A node of an action without `nodeInputs`, or whose `nodeInputs` has an index signature, can add inputs that its action never reads. They change its key all the same.
-- A value is JSON: a string, a finite number, a boolean, `null`, or an array or a plain record of these. Its type is `InputValue`. A value that is not JSON does not compile; the table below gives the right form. A property that is `undefined` is dropped.
-- `file()` is its own input. It is never part of a value or of a string, as a [ref](#output-refs) is not, and its conversion to a string throws.
-- An input is never another node. What comes from a node is a dependency.
-- The engine hashes each file path as you give it. Each node hashes the files that it declares when it calculates its key, so it keys each file as it is when the node runs. A node that reads a file that another node writes needs a dependency on that node. A file that cannot be read fails the node before it gets a key.
+An action reads every file through a handle, whether it comes from a `file()` input or a dependency's output. A handle has:
 
-| Does not compile                        | Write instead                                                   |
-| --------------------------------------- | --------------------------------------------------------------- |
-| A `Map` or a `Set`                      | `Object.fromEntries(map)`, `[...set]`                           |
-| A `Date`                                | `date.toISOString()`                                            |
-| A `bigint`                              | `String(n)`                                                     |
-| A function or a class instance          | The data that it holds, as a record                             |
-| `undefined` as an item of a list        | `null`, or no item                                              |
-| `{ tools: { lock: file("bun.lock") } }` | `{ lock: file("bun.lock") }`                                    |
-| A node                                  | A dependency in `deps`, and a [ref](#output-refs) to its output |
+- `path`, the absolute path while the action runs, for a command or library that wants one;
+- `text()`, the contents as UTF-8;
+- `json(guard)`, the contents parsed and checked by a type guard;
+- `hash()`, the SHA-256 of its bytes.
 
-No type can see `NaN`, `Infinity`, or an object that is not plain, such as a class instance whose type is a record's. A narrower type can also hide a value, as a record typed `{ model: string }` can hold a function. Thus an input can hold a function, a symbol, a `bigint`, or `undefined` as an item of a list. The engine refuses each where it is declared, with its path and what to give instead, for example `inputs.ratio is NaN, which is not JSON. Give a finite number, or null.`
+Write only under `outputDir`, a new, empty directory for this attempt. The engine moves the directory once the action returns. Returned paths are rewritten for you, but paths written inside a file are not. So a file that names another output of the same node, such as an index naming its pages, must name it relative to itself.
 
-If a node reads something that it does not declare, a change to it does not run the node again.
+## Give actions their tools
 
-## Output refs
+Ports are the program's tools, such as a file system, an HTTP client or a translator. They go in the execution context, never in the graph, so the same graph runs against real tools in production and against fakes in a test. `actionsFor<Ports>()` types them, and the graph takes the same type: `new Graph<Ports>()`, with the meta type second if there is one, as in the example.
 
-A ref stands for a path that the engine fills in only when its node has run. Thus a ref is never a string, and it is never part of a string.
+## Test an action
 
-A value input can name an output of a dependency. To do this, give `inputs` as a function. It gets each dependency that `deps` declares, by its role, as a record of refs to that dependency's outputs. It returns the inputs, and it runs once, when the node is added:
+To test one action, add one node of it to a fresh `Graph<Ports>` and execute it as the example does. Seed `createMemoryDagFs()` with its input files, and pass it both as the context's `fs` and as the `fs` port. Add a `MemCache`, and fakes for the other ports. The memory file system holds only what goes through it, so the action must write with `ports.fs.writeText`.
 
-```typescript
-const pack = packAction.addNode(graph, {});
-publish.addNode(graph, {
-  deps: { pack },
-  inputs: ({ pack }) => ({ argv: ["npm", "publish", pack.tarball] }),
-});
-```
+An action with a required role can't be added alone. Add a node for that role first, as the example adds each `fetch` before its `translate`.
 
-A ref of a required dependency is an `OutputRef<T>`, where `T` is the type of that output. A ref of a settled dependency is a `SettledOutputRef<T>`. A dependency whose outputs are not a record has no refs. An output that some return of the dependency leaves out, or that an index signature names, has no ref. The action reads it from `depOutputs`.
+Then read the output. Narrow the result with `isSucceeded`, and take its path with `soleOutput(result.outputs)`, or with `namedOutput(result.outputs, name)` for a record. Look that path up in the memory file system's `.files`, a `Map` from path to contents. [Run a graph](execution.md) covers the context and results.
 
-A ref can be in a value input: the input itself, an item of an array or a property. The action reads it as a [handle](#file-handles) on the dependency's published file, or a list of handles for a list output. A ref of a settled dependency that did not succeed reads as `undefined`.
+## Names, subgraphs and meta
 
-These rules apply:
-
-- A ref names only a dependency that `deps` declares. A role that `deps` does not declare does not compile: `Property 'mirror' does not exist`.
-- A ref goes only in what the function call that got it returns. A ref kept from the function of another node does not compile.
-- A `SettledOutputRef` never fills an input that `nodeInputs` declares as an `OutputRef`, because it can be missing.
-- The refs of a dependency cannot be listed, for example by a spread, because the names of its outputs exist only in the types. Name each output, as `pack.tarball`. A list of them throws when the node is added.
-- In the key, a ref is the role it points through and the output's name. It never adds the path, so the key is the same wherever the files are. It never adds the dependency's content again, because the dependency's role holds it already. Thus an [`invalidateOn`](caching.md#read-part-of-a-dependency) fingerprint holds however the output reaches the action.
-- A ref is never part of a string. Its type is a `symbol` whose `toString` and `valueOf` are `never`, so TypeScript refuses it in a template string, with `+`, where a string goes, and in `.toString()`. This applies to `NodeRef`, `SettledRef`, `OutputRef`, `SettledOutputRef` and `FileInput`.
-- `String(ref)`, `JSON.stringify(ref)` and `[ref].join()` throw while the graph is built, before any node runs. The error says that a ref can't be part of a string, and how to give it.
-
-```typescript
-publish.addNode(graph, {
-  deps: { pack },
-  inputs: ({ pack }) => ({
-    own: { tarball: pack.tarball }, // its own property: compiles
-    cut: `--file=${pack.tarball}`, // TS2731: does not compile
-  }),
-});
-```
-
-Refs in values are for commands, whose command line is a value. An action that reads a file itself reads it from `depOutputs`.
-
-## Validation
-
-The engine throws an error when a declaration is wrong:
-
-| Where          | Refused                                                                                                                                                                                                                                                                                                                       |
-| -------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `defineAction` | A `timeoutMs` that is not a whole number from 1 to 2³¹−1; a value input that holds `NaN`, `Infinity`, an object that is not plain, a function, a symbol, a `bigint` or `undefined` in a list.                                                                                                                                 |
-| `addNode`      | A duplicate name; an unknown dependency; a required role that is missing or `undefined`; an input that the action declares, in a record built at run time; a value input that holds `NaN`, `Infinity`, an object that is not plain, a function, a symbol, a `bigint` or `undefined` in a list; a list of a dependency's refs. |
-
-## Inspect a graph
-
-| Function                | Returns                                                                                                                                                  |
-| ----------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `graph.describe()`      | Each node as a `Node`, in the order added: its name, `kind`, `meta`, `deps`, `settledDeps` and its how-to-run fields. No action, inputs or fingerprints. |
-| `closure(graph, names)` | The graph of the named nodes and every node that they depend on, settled dependencies included. A name that the graph does not hold is refused.          |
-
-`describe()` is the one view of a graph. Its data can go to another process when its `meta` can. To count nodes by kind, group `describe()` by `kind`.
-
-A key is local to its node. Each graph that holds a node with the same declaration gives it the same key, whatever its name. Thus executing `closure(graph, ["deploy"])` runs `deploy` and what it needs, and hits the entries that an execution of the whole graph wrote.
+A node is named after its kind unless you give it a `name`. Names are unique in a graph, so two nodes of one action in one scope need names of their own. `graph.subgraph(prefix, meta)` is a view that names each node added through it `prefix:<name>` and gives it that meta. That is how the example's loop gets `home:fetch` and `about:fetch` without explicit names. Meta says what a node is about, for a listener, a scheduler or a diagram to group by.
 
 ## Draw a graph
 
-`mermaidBody(nodes, options)`, from `@mrmeku/dagraph/mermaid`, returns the lines of a Mermaid flowchart. You add the first line, for example `flowchart LR`:
+`graph.describe()` is the graph as plain data: each node's name, kind, meta and dependencies. `mermaidBody` from `@mrmeku/dagraph/mermaid` turns it into the body of a Mermaid flowchart. Add this import to the program's imports and the rest to its end, and it prints the diagram near the top of this page:
 
-```typescript
+```ts
 import { mermaidBody } from "@mrmeku/dagraph/mermaid";
-
-const { lines } = mermaidBody(graph.describe(), { subgraphOf: (meta) => meta?.image ?? "" });
-const chart = ["flowchart LR", ...lines].join("\n");
+const { lines } = mermaidBody(graph.describe(), {
+  subgraphOf: (m) => (m && "page" in m ? m.page : ""),
+  label: (n) => n.kind,
+});
+console.log(["flowchart LR", ...lines].join("\n"));
 ```
 
-Each node is drawn under its full name. `subgraphOf` gives the box of a node from its `meta`. Without it, no node is boxed. A settled dependency is a dashed edge. Use `options` to change the labels, the box titles and the classes of the nodes. The helper reads only `describe()`, so you can copy it and change it.
+You add the header yourself. `subgraphOf` boxes each node by its meta, and `label` sets the text in its box, which defaults to its full name. The other options are in the [mermaid reference](api/mermaid.md).

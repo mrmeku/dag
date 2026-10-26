@@ -12,12 +12,12 @@
     "typecheck": "tsgo --noEmit",
     "lint": "bun --bun eslint .",
     "format": "prettier --write .",
-    "docs": "node scripts/reference-doc.ts"
+    "docs": "node scripts/docs.ts"
   },
   "devDependencies": {
     "@commander-js/extra-typings": "^14.0.0",
-    "@mrmeku/dagworkflows": "workspace:*",
     "@mrmeku/dagraph": "workspace:*",
+    "@mrmeku/dagworkflows": "workspace:*",
     "@types/bun": "latest",
     "@types/node": "^24.19.2",
     "@typescript/native-preview": "^7.0.0-dev.20260131.1",
@@ -27,6 +27,8 @@
     "prettier-plugin-organize-imports": "^4.3.0",
     "rollup": "^4.64.7",
     "rollup-plugin-dts": "^6.5.1",
+    "typedoc": "^0.28.20",
+    "typedoc-plugin-markdown": "^4.14.1",
     "typescript": "^6.0.3",
     "typescript-eslint": "^8.72.0",
     "yaml": "^2.9.1"

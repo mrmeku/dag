@@ -1,3 +1,5 @@
+// The API reference's name for this entry point: TypeDoc names the "." export "".
+/** @module index */
 export {
   file,
   settled,

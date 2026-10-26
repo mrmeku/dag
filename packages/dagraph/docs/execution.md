@@ -1,205 +1,130 @@
-# Execution
+# Run a graph
 
-`execute` runs a graph in one process, to the end, and returns one result for each node:
+`execute` walks a graph for you. It starts each node once its dependencies have settled, takes what it can from the cache, runs the rest under your limits, and tells you how every node ended. It joins the engine's two halves, orchestration and processing, described in [How it works](../README.md#how-it-works). The last sections of this page use them apart.
 
-```typescript
-const results = await execute(
-  graph,
-  { ports, cache, fs, casBaseDir: ".dagraph" },
-  { scheduler, onEvent },
+## Execute a graph
+
+```ts
+import { mkdtemp, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { defineAction, execute, FsCache, Graph, tally } from "@mrmeku/dagraph";
+import { createNodeDagFs } from "@mrmeku/dagraph/fs/node";
+
+const fetchPage = defineAction({
+  kind: "fetch",
+  action: async ({ outputDir }) => {
+    await writeFile(join(outputDir, "page.txt"), "a page");
+    return join(outputDir, "page.txt");
+  },
+});
+const summarize = defineAction({
+  kind: "summarize",
+  deps: { page: fetchPage },
+  action: async ({ depOutputs, outputDir, output }) => {
+    output("summarizing\n");
+    await writeFile(join(outputDir, "summary.txt"), (await depOutputs.page.text()).toUpperCase());
+    return join(outputDir, "summary.txt");
+  },
+});
+
+const casBaseDir = join(await mkdtemp(join(tmpdir(), "dag-")), "cas");
+const fs = createNodeDagFs();
+const context = { cache: new FsCache(casBaseDir, fs), fs, casBaseDir };
+const graph = new Graph();
+summarize.addNode(graph, { deps: { page: fetchPage.addNode(graph, {}) } });
+
+console.log(tally(await execute(graph, context))); // done: 2
+console.log(tally(await execute(graph, context))); // cached: 2
+```
+
+`execute(graph, context, options)` resolves once every node has settled, to one result per node. You build the context once and execute graph after graph against it. Its `cache` maps action keys to entries: `new FsCache(directory, fs)` keeps them on disk, and `new MemCache()` keeps them in memory for tests. Its `fs` is the file system the engine reads, hashes and moves outputs with: `createNodeDagFs()` from [`@mrmeku/dagraph/fs/node`](api/fs/node.md), or `createMemoryDagFs()` in tests. `casBaseDir` is where each key gets its outputs. `ports` holds your actions' tools, and you need it only when they declare some ([Build a graph](graphs.md)).
+
+Every result has the node's `name`, its `actionKey` and one of five statuses:
+
+- `done`: the action ran. Its `outputs` hold the paths it returned, moved under `casBaseDir`, so you can read the files straight from the result.
+- `cached`: a verified entry was found, so the action never started. Its `outputs` are the entry's.
+- `failed`: the node could not be keyed, or its action threw, timed out or returned bad paths. `error` says why.
+- `dep-failed`: a required dependency did not succeed, and `dep` names it.
+- `cancelled`: the execution was cancelled before or while the node ran.
+
+`tally(results)` counts the statuses, and `isSucceeded(result)` narrows a result to one that has `outputs`. `execute` never rejects because a node failed: a failure is a result like any other.
+
+## Failures
+
+A failure holds back only the nodes that need it. Say `top` feeds `left` and `right`, which both feed `bottom`, and `left` fails. Then `top` and `right` are `done`, `left` is `failed`, and `bottom` is `dep-failed` with `dep: "left"`. Other branches carry on. A dependency declared with `settled(...)` is waited for but not required, so its dependent runs anyway and reads `undefined` for it ([Build a graph](graphs.md)).
+
+Nothing that fails is cached. The next execution retries the failed node and those it held back, and finds the rest `cached`. So it resumes where the last one stopped ([When a node runs again](caching.md)).
+
+A result is plain JSON, so you can write it to a file or send it to another process. That is why a failure's `error` keeps only the thrown error's `name`, `message` and `cause`. Put what a caller needs in `cause`.
+
+## Limit parallelism
+
+The default scheduler admits every ready node at once. To set limits, bind your concurrency groups when you define actions, and pass the same limits to `throttledScheduler`:
+
+```ts
+import { actionsFor, throttledScheduler } from "@mrmeku/dagraph";
+
+const limits = { network: 4, heavy: 1 };
+const defineLimitedAction = actionsFor<unknown, keyof typeof limits>();
+const scheduler = throttledScheduler({ maxParallelism: 8, concurrencyLimits: limits });
+await execute(graph, context, { scheduler });
+```
+
+Define `summarize` in the example with `defineLimitedAction` and `concurrencyGroup: "heavy"`, and add several summary nodes, each with a `name` of its own. At most one of them runs at a time. `maxParallelism` caps the nodes being looked up or run at once. Each group in `concurrencyLimits` caps its own running actions. A cache hit never takes a group's slot, so a cached `heavy` node costs nothing against `heavy: 1`.
+
+## Watch events
+
+Run the example's first execution with `{ onEvent: (event) => console.log(event.type, event.node), scheduler: throttledScheduler({ maxParallelism: 1 }) }`. It prints `dispatch fetch`, `start fetch`, `result fetch`, `dispatch summarize`, `start summarize`, `output summarize`, `result summarize`. Each node's events come in that order: `dispatch`, `start`, any `output`s, `result`. Events of different nodes interleave. A cached node gets only `dispatch` and `result`, since a hit never starts. An `output` event carries the `chunk` the action passed to `output()`, and a `result` event carries the `result`.
+
+A listener that returns a promise on `start` holds the action until it resolves. So a journal can record a start before the action has any effect: `onEvent: (event) => journal.record(event)`.
+
+## Time out and cancel
+
+Give an action `timeoutMs` to bound each of its nodes. The clock starts when the action starts. When it runs out, the action's `signal` aborts and the node fails with a `TimeoutError`, and is never cached. The timeout is cooperative: the engine waits for the action to settle, so an action that ignores its `signal` runs to its end. To stop on time, pass `signal` to every call that takes one, such as `fetch` or `spawn`, and call `signal.throwIfAborted()` between steps that take none.
+
+To cancel the whole execution, pass a `signal` to `execute`. This one fires on Ctrl-C or after ten minutes:
+
+```ts
+const controller = new AbortController();
+process.on("SIGINT", () => controller.abort());
+const signal = AbortSignal.any([controller.signal, AbortSignal.timeout(10 * 60_000)]);
+console.log(tally(await execute(graph, context, { signal })));
+```
+
+Once it aborts, nothing new starts: every ready node, and every node that would have become ready, settles `cancelled`. A running action sees the abort through its own `signal`, and its node settles `cancelled` too, with nothing cached. As with a timeout, the engine waits for running actions to settle. `execute` still resolves with one result per node.
+
+## Write your own executor
+
+`execute` is `orchestrate`, the scheduling half, run over `graph.describe()`. Its `RunNode` calls `processNode`, the processing half, on the same graph. Write that yourself to change what happens to each node. This executor forces only `summarize`. Run it after the example's two executions, against the same `context`:
+
+```ts
+import { orchestrate, processNode, throttledScheduler } from "@mrmeku/dagraph";
+
+const forced = new Set(["summarize"]);
+const results = await orchestrate(
+  graph.describe(),
+  (node, depEntries, acquire) =>
+    processNode(graph, node.name, depEntries, context, { acquire, force: forced.has(node.name) }),
+  throttledScheduler({ maxParallelism: 4 }),
 );
+// summarize is done; fetch is cached (on a fresh CAS it would be done too).
 ```
 
-It takes three arguments:
+A `RunNode` gets three things. The first is the node as data. The second is `depEntries`, the cache entry of each dependency that succeeded, by name. The third is `acquire`, the gate a miss awaits before its action runs, where a group's slot is taken.
 
-- **The graph.** See [Graphs](graphs.md).
-- **The execution context.** It holds the actions' ports, the cache, the file system and the CAS directory. It outlives any one execution.
-- **The options.** They control one execution: the scheduler, `onEvent`, `force` and the cancel `signal`.
+The example leaves out `signal` and `onEvent`. In your executor, pass both to both halves, as `execute` does: `orchestrate(nodes, run, scheduler, onEvent, signal)` takes them last, and `processNode` among its options. `orchestrate`'s listener then gets `dispatch` and `result`, and `processNode`'s gets `start` and `output`. A signal given to `orchestrate` alone never reaches running actions.
 
-One call of `execute`, or of [`orchestrate`](executors.md), over one graph is an execution. Cancelling and limits are each for one execution. Under `execute` and `orchestrate`, each call of `processNode` hashes the files that its node declares.
+## Process nodes in workers
 
-## The execution context
+To process nodes in worker processes, the `RunNode` makes two requests. First it asks a worker to look the node up only. It sends the node's name and `depEntries`, and the worker rebuilds a graph that declares the node and calls `processNode` with `cacheOnly: true` and `acquire: ungated`. A `failed` result whose `error.message` equals `NOT_CACHED` is a miss. Any other result is the node's, so a hit never takes a slot.
 
-`ExecutionContext<Ports>` has these fields:
+On a miss, the `RunNode` awaits `acquire()` in the orchestrator, then sends the same request to run. The worker calls `processNode` with `acquire: ungated` again, since the orchestrator already holds the slot. It sends back the `Result` as JSON, which `isResult` checks. `start` and `output` fire in the worker, so a journal that records starts listens on the worker's `processNode`, and the cancel goes there too, as its `signal`.
 
-| Field        | Meaning                                                                                                                                                                                                                                                                   |
-| ------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `ports`      | The actions' tools. The engine gives them to each action and each `invalidateOn` fingerprint, and never looks inside.                                                                                                                                                     |
-| `cache`      | The cache. See [Caching](caching.md#caches).                                                                                                                                                                                                                              |
-| `fs`         | The `DagFs` through which the engine does all its own I/O: hashing files, making, moving and removing directories, and reading [file handles](graphs.md#file-handles). Its `resolve` gives each path that an action sees: the absolute path in the Node and Bun adapters. |
-| `casBaseDir` | The directory for the outputs of each node. See [Caching](caching.md#where-the-files-go).                                                                                                                                                                                 |
+The worker must declare the node the way the original graph does, with the same `kind`, inputs, roles and names. Then it computes the same key and finds the node's dependencies by name. The workers share one CAS, and one `Cache`, such as an `FsCache` over a shared directory, to hit each other's entries. The orchestrator reads no files and needs neither.
 
-`execute` refuses, by type, ports that do not satisfy the graph's. A graph whose actions need no ports takes no `ports`. To run the same graph with stub, mock or real tools, change `ports`.
+## Orchestrate in a sandbox
 
-| `DagFs`               | Import from               | Use                                                                          |
-| --------------------- | ------------------------- | ---------------------------------------------------------------------------- |
-| `createNodeDagFs()`   | `@mrmeku/dagraph/fs/node` | Node.                                                                        |
-| `createBunDagFs()`    | `@mrmeku/dagraph/fs`      | Bun. It streams large files through Bun's hasher.                            |
-| `createMemoryDagFs()` | `@mrmeku/dagraph`         | Tests. It holds files in a `Map`, and its `resolve` returns a path as given. |
+`orchestrate` reads no clock, draws no random number and does no I/O. What it does depends only on the node data, the scheduler, and the results its `RunNode` resolves to. So a workflow engine that replays a recorded history, such as Temporal, replays the orchestration the same way, with the `RunNode` returning each recorded result.
 
-The file system adapters are subpath exports, not part of the package index. Thus the index imports no I/O module. See [Executors](executors.md#sandboxes).
-
-To test one action, run a one-node graph under stub ports, `MemCache` and `createMemoryDagFs()`.
-
-## Schedulers
-
-A scheduler admits ready nodes. It takes them in the engine's order and only filters it: it can hold a node back, but it never reorders nodes. There are two:
-
-| Scheduler                     | Behavior                                                                                                                  |
-| ----------------------------- | ------------------------------------------------------------------------------------------------------------------------- |
-| `unboundedScheduler()`        | Admits each node when it is ready. This is the default.                                                                   |
-| `throttledScheduler(options)` | Processes at most `maxParallelism` nodes at once, and runs at most `concurrencyLimits[group]` actions of a group at once. |
-
-A node joins a group with the `concurrencyGroup` of its action. Name the groups where you bind your ports, from the limits you schedule with, and an action whose group is not one of them does not compile:
-
-```typescript
-const concurrencyLimits = { whisper: 1 };
-const defineActionWithPorts = actionsFor<Ports, keyof typeof concurrencyLimits>();
-
-const transcribe = defineActionWithPorts({
-  kind: "transcribe",
-  deps: { download },
-  inputs: { version: "whisper-v1" },
-  concurrencyGroup: "whisper",
-  action: async ({ depOutputs, ports, outputDir }) => {
-    // ...
-  },
-});
-
-await execute(graph, context, {
-  scheduler: throttledScheduler({ maxParallelism: 8, concurrencyLimits }),
-});
-```
-
-A program that names no groups can give an action none. The scheduler gives a group that is not in `concurrencyLimits` no limit. A group of limit 1 runs its actions one at a time while other nodes run beside them, as Ninja's `console` pool does.
-
-### A cache hit does not wait for its group
-
-A node takes its group's slot only after its cache lookup misses. Thus a group limits how many of its actions run at once, and a hit never waits behind them.
-
-- A node holds a `maxParallelism` place from when it is handed to processing until it settles. A hit holds one while its entry is verified.
-- A miss in a group gives its place back while it waits for the group's slot, and takes a place and the slot again when both are free.
-- Misses wait for their group in the engine's order.
-- A cancel ends the wait. The node settles `cancelled`.
-
-### The order of ready nodes
-
-When more nodes are ready than can run, the engine takes them in this order:
-
-1. The nodes that descend from the first root that you added.
-2. Among those, the nodes that became ready most recently.
-
-Thus the engine completes one branch before it starts the next. For example, it completes the pipeline of the first video before it starts more work on the second. Finished work arrives early, and fewer intermediate files wait on disk.
-
-### Your own scheduler
-
-A `Scheduler` is a function that gets a `SchedulerContext` and returns when the work is done. The context has four functions. A ready node is a `Ready`, `{ node, acquiring }`:
-
-| Function          | What it does                                                                                                                                                                                                                     |
-| ----------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `take(filter?)`   | Returns the first `{ node, acquiring }` in the engine's order that the filter accepts, or `null`. A node comes once when it is ready, and again with `acquiring: true` when its lookup missed and it waits for its group's slot. |
-| `run(ready)`      | Hands a ready node to processing, or gives an acquiring node its slot. The promise resolves when the node settles, or when it gives its place back to wait for a slot.                                                           |
-| `hasWork()`       | Returns `true` while some nodes are not complete.                                                                                                                                                                                |
-| `workAvailable()` | Resolves when a node settles or starts to wait for a slot, so that `take` can return something new.                                                                                                                              |
-
-## Results
-
-`execute` returns a `Result` for each node, in the order the nodes settled. Each holds the node's `name`, its `actionKey` (`""` when it never got one) and a `status`:
-
-| Status       | Meaning                                                                                                           |
-| ------------ | ----------------------------------------------------------------------------------------------------------------- |
-| `done`       | The action ran and succeeded. The result is the entry that it wrote, `outputs` and `contentHash`, with `elapsed`. |
-| `cached`     | A cache hit. The result is the entry that it read.                                                                |
-| `failed`     | The action failed. The result has `error: { name, message, cause? }` and `elapsed`.                               |
-| `dep-failed` | A required dependency did not succeed, so the node did not run. `dep` names it.                                   |
-| `cancelled`  | The execution was cancelled before the node completed.                                                            |
-
-A node succeeded when its result is `done` or `cached`. `isSucceeded(result)` is `true` for these two statuses and narrows the type of `result` to `SucceededResult`. Only a success has outputs. `done` tells that the action ran, not that its content changed. `tally(results)` counts the results by status, in a record keyed by the five statuses.
-
-A result is plain data, its `error.cause` included, so you can write it to a file or send it to another process as it is. The engine converts the `cause` of the thrown error:
-
-- A string, a finite number, a boolean, `null`, an array or a plain object of these is copied. The copy leaves out a property that is `undefined` and writes `-0` as `0`. Thus a change to the cause after the failure does not change the result, and the result is equal to its JSON.
-- An `Error` becomes an object with its `name`, its `message` and its own `cause`, converted the same way. The chain stops at an error that comes again.
-- The engine drops any other cause, for example a `BigInt`, a function, a class instance, a `Date` or an object that refers to itself.
-
-`isResult(value)` checks a value that you read back.
-
-## Events
-
-`onEvent` gets one stream of events, in order, as they occur. Each event names its node and carries the node's `meta`:
-
-| Event                                    | When                                                                 |
-| ---------------------------------------- | -------------------------------------------------------------------- |
-| `{ type: "dispatch", node, meta }`       | The node is handed to processing. Its cache entry is not read yet.   |
-| `{ type: "start", node, meta }`          | The action starts. This is a cache miss: a cached node never starts. |
-| `{ type: "output", node, meta, chunk }`  | The action printed `chunk` with its `output` function.               |
-| `{ type: "result", node, meta, result }` | The node settled. `result` is its `Result`.                          |
-
-A node's events come in that order: `dispatch`, `start`, its `output`, its `result`. A node that a failed dependency holds back has only a `result`. What an action prints after its result is dropped.
-
-```typescript
-const build = defineActionWithPorts({
-  kind: "build",
-  inputs: { version: "build-v1" },
-  action: async ({ output, outputDir }) => {
-    output("compiling\n");
-    // ...
-  },
-});
-
-await execute(graph, context, {
-  onEvent: (event) => {
-    if (event.type === "output") process.stdout.write(`[${event.node}] ${event.chunk}`);
-    if (event.type === "result" && event.result.status === "failed")
-      console.error(event.node, event.result.error.message);
-  },
-});
-```
-
-With this stream you can make a progress view, a log file for each node or a live status, with no change to the actions. The engine renders nothing.
-
-If `onEvent` throws on a `dispatch` or a `result`, the execution continues to its end. Then it rejects with the first error that `onEvent` threw.
-
-For a `start`, `onEvent` can return a promise. The action runs only after the promise resolves. Thus a journal can record the start before the action has any effect, and a run that is killed after that still shows that the node started. If the promise rejects, the node fails and its action does not run. The engine does not wait for the promise of any other event.
-
-```typescript
-await execute(graph, context, {
-  onEvent: (event) => (event.type === "start" ? journal.recordStart(event.node) : undefined),
-});
-```
-
-A `failed` result holds the error's `name`, its `message` and its `cause`, converted as [Results](#results) tells. Thus a listener can tell why a node failed, for example a command's exit code, without reading the node's files.
-
-## Timeouts and cancellation
-
-An action gets an `AbortSignal` in its action context. The signal fires in two cases:
-
-- The execution's `signal` is aborted.
-- The node's `timeoutMs` elapses. The time starts when the action starts: waiting, hashing and the cache lookup do not count.
-
-```typescript
-const transcribe = defineActionWithPorts({
-  kind: "transcribe",
-  deps: { download },
-  inputs: { version: "whisper-v1" },
-  timeoutMs: 15 * 60_000,
-  action: async ({ depOutputs, ports, outputDir, signal }) =>
-    ports.whisper.transcribe(depOutputs.download.audio.path, outputDir, { signal }),
-});
-```
-
-After the signal fires, the value that the action returns does not decide the result. This is the same as on the GitHub Actions runner: a process that traps the interrupt and exits with 0 did not finish its work. These rules apply:
-
-- A node that the execution's signal stops is `cancelled`.
-- A node whose own timeout fired is `failed` with an error named `TimeoutError`. The error keeps the `cause` of what the action threw when it stopped.
-- If both fired, the result is `cancelled`.
-- The engine caches neither result.
-- Nodes that wait when the execution is cancelled become `cancelled` and do not start.
-
-The engine never abandons a running action. Thus an action that ignores its signal holds its place until it returns. The results are complete either way.
-
-The timeout is not part of the action key. To set a limit for the full execution, give a signal with a timeout:
-
-```typescript
-await execute(graph, context, { signal: AbortSignal.timeout(30 * 60_000) });
-```
+The package index, `@mrmeku/dagraph`, imports no I/O module, so orchestration bundles into a sandbox that allows none, such as a Temporal workflow. Build the graph outside the sandbox and pass `graph.describe()` in as data: as the workflow's argument, or as an activity's result. Every field of node data but `meta` is plain JSON. Sandboxed code imports the index alone and runs `orchestrate` on that data, with a `RunNode` that calls a worker or, under Temporal, an activity.
