@@ -11,6 +11,7 @@ import {
   Graph,
   maybe,
   nodeInputs,
+  pick,
   settled,
   type DepSpecs,
   type FileInput,
@@ -314,7 +315,11 @@ describe("graphs", () => {
     const entryOf = (name: string) => {
       const r = results.find((x) => x.name === name);
       return r && isSucceeded(r)
-        ? ({ outputs: r.outputs, contentHash: r.contentHash } satisfies CacheEntry)
+        ? ({
+            outputs: r.outputs,
+            contentHash: r.contentHash,
+            outputHashes: r.outputHashes,
+          } satisfies CacheEntry)
         : undefined;
     };
     const oneVideo = new Graph<Ports, Meta>();
@@ -584,6 +589,32 @@ export function wrongDeclarationsDoNotCompile() {
   entry.addNode(g, { name: "z", deps: { download: dl, captions: feedRef } });
   // @ts-expect-error a settled ref in a required role
   captions.addNode(g, { name: "z2", deps: { download: settled(dl) } });
+  const media = defineActionWithPorts({
+    kind: "media",
+    action: async ({ outputDir }) => ({ audio: `${outputDir}/a`, thumb: `${outputDir}/t` }),
+  });
+  defineActionWithPorts({
+    kind: "picks-a-missing-output",
+    // @ts-expect-error pick names only outputs its action returns
+    deps: { media: pick(media, "video") },
+    action: async () => ({}),
+  });
+  defineActionWithPorts({
+    kind: "reads-what-it-did-not-pick",
+    deps: { media: pick(media, "thumb") },
+    action: async ({ depOutputs }) => {
+      void depOutputs.media.thumb;
+      // @ts-expect-error a role reads only the outputs it picks
+      void depOutputs.media.audio;
+      return {};
+    },
+  });
+  // A node of the whole action fills a role that picks some of its outputs.
+  defineActionWithPorts({
+    kind: "thumbs",
+    deps: { media: pick(media, "thumb") },
+    action: async () => ({}),
+  }).addNode(g, { deps: { media: media.addNode(g, {}) } });
   defineActionWithPorts({
     kind: "misspelt",
     deps: { download },
@@ -592,25 +623,6 @@ export function wrongDeclarationsDoNotCompile() {
       void depOutputs.download.audoi;
       return {};
     },
-  });
-  defineActionWithPorts({
-    kind: "misspelt",
-    deps: { download },
-    invalidateOn: {
-      download: (outputs) => {
-        // @ts-expect-error a misspelt output in a fingerprint
-        void outputs.audoi;
-        return "";
-      },
-    },
-    action: async () => ({}),
-  });
-  defineActionWithPorts({
-    kind: "misspelt",
-    deps: { download },
-    // @ts-expect-error a fingerprint for a role the action does not declare
-    invalidateOn: { mirror: () => "" },
-    action: async () => ({}),
   });
   defineActionWithPorts({
     kind: "unchecked",

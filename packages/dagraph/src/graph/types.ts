@@ -177,15 +177,14 @@ export type FileHandle = {
   readonly [FILE_HANDLE]: true;
   /**
    * Its absolute path while the action runs, for a command or a library that takes a path. It
-   * differs by machine and working directory, so never key on it: build no fingerprint and no
-   * output's content from it.
+   * differs by machine and working directory, so never build an output's content from it.
    */
   readonly path: string;
   /** Its contents. */
   text(): Promise<string>;
   /** Its contents as JSON, checked by `is`; a file `is` refuses throws, naming the file. */
   json<T>(is: (value: unknown) => value is T): Promise<T>;
-  /** The SHA256 of its bytes, as the engine hashes outputs: the fingerprint of a binary file. */
+  /** The SHA256 of its bytes, as the engine hashes outputs. */
   hash(): Promise<string>;
 } & NotAString;
 
@@ -212,11 +211,13 @@ export const nodeRefNamed = (name: string): NodeRef => nodeRef(name);
 /**
  * A dep as an action declares it in `deps`, by role: the outputs its node returns. An action is
  * one, so `deps: { fetch }` takes a node of `fetch`; `dep<T>` is one for a role that more than one
- * action fills. A node of the action gives the role a `NodeRef<T>`, never a `Dep`.
+ * action fills. A node of the action gives the role a `NodeRef<T>`, never a `Dep`. `outputs`, set
+ * by `pick`, names the outputs the role reads; without it, it reads them all.
  */
 export interface Dep<T extends Outputs = Outputs> {
   readonly [DEP]: true;
   readonly settled?: false;
+  readonly outputs?: readonly string[];
   readonly _T?: T;
 }
 
@@ -224,6 +225,7 @@ export interface Dep<T extends Outputs = Outputs> {
 export interface SettledDep<T extends Outputs = Outputs> {
   readonly [DEP]: true;
   readonly settled: true;
+  readonly outputs?: readonly string[];
   readonly _T?: T;
 }
 
@@ -260,9 +262,27 @@ export function settled<T extends Outputs>(ref: NodeRef<T>): SettledRef<T>;
 export function settled<T extends Outputs>(dep: Dep<T>): SettledDep<T>;
 export function settled<T extends Outputs>(): SettledDep<T>;
 export function settled(of?: NodeRef | Dep): SettledRef | SettledDep {
-  return of === undefined || DEP in of
-    ? { [DEP]: true, settled: true }
-    : notAString({ name: of.name, settled: true as const }, nodeRefusal(of.name, true));
+  if (of === undefined) return { [DEP]: true, settled: true };
+  if (DEP in of) return { [DEP]: true, settled: true, ...(of.outputs && { outputs: of.outputs }) };
+  return notAString({ name: of.name, settled: true as const }, nodeRefusal(of.name, true));
+}
+
+/**
+ * A role that reads only some of its dep's outputs, as Bazel takes some of a target's files:
+ * `deps: { download: pick(download, "thumb") }`. The node keys on those outputs' hashes alone, so
+ * a change to another output of the dep reruns nothing, and the action reads only those. It wraps
+ * an action or a called `dep<T>()`, and `settled` and `maybe` keep what it picks.
+ */
+export function pick<T extends Outputs, K extends keyof T & string>(
+  dep: SettledDep<T>,
+  ...outputs: K[]
+): SettledDep<Pick<T, K>>;
+export function pick<T extends Outputs, K extends keyof T & string>(
+  dep: Dep<T>,
+  ...outputs: K[]
+): Dep<Pick<T, K>>;
+export function pick(dep: Dep | SettledDep, ...outputs: string[]): Dep | SettledDep {
+  return dep.settled ? { [DEP]: true, settled: true, outputs } : { [DEP]: true, outputs };
 }
 
 const MAYBE: unique symbol = Symbol.for("@mrmeku/dagraph/maybe");
@@ -277,9 +297,22 @@ export function maybe<T extends Outputs>(dep: SettledDep<T>): SettledDep<T> | un
 export function maybe<T extends Outputs>(dep: Dep<T>): Dep<T> | undefined;
 export function maybe<T extends Outputs>(): Dep<T> | undefined;
 export function maybe(dep?: Dep | SettledDep): Dep | SettledDep | undefined {
-  const role = { [DEP]: true as const, [MAYBE]: true as const };
+  const role = {
+    [DEP]: true as const,
+    [MAYBE]: true as const,
+    ...(dep?.outputs && { outputs: dep.outputs }),
+  };
   return dep?.settled ? { ...role, settled: true } : role;
 }
+
+/** The outputs each role of `deps` reads, for a role that `pick` narrows. */
+export const pickedOutputs = (deps: DepSpecs): Record<string, readonly string[]> =>
+  Object.fromEntries(
+    Object.entries(deps).flatMap(([role, declared]) => {
+      const spec = typeof declared === "function" ? declared() : declared;
+      return spec?.outputs ? [[role, spec.outputs]] : [];
+    }),
+  );
 
 /** The roles of `deps` that each node gives: each but one that `maybe` marks or that is `undefined`. */
 export const requiredRoles = (deps: DepSpecs): string[] =>
@@ -408,18 +441,6 @@ export interface ActionContext<Ports = unknown, D = DepSpecs, I = Record<string,
   output: (chunk: string) => void;
 }
 
-/**
- * For a dep its nodes read only in part, that part as a fingerprint by role. The string's hash
- * stands in for the dep's content hash in the key. Build it from the files' contents, never from a
- * handle's `path`, which differs by machine and working directory.
- */
-export type InvalidateOn<Ports, D> = {
-  [K in keyof D]?: (
-    outputs: NonNullable<DepOutputsOf<D>[K]>,
-    ports: Ports,
-  ) => Promise<string> | string;
-};
-
 type RefOf<X> =
   X extends SettledDep<infer T> ? SettledRef<T> : X extends Dep<infer T> ? NodeRef<T> : never;
 type Flat<T> = { [K in keyof T]: T[K] };
@@ -540,7 +561,7 @@ export type NodeParams<D, N, I, Meta, ND = NodeDeps<D>, NI = N> = {
   Param<"inputs", N, NodeInputs<N, I, RefDeps<D, ND>, NI>>;
 
 /**
- * A node as data, from `graph.describe()`: no action, inputs or fingerprints, so it can cross
+ * A node as data, from `graph.describe()`: no action or inputs, so it can cross
  * into orchestration and into another process when its `meta` can.
  */
 export interface Node<Meta = unknown> {

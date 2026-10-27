@@ -46,7 +46,11 @@ export async function processEach(
     const context = { ports: { ...ports, fs, exec }, cache: new MemCache(), fs, casBaseDir: CAS };
     const result = await processNode(graph, node.name, depEntries, context);
     if (isSucceeded(result))
-      entries[node.name] = { outputs: result.outputs, contentHash: result.contentHash };
+      entries[node.name] = {
+        outputs: result.outputs,
+        contentHash: result.contentHash,
+        outputHashes: result.outputHashes,
+      };
     processed.set(node.name, { result, files, commands });
   }
   return processed;

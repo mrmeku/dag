@@ -15,7 +15,7 @@ Core idea: a node's key is built from its action's kind, its inputs and the cont
 ## Terms
 
 - **Action key** (`actionKey` on a result): a 64-character lowercase SHA-256 hex string. It names the node's work and its directory in the CAS. It is `""` on a result when the node never got one: a required dep did not succeed, the key could not be computed, or the execution was cancelled before the node was processed.
-- **Cache entry** (type `CacheEntry`): `{ outputs, contentHash }`. `outputs` holds the file paths the action returned, as it returned them: a record whose values are a path or a list of paths. `contentHash` is the hash of those files (see below). Results with status `done` or `cached` carry these same two fields.
+- **Cache entry** (type `CacheEntry`): `{ outputs, contentHash, outputHashes }`. `outputs` holds the file paths the action returned, as it returned them: a record whose values are a path or a list of paths. `contentHash` is the hash of those files, and `outputHashes` holds each output's own hash, by name (see below). Results with status `done` or `cached` carry these same three fields.
 - **Content hash**: a SHA-256 hex string over each output's name, each file's path relative to its output directory, and each file's bytes.
 - **CAS base directory** (`casBaseDir`): the root under which every key gets a directory.
 - **Cache**: the store of entries by key (interface `Cache`). It holds only the small manifest. The files themselves are in the CAS, read and written through the context's `DagFs`: usually the local disk (`createNodeDagFs`, `createBunDagFs`), but possibly memory (`createMemoryDagFs`).
@@ -28,7 +28,7 @@ When the engine processes a node, these steps happen in this order. `execute` ca
 `lookupNode` takes the first three steps and `runAction` the last two. `processNode` runs both, and `localRunNode`, the `RunNode` that `execute` uses, waits for the node's slot between them ([dagraph-execution](dagraph-execution.md)).
 
 1. **Required deps.** `lookupNode` repeats the check for executors that call it directly. If a required dep (any dep not marked `settled`) has no entry in the `depEntries` it was given, the node settles `dep-failed` with `dep` set to that dep's name and `actionKey: ""`. Nothing is hashed.
-2. **Key.** The engine hashes every file input and runs every `invalidateOn` fingerprint, then builds the key. If any of this throws, the node settles `failed` with `actionKey: ""` and `elapsed: 0`. Examples: a file input that cannot be read (message such as `ENOENT: /missing.ts`), a fingerprint that throws (its own message), or a fingerprint that returns something other than a string.
+2. **Key.** The engine hashes every file input, then builds the key. If a file cannot be read, the node settles `failed` with `actionKey: ""` and `elapsed: 0`. The message is the file system's, such as `ENOENT: /missing.ts`.
 3. **Lookup.** This step is skipped when the node is `cacheable: false`. The engine reads the entry for the key. A `get` that rejects counts as a miss and is not an error. Otherwise the engine trusts the entry's shape (parsing and shape checks belong to `FsCache`, see below). If an entry exists, the engine re-hashes its files (this is **verification**). If they match `contentHash`, the node settles `cached` with the stored `outputs` and `contentHash`. A cached node has no `elapsed` and emits no `start` event. Otherwise the lookup is a miss, `{ name, actionKey, status: "missed" }`, which is not a result: it is what `runAction` runs.
 4. **Run.** The engine creates `<casBaseDir>/<actionKey>/tmp-<uuid>`, emits `start`, and calls the action with `outputDir` set to the absolute form of that directory. If the directory cannot be created, or a `start` listener's promise rejects, the node fails with that error and `elapsed: 0`, and the action never runs.
 5. **Publish.** The engine checks that the returned paths are under `outputDir`, hashes them, renames the directory to `<casBaseDir>/<actionKey>/out-<contentHash>`, and writes the entry. This last write is skipped for `cacheable: false`. The node settles `done` with `outputs`, `contentHash` and `elapsed`.
@@ -52,10 +52,9 @@ The key is the SHA-256 hex of a JSON array with three parts:
 
   Values that are not JSON are refused when the action is defined or the node is added, naming their path. Examples: `inputs.ratio is NaN, which is not JSON. Give a finite number, or null.`, and similar messages for `Infinity`, a bigint, a symbol, a function, a class instance (`inputs.when is a Date, which is not JSON. Give a plain object of its fields: { ...when }.`), and `undefined` inside a list. These are part of [dagraph-graphs](dagraph-graphs.md). The point here is that every input that reaches the key is plain, canonical JSON.
 
-**Deps, by role.** A role is the name a node gives a dep in `deps`. Each role the node gives is keyed one of three ways:
+**Deps, by role.** A role is the name a node gives a dep in `deps`. Each role the node gives is keyed one of two ways:
 
-- `["content", contentHash]`: the dep's content hash. This is the default.
-- `["fingerprint", sha256(fingerprintString)]`: used when the action declares `invalidateOn` for that role (see "Reading part of a dependency").
+- `["outputs", [[name, hash], ...]]`: the hash of each output the role reads, from the dep's `outputHashes`, sorted by name. A role reads every output of its dep unless the action declares it with `pick`, which names the outputs it reads ("Reading part of a dependency"). A picked output the dep did not produce keys as `null`.
 - `["missing"]`: a `settled` dep that did not succeed. The node runs without it, and runs again with a new key once the dep succeeds.
 
 A `maybe` role the node leaves out is not in the key at all. Deps are keyed by role, not by node name. Renaming the dep nodes leaves the key unchanged. Swapping two deps between roles changes it.
@@ -66,7 +65,6 @@ A `maybe` role the node leaves out is not in the key at all. Deps are keyed by r
 - the dep nodes' names;
 - the node's `meta`;
 - the action function itself;
-- the `invalidateOn` functions themselves (only the strings they return);
 - `concurrencyGroup`, `timeoutMs` and `cacheable`;
 - file handles' absolute paths, the working directory, and the machine;
 - anything the action reads without declaring it: a file opened by a path it builds itself, an environment variable, a clock, a network call through its ports. A change there reruns nothing. To make a node rerun when such a thing changes, declare it: a `file()` input, a value input, or a dep on a node that fetches it (with `cacheable: false` if it must be fetched every time).
@@ -87,7 +85,7 @@ The key holds no dagraph version, format tag or salt: only the kind, the inputs 
 
 The construction has changed once already. The latest version on npm, `@mrmeku/dagraph` `0.3.0` (`latest`, published 2026-10-16, checked with `npm view` on 2026-10-26), builds its key differently. It feeds into one SHA-256, in order, the node's name, a `config` string, each dep's node name and content hash (sorted by name), and each input file's path and hash. Its content hash is the SHA-256 of the number of output files followed by their hashes, sorted by path, with no names or relative paths. This was read from `src/content-addressing.js` in the published tarball. The current code keys the kind, the inputs and the roles instead, so no key that `0.3.0` computed matches one it computes. Upgrading from `0.3.0` to a release of the current code therefore reruns every node once. The entries `0.3.0` wrote are never read again, and their directories stay, since nothing is garbage-collected.
 
-Outputs then became a record only. An action that returned a record keeps its content hash, so its dependents keep their keys. One that returned a bare path or a list now returns a record, which hashes differently, so its dependents rerun once. Its own key does not change, but the entry it wrote holds a bare path or a list, which `FsCache` no longer reads as an entry: it misses and the node runs once (pinned in `dag.test.ts`). Whether a later release may change the construction again is not settled (see Open questions).
+Outputs then became a record only. An action that returned a record keeps its content hash, so its dependents keep their keys. One that returned a bare path or a list now returns a record, which hashes differently, so its dependents rerun once. Its own key does not change, but the entry it wrote holds a bare path or a list, which `FsCache` no longer reads as an entry: it misses and the node runs once (pinned in `dag.test.ts`). Then `invalidateOn` was removed, and a role came to key on the hashes of the outputs it reads instead of its dep's content hash. Every node with a dep gets a new key, and an entry without `outputHashes` is no longer read as an entry, so every node runs once. Whether a later release may change the construction again is not settled (see Open questions).
 
 Where it lives: `packages/dagraph/src/content-addressing.ts`, `packages/dagraph/src/dag.test.ts`.
 
@@ -97,7 +95,7 @@ The content hash is the SHA-256 hex of a JSON shape built from the returned outp
 
 `rel` is the file's path relative to the attempt's directory. A test pins the consequences: the same files under another key's directory or another attempt's directory give the same content hash. Swapping which file each output names, renaming the file, renaming the output, or editing the bytes does change it. Check, verified by running: one output `{ greeting: "hello.txt" }` holding `hi` has content hash `sha256(JSON.stringify([["greeting", [["hello.txt", sha256("hi")]]]]))`.
 
-Dependents key on this hash, not on the dep's action key. Early cutoff follows from that. Suppose node `a` gets a new key (say a version bump) and reruns, but writes the same bytes to the same file names. Its content hash is unchanged, so `b`, which depends on `a`, keeps its key and is `cached`, and so does everything below it. Here is the pinned example for a chain `a -> b -> c`:
+Dependents key on the hashes of the outputs they read (each output's hash is built the same way from its own part of the shape, `sha256(JSON.stringify([[rel, hash], ...]))`), never on the dep's action key. Early cutoff follows from that. Suppose node `a` gets a new key (say a version bump) and reruns, but writes the same bytes to the same file names. Its content hash is unchanged, so `b`, which depends on `a`, keeps its key and is `cached`, and so does everything below it. Here is the pinned example for a chain `a -> b -> c`:
 
 | Run | Change                    | a    | b      | c        |
 | --- | ------------------------- | ---- | ------ | -------- |
@@ -225,28 +223,15 @@ Within one execution, nodes that share a key are **not** deduplicated. If both m
 
 Tests that need nodes to stay apart give each node a distinguishing input, such as its name as an `id`.
 
-## Reading part of a dependency: `invalidateOn`
+## Reading part of a dependency
 
-By default a dependent reruns whenever any byte of a dep changes. An action that reads only part of a dep can say which part counts by declaring `invalidateOn: { <role>: fingerprint }`. The fingerprint is a function `(outputs, ports) => string | Promise<string>`. `outputs` is the dep's outputs as a record of file handles (a handle per path, a list per list). For that role, the SHA-256 of the returned string replaces the dep's content hash in the key.
+A role keys on the outputs it reads, as Bazel keys an action on the files it takes from a target. By default it reads all of its dep's outputs. `pick` narrows it: `deps: { download: pick(download, "thumb") }` keys the node on `thumb`'s hash alone, so a new `audio` from the same dep reruns nothing, and the action's `depOutputs.download` holds `thumb` only, in its type and at run time. `settled(pick(…))` and `maybe(pick(…))` keep the pick, and `pick(dep<T>(), …)` narrows a role that more than one action fills. A test pins it: a dep rebuilt with a new `extra` and the same `main` leaves a required, a settled and a maybe role that pick `main` all `cached`, and a new `main` reruns them.
 
-Example from the tests: a summary depends on a fetched source page. A re-fetch with a different encoding changes the bytes but not the page, so the summary keys only on the page id inside the file:
+A node that reads only part of one file, such as a few fields of a JSON file, still keys on the whole file. Two things bound that. Early cutoff: a node that writes the same bytes when its part is unchanged keeps its hashes, so its own dependents stay `cached`. And a projection: a cheap node that reads the file and writes the part as outputs of its own, which consumers pick. It reruns on any change to the file, and writes the same bytes when the part is unchanged, so its consumers stay `cached`.
 
-    invalidateOn: { source: async (source) => idOf(await source.content.text()) }
+An action whose work is too costly to repeat can also skip it itself: it keeps its results in a store of its own, outside the CAS, named by what it reads, and links a stored result back on a run whose part is unchanged.
 
-A test pins that after only the source is forced to re-fetch with a different encoding, the source, the packaging step and everything below them run again, but the summary stays `cached`. When the source holds a different page id, the fingerprint changes, so the summary gets a new key and runs. That second half follows from how the key is built, but no test pins it on its own: the test runs that step with every node forced.
-
-Rules:
-
-- The fingerprint runs every time the node is processed, hit or miss, because the key needs it. Keep it cheap.
-- Build it from file contents (`text()`, `json(guard)`, `hash()`), never from a handle's `.path`. The path differs by machine and working directory. `hash()` gives the SHA-256 of the bytes, the same hash the engine uses, and is the fingerprint to use for a binary file.
-- It must return a string. Anything else fails the node, naming the role: `invalidateOn.src returned undefined, not a string. JSON.stringify returns undefined for undefined: give it the value ?? null.` (`null` is reported as `null`, other values by their `typeof`.)
-- A fingerprint that throws fails the node with its own message, before the node has a key (`actionKey: ""`).
-- It applies only when the dep has an entry. A `settled` dep that failed still keys as `["missing"]`.
-- Output refs that point into that dep key by role and output name, not by content, so the fingerprint still decides. A test pins this: a new tarball with unchanged notes, where the fingerprint reads the notes, leaves `publish` `cached`.
-- Adding or removing `invalidateOn` changes the key, because the tag changes from `content` to `fingerprint`.
-- **A constant fingerprint** makes a role's changes never rerun the node: `invalidateOn: { src: () => "" }`. The node still waits for that dep, still needs it to succeed (unless the role is `settled`), and still reads its current files, but keys only on its own inputs and its other roles. Verified: with `src` given `v: "a"` then `v: "b"`, `src` runs both times and its dependent is `done` then `cached`. Use it for a dep that must exist first but whose content the node does not depend on in any way that should cost a rerun. The node's cached output then reflects whatever the dep held when it last ran.
-
-Where it lives: `packages/dagraph/src/process-node.ts`, `packages/dagraph/src/graph/types.ts` (`InvalidateOn`, `FileHandle`), `packages/dagraph/src/file-handle.ts`.
+Where it lives: `packages/dagraph/src/process-node.ts`, `packages/dagraph/src/content-addressing.ts`, `packages/dagraph/src/graph/types.ts` (`pick`).
 
 ## Running a node each time: `cacheable: false`
 
@@ -266,7 +251,7 @@ Its dependents key on that content hash, so they cache normally. For example, a 
 
       await execute(graph, { ...ctx, cache: forcedCache(ctx.cache) });
 
-  With `keys`, only the nodes of those keys run, for example the keys of results you saved (a result is plain JSON with its `actionKey`). The dependents of a forced node are not forced. They key on its new content, so they rerun only if that changed or the fingerprint they use changed.
+  With `keys`, only the nodes of those keys run, for example the keys of results you saved (a result is plain JSON with its `actionKey`). The dependents of a forced node are not forced. They key on its new content, so they rerun only if that changed.
 
 - **Looking up without running.** `lookupNode` computes the key and checks the entry, and runs nothing: with a verified entry the node is `cached`, otherwise its lookup is a miss.
 
@@ -293,17 +278,16 @@ Tests pin that a failed node fails again on the next run, rather than being serv
 dagraph keeps only the key, never what went into it. A result carries `actionKey`. The `start` event carries no key. The entry holds only `outputs` and `contentHash`. `describe()` lists neither a node's inputs nor its roles. The code that builds the key is not exported, and the package's `exports` map refuses a deep import of it: `ERR_PACKAGE_PATH_NOT_EXPORTED` under Node, `ERR_MODULE_NOT_FOUND` under Bun. No option prints the key's parts. What a reader can do:
 
 1. **Compare the node's `actionKey` across the two executions.** A result is plain JSON, so save each execution's results to compare later. If the key is the same and the node is `done` the second time, the key did not cause the rerun. The node was forced, is `cacheable: false`, had no entry (an earlier run failed, the cache is a different one, or its `get` rejected), or its entry failed verification (a file was deleted or edited, or `casBaseDir` switched between relative and absolute form). On the memory filesystem, a changed `FsCache` base string such as `./cas` for `cas` also finds no entry. With `FsCache`, `<casBaseDir>/<actionKey>/manifest.json` shows whether the entry exists and which files it names. If the key differs, one of its parts changed, or the dagraph version did (see "Keys across dagraph versions").
-2. **Compare the parts the reader can see.** The kind and the inputs come from the reader's own code. A role keyed by content is the `contentHash` on that dep's result. A fingerprinted role is the SHA-256 of the string its function returns. A file input is its path as given plus the SHA-256 of its bytes.
+2. **Compare the parts the reader can see.** The kind and the inputs come from the reader's own code. A role is the `outputHashes` of the outputs it reads, on that dep's result. A file input is its path as given plus the SHA-256 of its bytes.
 3. **Rebuild the whole preimage and diff it.** Built by hand from "The action key: exactly what is hashed", the preimage reproduces the engine's key exactly. `canonical` is `JSON.stringify` of the value with object keys sorted at every level, so a string `"v1"` keys as `"\"v1\""` and `1` as `"1"`. Inputs and roles are sorted with the default `sort()`. The hash is the SHA-256 hex of `JSON.stringify(preimage)`, the same from `node:crypto` (`createHash("sha256").update(text).digest("hex")`) as from `js-sha256`. Print one preimage per execution and diff the two to name the part that changed.
 
-Verified under Bun and Node 25, against the `actionKey` of an executed node. The node is a `summarize` action with inputs `version: "v1"` and `options: { b: 1, a: [true, null] }`, a node input `config: file(<path>)`, a role `source` keyed by content and a role `other` whose fingerprint returns `"Hello"`. Its preimage is:
+Verified under Bun and Node 25, against the `actionKey` of an executed node. The node is a `summarize` action with inputs `version: "v1"` and `options: { b: 1, a: [true, null] }`, a node input `config: file(<path>)`, and a role `source`. Its preimage is:
 
     ["summarize",
      [["config", ["file", "<path as given>", "<sha256 of its bytes>"]],
       ["options", ["value", "{\"a\":[true,null],\"b\":1}"]],
       ["version", ["value", "\"v1\""]]],
-     [["other", ["fingerprint", "<sha256 of \"Hello\">"]],
-      ["source", ["content", "<contentHash of source's result>"]]]]
+     [["source", ["outputs", [["<output name>", "<that output's hash>"]]]]]]
 
 An output ref inside a value input appears in its `canonical` string as `#ref(<JSON of [roles, outputName]>)`.
 
@@ -377,7 +361,6 @@ Where it lives: `packages/dagraph/src/cache.ts` (`DagFs`), `packages/dagraph/src
       kind: "title",
       inputs: { version: 1 },
       deps: { fetchPage },
-      invalidateOn: { fetchPage: async ({ page }) => JSON.parse(await page.text()).title },
       action: async (c) => {
         const title = `${c.outputDir}/title.txt`;
         await c.ports.fs.writeText(title, JSON.parse(await c.depOutputs.fetchPage.page.text()).title);

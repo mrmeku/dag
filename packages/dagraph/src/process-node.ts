@@ -3,7 +3,6 @@ import type { Cache, CacheEntry, DagFs } from "./cache.ts";
 import {
   collectPaths,
   computeActionKey,
-  hashBytes,
   hashOutputFiles,
   mapPaths,
   verifyOutputs,
@@ -61,36 +60,24 @@ async function publish(
   keyDir: string,
   staging: string,
   outputs: Outputs,
-  contentHash: string,
+  hashes: Pick<CacheEntry, "contentHash" | "outputHashes">,
 ): Promise<Outputs> {
-  const published = `${keyDir}/out-${contentHash}`;
+  const published = `${keyDir}/out-${hashes.contentHash}`;
   const moved = mapPaths(outputs, (path) => published + normalize(path).slice(staging.length));
   try {
     await fs.rename(staging, published);
   } catch {
-    if (!(await verifyOutputs({ outputs: moved, contentHash }, fs.hashFile, keyDir)))
-      return outputs;
+    if (!(await verifyOutputs({ outputs: moved, ...hashes }, fs.hashFile, keyDir))) return outputs;
     await discard(fs, staging);
   }
   return moved;
-}
-
-/** What the `invalidateOn` fingerprint of `role` returned, refused where it is not a string. */
-function fingerprintString(role: string, value: unknown): string {
-  if (typeof value === "string") return value;
-  throw new Error(
-    `invalidateOn.${role} returned ${value === null ? "null" : typeof value}, not a string. ` +
-      "JSON.stringify returns undefined for undefined: give it the value ?? null.",
-  );
 }
 
 /** The node's action key, from its kind, its inputs by name and its deps by role. */
 async function actionKeyOf(
   { spec, roles, inputs }: GraphNode,
   entryOf: (dep: string) => CacheEntry | undefined,
-  ports: unknown,
   hashFile: HashFileFn,
-  handle: (path: string) => unknown,
 ): Promise<string> {
   const rolesOf = (dep: string) =>
     Object.keys(roles)
@@ -107,17 +94,12 @@ async function actionKeyOf(
   const keyedDeps: Record<string, KeyedDep> = {};
   for (const [role, dep] of Object.entries(roles)) {
     const entry = entryOf(dep);
-    const fingerprint = spec.invalidateOn?.[role];
-    keyedDeps[role] = !entry
-      ? ["missing"]
-      : fingerprint
-        ? [
-            "fingerprint",
-            hashBytes(
-              fingerprintString(role, await fingerprint(mapPaths(entry.outputs, handle), ports)),
-            ),
-          ]
-        : ["content", entry.contentHash];
+    if (!entry) {
+      keyedDeps[role] = ["missing"];
+      continue;
+    }
+    const read = spec.pickedOutputs[role] ?? Object.keys(entry.outputHashes);
+    keyedDeps[role] = ["outputs", [...read].sort().map((o) => [o, entry.outputHashes[o] ?? null])];
   }
   return computeActionKey(spec.kind, keyedInputs, keyedDeps);
 }
@@ -146,7 +128,7 @@ export async function lookupNode<Ports, Meta>(
   executionContext: ExecutionContext<NoInfer<Ports>>,
 ): Promise<Lookup> {
   const found = nodeNamed(graph, name);
-  const { cache, fs, casBaseDir, ports }: ExecutionContext = executionContext;
+  const { cache, fs, casBaseDir }: ExecutionContext = executionContext;
   const { node } = found;
   const entryOf = (dep: string) => (Object.hasOwn(depEntries, dep) ? depEntries[dep] : undefined);
   const missing = requiredDeps(node).find((dep) => !entryOf(dep));
@@ -154,9 +136,7 @@ export async function lookupNode<Ports, Meta>(
 
   let actionKey: string;
   try {
-    actionKey = await actionKeyOf(found, entryOf, ports, fs.hashFile, (path) =>
-      fileHandle(fs, path),
-    );
+    actionKey = await actionKeyOf(found, entryOf, fs.hashFile);
   } catch (e) {
     return { name, actionKey: "", status: "failed", error: errorOf(e), elapsed: 0 };
   }
@@ -166,8 +146,8 @@ export async function lookupNode<Ports, Meta>(
       .then(() => cache.get(actionKey))
       .catch(() => undefined);
     if (cached && (await verifyOutputs(cached, fs.hashFile, join(casBaseDir, actionKey)))) {
-      const { outputs, contentHash } = cached;
-      return { name, actionKey, status: "cached", outputs, contentHash };
+      const { outputs, contentHash, outputHashes } = cached;
+      return { name, actionKey, status: "cached", outputs, contentHash, outputHashes };
     }
   }
   return { name, actionKey, status: "missed" };
@@ -247,7 +227,13 @@ export async function runAction<Ports, Meta>(
     const depOutputs = Object.fromEntries(
       Object.entries(roles).flatMap(([role, dep]) => {
         const entry = entryOf(dep);
-        return entry ? [[role, mapPaths(entry.outputs, handle)]] : [];
+        if (!entry) return [];
+        // A role that picks its outputs reads those alone: its key covers no other.
+        const picked = spec.pickedOutputs[role];
+        const read = picked
+          ? Object.fromEntries(Object.entries(entry.outputs).filter(([o]) => picked.includes(o)))
+          : entry.outputs;
+        return [[role, mapPaths(read, handle)]];
       }),
     );
     const context = { inputs, depOutputs, ports, outputDir, signal, output };
@@ -285,17 +271,10 @@ export async function runAction<Ports, Meta>(
       settled.outputs,
       (p) => `${staging}/${normalize(fs.resolve(p)).slice(under.length)}`,
     );
-    const contentHash = await hashOutputFiles(returned, fs.hashFile, keyDir);
-    const outputs = await publish(fs, keyDir, staging, returned, contentHash);
-    if (node.cacheable !== false) await cache.put(actionKey, { outputs, contentHash });
-    return {
-      name,
-      actionKey,
-      status: "done",
-      outputs,
-      contentHash,
-      elapsed: Date.now() - startTime,
-    };
+    const hashes = await hashOutputFiles(returned, fs.hashFile, keyDir);
+    const outputs = await publish(fs, keyDir, staging, returned, hashes);
+    if (node.cacheable !== false) await cache.put(actionKey, { outputs, ...hashes });
+    return { name, actionKey, status: "done", outputs, ...hashes, elapsed: Date.now() - startTime };
   } catch (e) {
     return await dropped(failed(errorOf(e)));
   } finally {

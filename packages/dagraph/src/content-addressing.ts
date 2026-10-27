@@ -23,8 +23,11 @@ export function hashBytes(data: string | Uint8Array): string {
 
 /** One input as keyed: a file's path and content hash, or a value's canonical JSON. */
 export type KeyedInput = ["file", string, string] | ["value", string];
-/** One dep role as keyed: its content hash, its fingerprint's hash, or the mark for missing. */
-export type KeyedDep = ["content", string] | ["fingerprint", string] | ["missing"];
+/**
+ * One dep role as keyed: the hash of each output it reads, by name (`null` for one the dep did not
+ * produce), or the mark for missing.
+ */
+export type KeyedDep = ["outputs", [string, string | null][]] | ["missing"];
 
 /**
  * The action key: SHA256 of the action's kind, each input by name and each dep by role, both
@@ -52,16 +55,16 @@ function relativeTo(keyDir: string, path: string): string {
 }
 
 /**
- * A hash of a node's outputs, early cutoff compares it and dependents key on it: each output's
- * name, each file's path relative to its output directory, and each file's content. So which
- * file an output names is part of it, wherever the directory sits. A path with no file rejects,
- * naming the output and its file.
+ * The hashes of a node's outputs: each output's own, which a dependent that reads it keys on, and
+ * the content hash of them all. Each covers its outputs' names, each file's path relative to its
+ * output directory, and each file's content. So which file an output names is part of it,
+ * wherever the directory sits. A path with no file rejects, naming the output and its file.
  */
 export async function hashOutputFiles(
   outputs: Outputs,
   hashFile: HashFileFn,
   keyDir: string,
-): Promise<string> {
+): Promise<Pick<CacheEntry, "contentHash" | "outputHashes">> {
   const files = async (paths: string[], name: string) => {
     const hashed: string[][] = [];
     for (const path of paths) {
@@ -78,20 +81,28 @@ export async function hashOutputFiles(
     }
     return hashed;
   };
-  const shape: unknown[] = [];
+  const shape: [string, string[][]][] = [];
   for (const [name, value] of Object.entries(outputs).sort(([a], [b]) => (a < b ? -1 : 1)))
     shape.push([name, await files([value].flat(), name)]);
-  return sha256.hex(JSON.stringify(shape));
+  return {
+    contentHash: sha256.hex(JSON.stringify(shape)),
+    outputHashes: Object.fromEntries(
+      shape.map(([name, hashed]) => [name, sha256.hex(JSON.stringify(hashed))]),
+    ),
+  };
 }
 
-/** Whether an entry's files still exist and hash to its content hash. */
+/** Whether an entry's files still exist and hash to its content hash and output hashes. */
 export async function verifyOutputs(
   entry: CacheEntry,
   hashFile: HashFileFn,
   keyDir: string,
 ): Promise<boolean> {
   try {
-    return (await hashOutputFiles(entry.outputs, hashFile, keyDir)) === entry.contentHash;
+    const { contentHash, outputHashes } = await hashOutputFiles(entry.outputs, hashFile, keyDir);
+    const sorted = (hashes: Record<string, string>) =>
+      JSON.stringify(Object.entries(hashes).sort());
+    return contentHash === entry.contentHash && sorted(outputHashes) === sorted(entry.outputHashes);
   } catch {
     return false;
   }

@@ -3,11 +3,11 @@ import { checkInputs } from "./graph/inputs.ts";
 import {
   DEP,
   depRefs,
+  pickedOutputs,
   requiredRoles,
   type ActionContext,
   type DepSpecs,
   type InputRecord,
-  type InvalidateOn,
   type NodeDeps,
   type NodeInputsSpec,
   type NodeParams,
@@ -58,7 +58,6 @@ export interface ActionSpec<
   // `R & Outputs`, not a constraint on R: a constraint would keep a returned template literal's
   // type, as `${string}/out.txt`, where the outputs are a path.
   action: (context: NoInfer<ActionContext<Ports, D, I & N>>) => Promise<R & Outputs>;
-  invalidateOn?: NoInfer<InvalidateOn<Ports, D>>;
   /** `false` runs the node in every execution: its entry is never read or written. */
   cacheable?: boolean;
   /** The group whose limit it runs under, with `throttledScheduler`: one that `actionsFor` names. */
@@ -69,8 +68,7 @@ export interface ActionSpec<
 
 /**
  * An action as a graph holds it, its types erased: the engine builds each context from its
- * node's inputs and its deps' entries, so the action takes the context of no action in particular,
- * and its fingerprints the handles of no output in particular.
+ * node's inputs and its deps' entries, so the action takes the context of no action in particular.
  */
 export interface ErasedSpec extends Pick<
   ActionSpec<unknown, unknown, DepSpecs, InputRecord<unknown>, InputRecord, string>,
@@ -78,13 +76,13 @@ export interface ErasedSpec extends Pick<
 > {
   inputs: Record<string, unknown>;
   requiredRoles: string[];
+  pickedOutputs: Record<string, readonly string[]>;
   action: (
     context: Omit<ActionContext, "inputs" | "depOutputs"> & {
       inputs: Record<string, unknown>;
       depOutputs: Record<string, unknown>;
     },
   ) => Promise<Outputs>;
-  invalidateOn?: Record<string, (outputs: unknown, ports: unknown) => Promise<string> | string>;
 }
 
 /**
@@ -131,6 +129,7 @@ function define<
     ...spec,
     inputs: checkInputs(spec.inputs, where),
     requiredRoles: requiredRoles(spec.deps ?? {}),
+    pickedOutputs: pickedOutputs(spec.deps ?? {}),
   } as unknown as ErasedSpec;
   return {
     [DEP]: true,

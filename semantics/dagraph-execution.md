@@ -213,7 +213,7 @@ A node moves through these states. Each arrow names what moves it.
 1. **Waiting**: some dep has not settled. A node with no deps skips this state.
 2. **Ready**: every dep has settled, whatever its status. The node waits for the scheduler to admit it.
 3. **Admitted**. Orchestration first checks the node's _required_ deps (every dep but those marked `settled`). If one did not succeed, the node settles `dep-failed` at once, with no dispatch event and no action key. Otherwise orchestration emits `dispatch` and hands the node to processing.
-4. **Looking up**. Processing computes the action key. If that fails (an input file cannot be read, an `invalidateOn` fingerprint throws or returns no string), the node settles `failed`, with no action key. Unless the node is not cacheable, it reads the cache. A verified entry settles the node `cached`. A cache whose read rejects counts as a miss, never as a failure.
+4. **Looking up**. Processing computes the action key. If that fails (an input file cannot be read), the node settles `failed`, with no action key. Unless the node is not cacheable, it reads the cache. A verified entry settles the node `cached`. A cache whose read rejects counts as a miss, never as a failure.
 5. **Waiting for its slot**: only a miss whose action is in a concurrency group. It gives its place back and waits until the scheduler grants it a slot.
 6. **Starting**: the engine makes a fresh, empty output directory for this attempt and emits `start`. If the listener returns a promise, the action waits for it.
 7. **Running**: the action runs with a signal that fires on the node's timeout or on the execution's cancel.
@@ -227,15 +227,15 @@ Where it lives: `packages/dagraph/src/orchestrate.ts`, `process-node.ts`, `exec-
 
 A `Result` is how one node settled. It always has `name` (the node's name) and `actionKey` (the node's key, or `""` when it never got one). The rest depends on `status`:
 
-| `status`     | Extra fields                                  | When                                                                                                                                                                          |
-| ------------ | --------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `done`       | `outputs`, `contentHash`, `elapsed`           | The action ran and its outputs were stored.                                                                                                                                   |
-| `cached`     | `outputs`, `contentHash`                      | A verified cache entry was found. No `elapsed`.                                                                                                                               |
-| `failed`     | `error: { name, message, cause? }`, `elapsed` | The node could not be keyed, or its action threw, timed out, or returned paths that are outside its output directory or cannot be read, or the work around the action failed. |
-| `dep-failed` | `dep`                                         | A required dep did not succeed. `dep` names it.                                                                                                                               |
-| `cancelled`  | none                                          | The execution was cancelled before or while the node ran.                                                                                                                     |
+| `status`     | Extra fields                                        | When                                                                                                                                                                          |
+| ------------ | --------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `done`       | `outputs`, `contentHash`, `outputHashes`, `elapsed` | The action ran and its outputs were stored.                                                                                                                                   |
+| `cached`     | `outputs`, `contentHash`, `outputHashes`            | A verified cache entry was found. No `elapsed`.                                                                                                                               |
+| `failed`     | `error: { name, message, cause? }`, `elapsed`       | The node could not be keyed, or its action threw, timed out, or returned paths that are outside its output directory or cannot be read, or the work around the action failed. |
+| `dep-failed` | `dep`                                               | A required dep did not succeed. `dep` names it.                                                                                                                               |
+| `cancelled`  | none                                                | The execution was cancelled before or while the node ran.                                                                                                                     |
 
-`outputs` and `contentHash` together are the node's cache entry (`CacheEntry`, from [dagraph-caching](dagraph-caching.md)): `outputs` is the record of outputs the action returned, moved to where the CAS keeps them. `elapsed` is in milliseconds, counted from the action's start to the result, so it includes hashing and storing the outputs. It is `0` for a failure that happened before the action started.
+`outputs`, `contentHash` and `outputHashes` together are the node's cache entry (`CacheEntry`, from [dagraph-caching](dagraph-caching.md)): `outputs` is the record of outputs the action returned, moved to where the CAS keeps them. `elapsed` is in milliseconds, counted from the action's start to the result, so it includes hashing and storing the outputs. It is `0` for a failure that happened before the action started.
 
 The types require `Outputs`: a record of named outputs, each a path or a list of paths. A value cast past the types, such as a bare path, fails the node (see Failure semantics).
 
@@ -259,14 +259,15 @@ A cached result, as JSON:
   "actionKey": "42a8d5ee…43756",
   "status": "cached",
   "outputs": { "page": "<casBaseDir>/42a8d5ee…43756/out-c844d585…44b6/page.txt" },
-  "contentHash": "c844d585…44b6"
+  "contentHash": "c844d585…44b6",
+  "outputHashes": { "page": "<64 hex>" }
 }
 ```
 
 ### Helpers
 
 - `isResult(value)` tells whether a value read back from a file or another process is a `Result`. It checks the fields each status needs: `done` needs `elapsed` and an entry, `cached` an entry, `failed` an `elapsed` and an `error` whose `name` and `message` are strings and whose `cause`, if any, is JSON, `dep-failed` a `dep`. Every result needs `name` and `actionKey` as strings. An unknown status is refused.
-- `isSucceeded(result)` is true for `done` and `cached`, and narrows the result to `SucceededResult`, which carries `outputs` and `contentHash`.
+- `isSucceeded(result)` is true for `done` and `cached`, and narrows the result to `SucceededResult`, which carries `outputs`, `contentHash` and `outputHashes`.
 - `FailedError` is the type of a failed result's `error`.
 - `tally(results)` counts results by status. It returns a `Tally`, a record with all five statuses as keys, zero when none: `{ done, cached, failed, "dep-failed", cancelled }`.
 
@@ -284,18 +285,17 @@ When a node has several deps that did not succeed, `dep` names the first of them
 
 **What fails a node, and the message a caller sees:**
 
-| Cause                                                                                                   | `error`                                                                                                                         | Key? |
-| ------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------- | ---- |
-| The action throws                                                                                       | its name, message and cause                                                                                                     | yes  |
-| The node's timeout fires                                                                                | `name: "TimeoutError"`, `message: "timed out after <timeoutMs> ms"`, the thrown error's `cause`                                 | yes  |
-| An input file cannot be read, or a fingerprint throws                                                   | that error                                                                                                                      | no   |
-| A fingerprint returns no string                                                                         | `invalidateOn.<role> returned <type>, not a string. JSON.stringify returns undefined for undefined: give it the value ?? null.` | no   |
-| The action returns something other than a record of paths and lists of paths                            | `the action returned <value as JSON>, not a record of outputs: return { <name>: path }`                                         | yes  |
-| A returned path lies outside the output directory                                                       | `output not under the output dir: <path> is not under <outputDir>`                                                              | yes  |
-| A returned path has no file, or cannot be read                                                          | named by [dagraph-caching](dagraph-caching.md)                                                                                  | yes  |
-| The `start` listener throws or rejects                                                                  | that error, `elapsed: 0`, the action never runs                                                                                 | yes  |
-| The output directory cannot be made, or the cache write fails (the published outputs then stay on disk) | that error                                                                                                                      | yes  |
-| The `RunNode` rejects                                                                                   | its error, `elapsed: 0` (or `cancelled` once the execution is cancelled)                                                        | no   |
+| Cause                                                                                                   | `error`                                                                                         | Key? |
+| ------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------- | ---- |
+| The action throws                                                                                       | its name, message and cause                                                                     | yes  |
+| The node's timeout fires                                                                                | `name: "TimeoutError"`, `message: "timed out after <timeoutMs> ms"`, the thrown error's `cause` | yes  |
+| An input file cannot be read                                                                            | that error                                                                                      | no   |
+| The action returns something other than a record of paths and lists of paths                            | `the action returned <value as JSON>, not a record of outputs: return { <name>: path }`         | yes  |
+| A returned path lies outside the output directory                                                       | `output not under the output dir: <path> is not under <outputDir>`                              | yes  |
+| A returned path has no file, or cannot be read                                                          | named by [dagraph-caching](dagraph-caching.md)                                                  | yes  |
+| The `start` listener throws or rejects                                                                  | that error, `elapsed: 0`, the action never runs                                                 | yes  |
+| The output directory cannot be made, or the cache write fails (the published outputs then stay on disk) | that error                                                                                      | yes  |
+| The `RunNode` rejects                                                                                   | its error, `elapsed: 0` (or `cancelled` once the execution is cancelled)                        | no   |
 
 Where it lives: `packages/dagraph/src/orchestrate.ts`, `exec-state.ts`, `process-node.ts`.
 
@@ -583,7 +583,7 @@ Where it lives: `packages/dagraph/src/process-node.ts` (`actionSignal`), `graph/
 
 `orchestrate(nodes, run, scheduler, onEvent?, signal?)` does what `execute` does, except that it never processes a node itself: it calls `run` for that.
 
-- `nodes`: the node data, any iterable of `Node`, usually `graph.describe()`. It carries no actions, inputs or fingerprints, so it can cross into another process when its `meta` can.
+- `nodes`: the node data, any iterable of `Node`, usually `graph.describe()`. It carries no actions or inputs, so it can cross into another process when its `meta` can.
 - `run`: a `RunNode`, `(node, depEntries, waitForSlot) => Promise<Result>`. `depEntries` is the cache entry of each dep that succeeded, by dep name (a dep that did not succeed is absent). `waitForSlot` waits for the node's slot (below).
 - `scheduler`: required here; there is no default.
 - `onEvent`: receives `dispatch` and `result`.

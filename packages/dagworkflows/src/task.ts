@@ -67,17 +67,10 @@ export interface TaskFields<
   D extends DepRecord,
   O extends string,
   I extends InputRecord<unknown> = Record<never, never>,
->
-  extends
-    Pick<
-      ActionSpec<Ports, Record<O, string>, DepSpecsOf<D>, I, DeclaredOutputs>,
-      "cacheable" | "timeoutMs"
-    >,
-    // A fingerprint reads the ports a workflow does: a command runs only in a node's shell.
-    Pick<
-      ActionSpec<WorkflowPorts, Record<O, string>, DepSpecsOf<D>, I, DeclaredOutputs>,
-      "invalidateOn"
-    > {
+> extends Pick<
+  ActionSpec<Ports, Record<O, string>, DepSpecsOf<D>, I, DeclaredOutputs>,
+  "cacheable" | "timeoutMs"
+> {
   /** Its address in logs, check runs and `--only`, unique in the graph. */
   name: string;
   /** The nodes it depends on, by role: `deps: { pack }`, or `settled(test)` to run after a failure. */
@@ -256,7 +249,6 @@ export function addTask<
     nodeInputs: nodeInputs<I>,
     inputs: { declaredOutputs },
     cacheable,
-    ...(spec.invalidateOn && { invalidateOn: spec.invalidateOn }),
     ...(spec.timeoutMs !== undefined && { timeoutMs: spec.timeoutMs }),
     ...(spec.concurrencyGroup !== undefined && { concurrencyGroup: spec.concurrencyGroup }),
     action: (context) => runTask(spec, context),

@@ -11,6 +11,7 @@ export {
   nodeInputs,
   nodeRefNamed,
   notAString,
+  pick,
   requiredDeps,
   settled,
 } from "./types.ts";
@@ -26,7 +27,6 @@ export type {
   Handles,
   InputRecord,
   InputValue,
-  InvalidateOn,
   Node,
   NodeInputs,
   NodeInputsSpec,

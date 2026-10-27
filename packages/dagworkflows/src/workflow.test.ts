@@ -357,8 +357,6 @@ export function wrongFormsAndPostsDoNotCompile(workflow: Workflow) {
   up({ name: "f", cmd: ["x"], inputs: { version: "f-v1" } });
   // @ts-expect-error a post with cacheable
   up({ name: "g", cmd: ["x"], cacheable: true });
-  // @ts-expect-error a post with invalidateOn
-  up({ name: "h", cmd: ["x"], invalidateOn: { main: () => "" } });
   up({
     name: "down:db",
     shell: 'if [ -f "$ID" ]; then docker rm -f "$(cat "$ID")"; fi',
@@ -425,14 +423,5 @@ export function execIsOutOfReach(workflow: Workflow) {
       // @ts-expect-error a post's action gets the same ports
       action: ({ ports }) => void ports.exec,
     },
-  });
-  const pack = workflow.task({ name: "pack", cmd: ["pack"], outputs: { tarball: "pkg.tgz" } });
-  workflow.task({
-    name: "d",
-    deps: { pack },
-    inputs: { version: "d-v1" },
-    // @ts-expect-error a fingerprint gets the same ports
-    invalidateOn: { pack: (_outputs, ports) => String(ports.exec) },
-    action: () => {},
   });
 }

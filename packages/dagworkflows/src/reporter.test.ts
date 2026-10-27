@@ -35,9 +35,17 @@ const RESULTS: [Result, Result, Result, Result] = [
     status: "done",
     outputs: { out: "x" },
     contentHash: "h",
+    outputHashes: {},
     elapsed: 400,
   },
-  { name: "b", actionKey: "k2", status: "cached", outputs: { out: "y" }, contentHash: "h" },
+  {
+    name: "b",
+    actionKey: "k2",
+    status: "cached",
+    outputs: { out: "y" },
+    contentHash: "h",
+    outputHashes: {},
+  },
   {
     name: "c",
     actionKey: "k3",

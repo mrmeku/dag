@@ -28,7 +28,7 @@ function harness(
   const finishers = new Map<string, () => void>();
   const lookups = new Map<string, () => void>();
   const run: RunNode = async (node, _depEntries, waitForSlot) => {
-    const entry = { actionKey: "k", outputs: {}, contentHash: "h" };
+    const entry = { actionKey: "k", outputs: {}, contentHash: "h", outputHashes: {} };
     if (hits.includes(node.name)) return { name: node.name, status: "cached", ...entry };
     if (slowLookups.includes(node.name))
       await new Promise<void>((resolve) => lookups.set(node.name, resolve));
@@ -207,6 +207,7 @@ describe("orchestrate", () => {
     status: "done",
     outputs: {},
     contentHash: "h",
+    outputHashes: {},
     elapsed: 0,
   });
 

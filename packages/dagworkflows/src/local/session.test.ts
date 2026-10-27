@@ -689,7 +689,13 @@ describe("local session, failures style, at the edges", () => {
     store.begin(post);
     store.onEvent(dispatchOf(save));
     store.onEvent(
-      resultOf(save, { actionKey: "ks", status: "cached", outputs: {}, contentHash: "h" }),
+      resultOf(save, {
+        actionKey: "ks",
+        status: "cached",
+        outputs: {},
+        contentHash: "h",
+        outputHashes: {},
+      }),
     );
     await store.report(post);
     assert.deepEqual(session.logs(), { ".dag/logs/save.log": "saved from the cache\n" });
@@ -1165,6 +1171,7 @@ describe("local session, live style", () => {
           status: "done",
           outputs: {},
           contentHash: "h",
+          outputHashes: {},
           elapsed: 1,
         });
 
@@ -1189,7 +1196,13 @@ describe("local session, live style", () => {
       // Only a cache hit has settled, and the footer already has each node's last run.
       await emitAt(600, [
         dispatchOf(fmt),
-        resultOf(fmt, { actionKey: "", status: "cached", outputs: {}, contentHash: "h" }),
+        resultOf(fmt, {
+          actionKey: "",
+          status: "cached",
+          outputs: {},
+          contentHash: "h",
+          outputHashes: {},
+        }),
       ]);
       const midRun = await session.screen();
       // The terminal echoes a ^C at the cursor, the end of the status row.
@@ -1207,9 +1220,21 @@ describe("local session, live style", () => {
         startOf(testB),
         done(testB),
         done(e2e),
-        resultOf(build, { actionKey: "kb", status: "cached", outputs: {}, contentHash: "h" }),
+        resultOf(build, {
+          actionKey: "kb",
+          status: "cached",
+          outputs: {},
+          contentHash: "h",
+          outputHashes: {},
+        }),
         dispatchOf(docs),
-        resultOf(docs, { actionKey: "", status: "cached", outputs: {}, contentHash: "h" }),
+        resultOf(docs, {
+          actionKey: "",
+          status: "cached",
+          outputs: {},
+          contentHash: "h",
+          outputHashes: {},
+        }),
       ]);
       await session.runOptions.store.close();
       assert.deepEqual(
@@ -1444,7 +1469,14 @@ describe("local session, live style", () => {
     };
     const started = (node: Node): ExecEvent[] => [dispatchOf(node), startOf(node)];
     const done = (node: Node): ExecEvent =>
-      resultOf(node, { actionKey: "", status: "done", outputs: {}, contentHash: "h", elapsed: 1 });
+      resultOf(node, {
+        actionKey: "",
+        status: "done",
+        outputs: {},
+        contentHash: "h",
+        outputHashes: {},
+        elapsed: 1,
+      });
     const cancelled = (node: Node, actionKey = ""): ExecEvent =>
       resultOf(node, { actionKey, status: "cancelled" });
     const screenAt = async (occurredAt: number) => {
@@ -1500,7 +1532,13 @@ describe("local session, live style", () => {
     await emitAt(2500, [
       done(b),
       dispatchOf(c),
-      resultOf(c, { actionKey: "", status: "cached", outputs: {}, contentHash: "h" }),
+      resultOf(c, {
+        actionKey: "",
+        status: "cached",
+        outputs: {},
+        contentHash: "h",
+        outputHashes: {},
+      }),
       cancelled(x, "kx"),
       cancelled(y),
       cancelled(w),

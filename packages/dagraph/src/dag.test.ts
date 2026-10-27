@@ -14,8 +14,10 @@ import {
   file,
   Graph,
   isFileHandle,
+  maybe,
   namedOutput,
   nodeInputs,
+  pick,
   settled,
   type ActionContext,
   type DepRecord,
@@ -428,13 +430,13 @@ describe("the action key", () => {
     ]);
   });
 
-  test("an output ref reads as a handle on the dep's published file and keys by role and output name, so an invalidateOn fingerprint still holds", async () => {
+  test("an output ref reads as a handle on the dep's published file and keys by role and output name, not by its path, so a dep rebuilt to the same content keeps it cached", async () => {
     const { ctx, fs } = setup();
     const pack = defineActionWithPorts({
       kind: "pack",
       nodeInputs: nodeInputs<{ version: string }>,
       action: async (c) => ({
-        tarball: await write(c, "pkg.tgz", `pkg ${c.inputs.version}`),
+        tarball: await write(c, "pkg.tgz", "pkg"),
         notes: await write(c, "notes.md", "notes"),
       }),
     });
@@ -442,7 +444,6 @@ describe("the action key", () => {
       kind: "publish",
       deps: { pack },
       nodeInputs: nodeInputs<{ cmd: (string | OutputRef<string>)[] }>,
-      invalidateOn: { pack: (outputs) => outputs.notes.text() },
       action: async (c) => {
         const argv = c.inputs.cmd.map((arg) => (typeof arg === "string" ? arg : arg.path));
         return { out: await write(c, "cmd.json", JSON.stringify(argv)) };
@@ -469,26 +470,72 @@ describe("the action key", () => {
       { statuses: { pack: "done", publish: "cached" }, reads: false },
     ]);
   });
-
-  test("a fingerprint that returns no string fails the node, naming its role", async () => {
-    const { ctx } = setup();
-    const g = new Graph<Ports>();
-    const src = task(g, "src");
-    defineActionWithPorts({
-      kind: "keyed",
-      deps: { src: dep<OneFile> },
-      invalidateOn: { src: () => JSON.stringify(undefined) },
-      action: async (c) => ({ out: await write(c, "out", "x") }),
-    }).addNode(g, { deps: { src } });
-    const keyed = (await execute(g, ctx)).find((r) => r.name === "keyed");
-    expect(keyed?.status === "failed" && keyed.error.message).toBe(
-      "invalidateOn.src returned undefined, not a string. JSON.stringify returns undefined for " +
-        "undefined: give it the value ?? null.",
-    );
-  });
 });
 
 describe("refs and outputs in the key", () => {
+  test("a role that picks some of its dep's outputs keys on those alone and reads only those, settled or maybe", async () => {
+    const { ctx } = setup();
+    const pair = defineActionWithPorts({
+      kind: "pair-of-files",
+      nodeInputs: nodeInputs<{ main: string; extra: string }>,
+      action: async (c) => ({
+        main: await write(c, "main.txt", c.inputs.main),
+        extra: await write(c, "extra.txt", c.inputs.extra),
+      }),
+    });
+    const read: string[][] = [];
+    const readerOf =
+      (kind: string) => async (c: ActionContext<Ports>, pair: object | undefined) => {
+        read.push([kind, ...Object.keys(pair ?? {})]);
+        return { out: await write(c, "out.txt", kind) };
+      };
+    const required = defineActionWithPorts({
+      kind: "required",
+      deps: { pair: pick(pair, "main") },
+      action: (c) => readerOf("required")(c, c.depOutputs.pair),
+    });
+    const settledRole = defineActionWithPorts({
+      kind: "settled",
+      deps: { pair: settled(pick(pair, "main")) },
+      action: (c) => readerOf("settled")(c, c.depOutputs.pair),
+    });
+    const maybeRole = defineActionWithPorts({
+      kind: "maybe",
+      deps: { pair: maybe(pick(pair, "main")) },
+      action: (c) => readerOf("maybe")(c, c.depOutputs.pair),
+    });
+    const run = async (main: string, extra: string) => {
+      const g = new Graph<Ports>();
+      const p = pair.addNode(g, { inputs: { main, extra } });
+      required.addNode(g, { deps: { pair: p } });
+      settledRole.addNode(g, { deps: { pair: settled(p) } });
+      maybeRole.addNode(g, { deps: { pair: p } });
+      return statuses(await execute(g, ctx));
+    };
+    const first = await run("a", "x");
+    const readFirst = read.splice(0);
+    expect({
+      first,
+      readFirst,
+      extraChanged: await run("a", "y"),
+      mainChanged: await run("b", "y"),
+    }).toEqual({
+      first: { "pair-of-files": "done", required: "done", settled: "done", maybe: "done" },
+      readFirst: [
+        ["required", "main"],
+        ["settled", "main"],
+        ["maybe", "main"],
+      ],
+      extraChanged: {
+        "pair-of-files": "done",
+        required: "cached",
+        settled: "cached",
+        maybe: "cached",
+      },
+      mainChanged: { "pair-of-files": "done", required: "done", settled: "done", maybe: "done" },
+    });
+  });
+
   type Pair = { main: string; extra: string };
   const pair = defineActionWithPorts({
     kind: "pair",
@@ -558,8 +605,8 @@ describe("refs and outputs in the key", () => {
       leftMain: await keyOfUse(ctx, ["p", "q"], leftAndRight("left", "main")),
       twoRoles: await keyOfUse(ctx, ["p", "q"], twoRoles("main", "same")),
     }).toEqual({
-      leftMain: "c710877ccdc0d9d7753c81e51b8dd94f08613a87f5b6deddf6fe479af52e2716",
-      twoRoles: "c81359adb4c07b9d4907f9027904d9724856e2bd6d1d0c5408b80f70c7667916",
+      leftMain: "592dd623a1ac0eddbeac5e2ff3a61046869ecc409f520fd7057efdebc71564a3",
+      twoRoles: "b97bb03bf57c20b783a577f3f5d9efacdc3cc760527f8e01df06ab27acd0ab76",
     });
   });
 
@@ -590,22 +637,11 @@ describe("refs and outputs in the key", () => {
     }).toEqual({ elsewhere: true, swapped: false, moved: false, renamed: false, edited: false });
   });
 
-  test("an input file that cannot be read, or a fingerprint that throws, fails the node before it gets a key", async () => {
+  test("an input file that cannot be read fails the node before it gets a key", async () => {
     const { ctx } = setup();
     const g = new Graph<Ports>();
     const unreadable = task(g, "unreadable", { inputs: { src: file("/missing.ts") } });
     task(g, "after", { deps: { unreadable } });
-    const src = task(g, "src");
-    defineActionWithPorts({
-      kind: "fingerprinted",
-      deps: { src: dep<OneFile> },
-      invalidateOn: {
-        src: () => {
-          throw new Error("cannot fingerprint");
-        },
-      },
-      action: async (c) => ({ out: await write(c, "out", "x") }),
-    }).addNode(g, { deps: { src } });
     const results = await execute(g, ctx);
     expect(
       Object.fromEntries(
@@ -617,8 +653,6 @@ describe("refs and outputs in the key", () => {
     ).toEqual({
       unreadable: ["failed", "", "ENOENT: /missing.ts"],
       after: "dep-failed",
-      src: "done",
-      fingerprinted: ["failed", "", "cannot fingerprint"],
     });
   });
 });
@@ -841,7 +875,7 @@ describe("the CAS", () => {
     for (const [key, outputs] of Object.entries(stored))
       await fs.writeText(
         `/cas/${key}/manifest.json`,
-        JSON.stringify({ outputs, contentHash: "1" }),
+        JSON.stringify({ outputs, contentHash: "1", outputHashes: {} }),
       );
     expect([await cache.get("bare"), await cache.get("list")]).toEqual([undefined, undefined]);
   });
@@ -859,8 +893,8 @@ describe("the CAS", () => {
         await base.writeText(path, content);
       },
     };
-    const old = { outputs: { out: "/cas/k/out-1/f" }, contentHash: "1" };
-    const next = { outputs: { out: "/cas/k/out-2/f" }, contentHash: "2" };
+    const old = { outputs: { out: "/cas/k/out-1/f" }, contentHash: "1", outputHashes: {} };
+    const next = { outputs: { out: "/cas/k/out-2/f" }, contentHash: "2", outputHashes: {} };
     await new FsCache("/cas", base).put("k", old);
     const cache = new FsCache("/cas", fs);
     const putting = cache.put("k", next);
@@ -1040,7 +1074,7 @@ describe("the CAS", () => {
         restored: { written: "cached", reader: "cached" },
         outputDir: `${tmp}/first/${keyDir}/tmp-<uuid>`,
         handle: `${tmp}/first/${dir}/srt`,
-        manifest: { outputs, contentHash: w.contentHash },
+        manifest: { outputs, contentHash: w.contentHash, outputHashes: w.outputHashes },
         result: outputs,
       });
     } finally {
@@ -1393,7 +1427,14 @@ describe("a result is plain data", () => {
 
   test("isResult refuses a record that lacks a field its status needs, or whose status no result has", () => {
     const outputs = { out: "/o" };
-    const cached = { name: "a", actionKey: "k", status: "cached", outputs, contentHash: "h" };
+    const cached = {
+      name: "a",
+      actionKey: "k",
+      status: "cached",
+      outputs,
+      contentHash: "h",
+      outputHashes: {},
+    };
     const records = {
       // Only a node that ran has an elapsed time.
       cached,

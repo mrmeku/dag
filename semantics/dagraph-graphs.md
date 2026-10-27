@@ -34,6 +34,7 @@ Main entry point `@mrmeku/dagraph` (graph-building part):
 | `dep<T>`                     | Declares a role that more than one action can fill, by its output type.                               |
 | `settled(...)`               | Marks a role, or a ref, as one the node runs without if that dep does not succeed.                    |
 | `maybe(...)`                 | Marks a role that a node may leave out.                                                               |
+| `pick(dep, ...outputs)`      | Narrows a role to some of its dep's outputs: the node keys on and reads only those.                   |
 | `nodeInputs<T>`              | Declares the inputs each node of the action must give, by name and type.                              |
 | `file(path)`                 | A file input: the file's content becomes part of the key.                                             |
 | `nodeRefNamed(name)`         | An untyped ref to a node known only by its name.                                                      |
@@ -56,7 +57,6 @@ Types, each explained further in its section:
 - `DepRefs<D, S>`: the argument of an `inputs` function.
 - `InputValue<S = never>`, `InputRecord<S = never>`: a value input, and inputs by name. `S` is the scope of the `inputs` call whose refs they may hold; the default `never` holds no refs.
 - `FileInput`: what `file(path)` returns. `FileHandle`, `Handles<T>`: how an action reads files.
-- `InvalidateOn<Ports, D>`: the type of the `invalidateOn` field.
 - `NodeInputsSpec<T>`: what `nodeInputs<T>()` returns.
 - `NodeParams`: the params of `addNode`.
 - `Node<Meta>`: a node as data, from `describe()`.
@@ -213,17 +213,16 @@ Running it, all six nodes succeed, and `home:summarize` writes `terse | 2 | <P>H
 
 ### The spec (`ActionSpec`)
 
-| Field              | Required | Meaning                                                                                                                                                                                                                                                                                                                                                            |
-| ------------------ | -------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `kind`             | yes      | A string naming the action's logic. It joins every node's key, so actions of two kinds never share a cache entry. Nodes of one kind that differ put what differs in their node inputs (`nodeInputs`), so one action serves them all.                                                                                                                               |
-| `deps`             | no       | The roles each node fills, as a record (see Dependencies).                                                                                                                                                                                                                                                                                                         |
-| `nodeInputs`       | no       | `nodeInputs<{ ... }>` (uncalled, or called: the same thing). The names and types of the inputs each node gives.                                                                                                                                                                                                                                                    |
-| `inputs`           | no       | Inputs every node of the action shares, such as `{ version: 1 }`. Same value rules as node inputs. They are checked, and copied, when the action is defined.                                                                                                                                                                                                       |
-| `action`           | yes      | `async (context) => outputs`. Does the work (see The action context).                                                                                                                                                                                                                                                                                              |
-| `invalidateOn`     | no       | Per role, a function `(outputs, ports) => string \| Promise<string>` whose result stands in for that dep's content in the key. `outputs` is that one role's dep outputs as handles (`Handles<T>`, never `undefined`), not the whole `depOutputs` record: `invalidateOn: { page: (page) => page.html.hash() }`. Semantics in [dagraph-caching](dagraph-caching.md). |
-| `cacheable`        | no       | `false` runs every node of the action in every execution, and its entry is never read or written ([dagraph-caching](dagraph-caching.md)). Default: cacheable.                                                                                                                                                                                                      |
-| `concurrencyGroup` | no       | The group whose limit the node runs under with `throttledScheduler`. It must be one of the names given to `actionsFor`.                                                                                                                                                                                                                                            |
-| `timeoutMs`        | no       | How long the action may run, counted from its start. It must be a whole number from 1 to 2147483647 (the longest delay `setTimeout` honours). It is not part of the key.                                                                                                                                                                                           |
+| Field              | Required | Meaning                                                                                                                                                                                                                              |
+| ------------------ | -------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `kind`             | yes      | A string naming the action's logic. It joins every node's key, so actions of two kinds never share a cache entry. Nodes of one kind that differ put what differs in their node inputs (`nodeInputs`), so one action serves them all. |
+| `deps`             | no       | The roles each node fills, as a record (see Dependencies).                                                                                                                                                                           |
+| `nodeInputs`       | no       | `nodeInputs<{ ... }>` (uncalled, or called: the same thing). The names and types of the inputs each node gives.                                                                                                                      |
+| `inputs`           | no       | Inputs every node of the action shares, such as `{ version: 1 }`. Same value rules as node inputs. They are checked, and copied, when the action is defined.                                                                         |
+| `action`           | yes      | `async (context) => outputs`. Does the work (see The action context).                                                                                                                                                                |
+| `cacheable`        | no       | `false` runs every node of the action in every execution, and its entry is never read or written ([dagraph-caching](dagraph-caching.md)). Default: cacheable.                                                                        |
+| `concurrencyGroup` | no       | The group whose limit the node runs under with `throttledScheduler`. It must be one of the names given to `actionsFor`.                                                                                                              |
+| `timeoutMs`        | no       | How long the action may run, counted from its start. It must be a whole number from 1 to 2147483647 (the longest delay `setTimeout` honours). It is not part of the key.                                                             |
 
 What `defineAction` checks when it is called:
 
@@ -319,7 +318,7 @@ Example: in a graph with `v1:*` and `v10:*` nodes and a root node `shared` that 
 - `cacheable`: present only when `false`.
 - `timeoutMs`: present only when set.
 
-It never holds the action, the inputs, or fingerprints, so a `Node` can be sent to orchestration in another process or a sandbox whenever its meta can. Besides `meta`, every field is a string, an array of strings, `false` or a whole number, and a field that would be `undefined` is left out, so node data comes back from `JSON.parse(JSON.stringify(nodes))` deep-equal whenever its meta survives JSON (verified, `meta: null` included). A meta that does not survive changes on the way: a `Date` comes back as its ISO string, a `Map` as `{}`, an `undefined` array item as `null`, and a `bigint` makes `JSON.stringify` throw. The arrays are fresh copies: pushing to a returned `deps` changes nothing in the graph. `requiredDeps(node)` gives `deps` minus `settledDeps`.
+It never holds the action or the inputs, so a `Node` can be sent to orchestration in another process or a sandbox whenever its meta can. Besides `meta`, every field is a string, an array of strings, `false` or a whole number, and a field that would be `undefined` is left out, so node data comes back from `JSON.parse(JSON.stringify(nodes))` deep-equal whenever its meta survives JSON (verified, `meta: null` included). A meta that does not survive changes on the way: a `Date` comes back as its ISO string, a `Map` as `{}`, an `undefined` array item as `null`, and a `bigint` makes `JSON.stringify` throw. The arrays are fresh copies: pushing to a returned `deps` changes nothing in the graph. `requiredDeps(node)` gives `deps` minus `settledDeps`.
 
 ### `closure(graph, names)`
 
@@ -337,6 +336,7 @@ An action's `deps` is a record from role name to a declaration:
 - **`dep<T>`**: a role more than one action can fill, by output type alone: `deps: { image: dep<{ image: string }> }`. Write it uncalled. `dep<T>()` means the same. `dep()` with no type argument accepts any outputs.
 - **`settled(x)`**: around an action, `settled(translate)`, or by type, `settled<{ srt: string }>`. The node runs whether or not that dep succeeds. Unlike `Promise.all`, it waits for the dep the way `Promise.allSettled` does. When the dep fails, is cancelled or is held back, the role's outputs are `undefined`.
 - **`maybe(x)`**: around an action, `maybe(summarize)`, around a settled role, `maybe(settled(translate))`, or by type, `maybe<{ notes: string }>` (settled by type: `maybe(settled<{ notes: string }>())`). A node may leave this role out or give `undefined`. Its outputs are then `undefined`.
+- **`pick(x, ...outputs)`**: around an action or a called `dep<T>()`, `pick(download, "thumb")`. The role reads only the named outputs: `depOutputs` is typed and filled with them alone, and the node keys on their hashes alone ([dagraph-caching](dagraph-caching.md)). A name the action does not return does not compile. `settled(pick(…))` and `maybe(pick(…))` keep the pick. A node of the whole action fills the role.
 - **A record typed `DepSpecs`**: `const anyRole: DepSpecs = {}; deps: anyRole`. The action takes deps in any role, and each node names its own roles. This is how an aggregating node (an index over N pages) takes a variable number of deps: ``deps: Object.fromEntries(pages.map((p, i) => [`page${i}`, p]))``. The action's `depOutputs` is then typed by the declaration, not by what a node gives: every value is `{ [output: string]: FileHandle | FileHandle[] } | undefined`. So `value.out.text()` does not compile until the action narrows the value: checked for `undefined`, then `isFileHandle(value.out)` for a single handle (which also rules out a missing output) or `Array.isArray(value.out)` for a list. At run time a role whose dep did not succeed, or that the node gave as `undefined`, has no entry at all, so `Object.entries(depOutputs)` skips it.
 
 Uncalled and called markers are the same: `settled<T>` and `settled<T>()`, `maybe<T>` and `maybe<T>()`, `nodeInputs<T>` and `nodeInputs<T>()`. The one exception is a marker given to `maybe`, which must be called: `maybe(settled<T>)` and `maybe(dep<T>)` do not compile, `maybe(settled<T>())` and `maybe(dep<T>())` do.
@@ -438,7 +438,7 @@ The argument has an entry only for the roles the node actually gives: a maybe ro
 
 - `page.html` is an `OutputRef<string>`, or `OutputRef<string[]>` for a list output. It is a `SettledOutputRef` when the role was given as `settled(ref)`. A settled ref never fits where an `OutputRef` is declared, because it may resolve to `undefined`.
 - The action reads the ref as a handle on that output's published file, or a list of handles. A settled ref reads as `undefined` when its dep did not succeed.
-- In the key, a ref is the role(s) it points through (all of them, sorted, when two roles name one node) plus the output's name. It is never the dep node's name and never a path. So an `invalidateOn` fingerprint on that role still governs it ([dagraph-caching](dagraph-caching.md)).
+- In the key, a ref is the role(s) it points through (all of them, sorted, when two roles name one node) plus the output's name. It is never the dep node's name and never a path, so a dep rebuilt to the same content at another path keeps the node `cached`.
 - Refs exist only for outputs every return of the dep includes. An optional output (`srt?: string`), or one named by an index signature, has no ref. Read it from `depOutputs`, where it is `| undefined`.
 - The refs of a dep cannot be listed: a spread `{ ...page }`, or putting the whole `page` object in a value, throws `node "<name>": the refs of page cannot be listed: name each output, as page.<output>`. Their names exist only in the types.
 - Refs are scoped to the call that received them: a ref kept from another node's `inputs` function does not compile in a different node's inputs.
@@ -467,10 +467,10 @@ Where it lives: `src/graph/types.ts` (`notAString`, `file`), `src/file-handle.ts
 
 A `FileHandle` is how an action sees any file it reads: a `file()` input, or an output of a dep. The engine owns where the file lives. A handle has:
 
-- `path`: its absolute path while the action runs, for a command or library that takes a path. It differs by machine and working directory, so never build a fingerprint or an output's content from it.
+- `path`: its absolute path while the action runs, for a command or library that takes a path. It differs by machine and working directory, so never build an output's content from it.
 - `text()`: the contents as UTF-8. If the file holds bytes that are not valid UTF-8, it throws `<path> is not UTF-8 text: decoding it lost bytes. Hash its bytes with hash().` A file that really contains U+FFFD reads fine.
 - `json(is)`: the contents parsed and checked by the type guard `is`. It throws `<path> holds no JSON` (with the parse error as `cause`) or `<path> holds JSON that <guard function's name> refuses`. "its guard" replaces the name for an anonymous guard.
-- `hash()`: the SHA-256 hex of its bytes, the same hash the engine uses for outputs. Use it as the fingerprint of a binary file.
+- `hash()`: the SHA-256 hex of its bytes, the same hash the engine uses for outputs.
 
 `Handles<T>` maps an output record to its handles, field by field: a `string` becomes a `FileHandle`, a `string[]` a `FileHandle[]`, and an optional field stays `| undefined`. `isFileHandle(x)` is true only for a single handle, not for a list or record of them.
 
@@ -490,7 +490,7 @@ What the compiler stops, and so what a user can rely on not happening in code th
 
 - **Ports**: an action defined with ports cannot be added to a graph whose `Ports` lack them, and `execute` refuses an execution context without satisfying `ports`. A portless action goes on any graph, and fits where an action needing more ports is expected. `Graph<Ports, Meta>` cannot be widened to another `Ports` or `Meta`. An `Action` cannot be retyped as needing fewer ports, other deps or other inputs.
 - **Groups**: `concurrencyGroup` must be one of the names given to `actionsFor`. Plain `defineAction` takes none.
-- **Roles**: a declaration must be an action, `dep`, `settled` or `maybe`. A ref or `{}` does not compile. A node cannot give an undeclared role (even through a variable), cannot omit a required one, cannot give a ref of the wrong output type, and cannot mix settled and required refs. `invalidateOn` takes only declared roles and sees their typed outputs.
+- **Roles**: a declaration must be an action, `dep`, `settled` or `maybe`. A ref or `{}` does not compile. A node cannot give an undeclared role (even through a variable), cannot omit a required one, cannot give a ref of the wrong output type, and cannot mix settled and required refs.
 - **Reading deps**: a misspelt output name (`depOutputs.page.hmtl`) does not compile. Reading a settled or maybe role without checking for `undefined` does not compile.
 - **Inputs**: as listed under Inputs: JSON-only values, `file()` only whole, nodes only as deps, no redeclared action inputs, `nodeInputs` exact (missing, wrong type and misspelt names refused, even via variables and function returns).
 - **Refs**: no ref in a string; no ref outside the call that received it; no settled ref where a required one is declared; no ref to an optional or index-signature output; `closure` takes an iterable object of names, not a bare string.
@@ -558,7 +558,6 @@ The engine knows one thing: nodes. A node is a kind, inputs, deps by role, and a
 | `settled`                   | Holding a dependent back (`dep-failed`) is decided by orchestration before the dependent is ever processed, so a node cannot opt itself back in. |
 | `maybe`                     | A role a node may leave out; it changes what is keyed (an absent role is not in the key) and what the action is typed to read.                   |
 | `file()` inputs             | The file's content must be hashed into the key before the action runs.                                                                           |
-| `invalidateOn`              | The key is computed before the action runs, and only the engine computes it.                                                                     |
 | `cacheable: false`          | The cache lookup happens before the action, so the action cannot ask to skip it.                                                                 |
 | `concurrencyGroup`          | Only a miss takes a slot, and only after its lookup; a node that limited itself would hold a slot during a hit.                                  |
 | `timeoutMs`                 | The node must fail, and not be cached, whatever the action returns once the time is up.                                                          |

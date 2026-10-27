@@ -6,6 +6,8 @@ export interface CacheEntry {
   outputs: Outputs;
   /** SHA256 of actual file contents at those paths. */
   contentHash: string;
+  /** Each output's own hash, by name: what a dependent that reads that output keys on. */
+  outputHashes: Record<string, string>;
 }
 
 export const isCacheEntry = (value: unknown): value is CacheEntry =>
@@ -14,7 +16,11 @@ export const isCacheEntry = (value: unknown): value is CacheEntry =>
   "outputs" in value &&
   isOutputs(value.outputs) &&
   "contentHash" in value &&
-  typeof value.contentHash === "string";
+  typeof value.contentHash === "string" &&
+  "outputHashes" in value &&
+  typeof value.outputHashes === "object" &&
+  value.outputHashes !== null &&
+  Object.values(value.outputHashes).every((hash) => typeof hash === "string");
 
 /**
  * Minimal filesystem contract the DAG executor needs. Implementations ship in `ports/fs`. The

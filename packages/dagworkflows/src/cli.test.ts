@@ -347,6 +347,7 @@ describe("dag post", () => {
             status: "done",
             outputs: {},
             contentHash: "",
+            outputHashes: {},
             elapsed: 0,
           },
         },

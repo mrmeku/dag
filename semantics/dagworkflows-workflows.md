@@ -125,7 +125,7 @@ Node strips a workflow file's types without checking them, so what this page say
 
 What each setting is for:
 
-- `module: "nodenext"` resolves imports as Node does: through `exports`, and with relative imports carrying their extension. With no `module` setting, TypeScript 5.9 resolves as `node10` and finds no declarations for `@mrmeku/dagraph`, whose `package.json` has only `exports`. It then reports the tasks themselves as wrong (`… is missing the following properties from type 'CommandFields<…>': cacheable, timeoutMs, invalidateOn`). `moduleResolution: "bundler"` resolves the packages, but it accepts `import { checks } from "./checks"`, which Node refuses at run time with `ERR_MODULE_NOT_FOUND`.
+- `module: "nodenext"` resolves imports as Node does: through `exports`, and with relative imports carrying their extension. With no `module` setting, TypeScript 5.9 resolves as `node10` and finds no declarations for `@mrmeku/dagraph`, whose `package.json` has only `exports`. It then reports the tasks themselves as wrong (`… is missing the following properties from type 'CommandFields<…>': cacheable, timeoutMs`). `moduleResolution: "bundler"` resolves the packages, but it accepts `import { checks } from "./checks"`, which Node refuses at run time with `ERR_MODULE_NOT_FOUND`.
 - `allowImportingTsExtensions` accepts `import { checks } from "./checks.ts"`, the form Node needs. Without it, that import is `TS5097`. It is allowed only beside `noEmit` (else `TS5096`). `rewriteRelativeImportExtensions: true`, which Node's TypeScript documentation (`https://nodejs.org/api/typescript.html`) recommends, accepts it as well (verified in its place). Under `nodenext` an extensionless import is `TS2835`, whose suggestion `./checks.js` type-checks but fails under Node: write `.ts`.
 - `erasableSyntaxOnly` refuses what Node cannot strip, with `TS1294`. Without it an `enum` type-checks, then fails under `dag run` with `SyntaxError [ERR_UNSUPPORTED_TYPESCRIPT_SYNTAX]: TypeScript enum is not supported in strip-only mode`.
 - `verbatimModuleSyntax` requires `type` on a type-only import, with `TS1484`. Without it, `import { defineWorkflow, Workflow } from "@mrmeku/dagworkflows"` type-checks, then fails under `dag run` with `SyntaxError: The requested module '@mrmeku/dagworkflows' does not provide an export named 'Workflow'`. Write `type Workflow`.
@@ -205,7 +205,6 @@ Fields every task takes:
 | `inputs`           | What else decides its result, by name: `file(path)` or JSON values.                           | none                                           |
 | `outputs`          | The files it writes, by role, as file names in its output directory: `{ notes: "notes.md" }`. | none                                           |
 | `cacheable`        | Force caching on or off.                                                                      | on exactly when `inputs` holds a defined value |
-| `invalidateOn`     | Per dep role, a fingerprint function standing in for that dep's content in the key.           | none                                           |
 | `timeoutMs`        | How long its work may run, from its start, in ms. Whole number from 1 to 2147483647.          | no limit                                       |
 | `concurrencyGroup` | A group declared in `schedulerOptions.concurrencyLimits`.                                     | none                                           |
 | `post`             | Its release step (see "Post steps"). Excludes `inputs` and `cacheable`.                       | none                                           |
@@ -347,7 +346,7 @@ A node ends in one of these states: `done` (ran and succeeded), `cached` (its en
 For each node, in the order its deps settle, once it has taken a place in `maxParallelism`:
 
 1. If a required dep did not succeed, it is `dep-failed`. Its action never runs.
-2. Its action key is computed (file inputs hashed, fingerprints run). A failure here (a missing input file) fails it.
+2. Its action key is computed (file inputs hashed). A failure here (a missing input file) fails it.
 3. If it is cacheable and the run is not forced (`--force`), and the CAS holds a verified entry for the key, it is `cached`.
 4. Otherwise, without a concurrency group, it runs at once. With one, it gives its place back while it waits for its group's slot, then takes both and runs.
 
@@ -409,7 +408,7 @@ The action key is the SHA-256 of three things, and nothing else: the node's **ki
 - **Inputs**: the author's `inputs` (files by path and content hash, values as canonical JSON), plus two the facade adds:
   - `declaredOutputs`: the `outputs` record, so changing an output's file name changes the key;
   - for a command, `command`: its line as written (a `shell` string, or the argv with each dep ref as the role and output name it points through, and each own ref as its file name or as "the output dir"), its `cwd` and its `env` as written, plus an internal version tag.
-- **Deps** by role: each dep's content hash, which is a hash of its outputs' names, their file paths relative to its output directory and their contents; or, where `invalidateOn[role]` is given, the hash of the string that fingerprint returns; or "missing" for a settled dep that did not succeed.
+- **Deps** by role: each dep's content hash, which is a hash of its outputs' names, their file paths relative to its output directory and their contents; or "missing" for a settled dep that did not succeed.
 
 Not in the key: the action's function body; a task's name, unless it is an action task; the deps' node names; `timeoutMs`; `concurrencyGroup`; `cacheable`; the CAS directory (moving it changes no key); the inherited environment; absolute paths.
 
@@ -419,7 +418,6 @@ Consequences an author meets:
 - Changing a command's argv, `cwd` or static `env` reruns it. Changing a program's source does not, unless its files are in `inputs`.
 - Changing what an action does needs a version bump in `inputs`.
 - Early cutoff: a dep that runs again and writes byte-identical outputs does not rerun its dependents.
-- `invalidateOn: { manifest: async (outputs, ports) => … }` keys a dep by the part a task reads. The function gets that dep's outputs as handles and the workflow ports, and must return a string built from file contents, never from a handle's `path`. Anything other than a string fails the node with `invalidateOn.<role> returned <type>, not a string. …`.
 
 A task with no inputs and no `cacheable: true` has a key all the same: its log is stored under it ([dagworkflows-output](dagworkflows-output.md)).
 
@@ -517,7 +515,7 @@ A task that sets up something that must be undone (a database container, a serve
 - `timeoutMs`;
 - `retry`: `"backoff"` (default: after a failed try it tries again after 1000 ms, then 4000 ms, three tries in all, within its own timeout) or `"once"` (one try, for a slow release a retry never helps, such as `terraform destroy`). Each failed try that will be retried writes `Try <n> of 3 failed: <message>. Trying again in <ms> ms.` to the post's log. A cancel or the post's timeout ends the tries at once, even mid-wait, and the last error decides. All tries share one output directory, so a later try sees what an earlier one wrote.
 
-It takes no `deps`, `inputs`, `cacheable`, `invalidateOn` or `outputs`, and a task with a `post` takes no `inputs` or `cacheable` (a cache hit starts nothing, so there would be nothing to release). These do not compile.
+It takes no `deps`, `inputs`, `cacheable` or `outputs`, and a task with a `post` takes no `inputs` or `cacheable` (a cache hit starts nothing, so there would be nothing to release). These do not compile.
 
 The post reads its task's outputs under the role `main`, which a task that failed or was stopped may not have written: in `env` a missing one is unset (`env: ({ main }) => ({ ID: main.id })`, then `if [ -n "${ID:-}" ]; then docker rm -f "$(cat "$ID")"; fi`); in an action, `depOutputs.main` may be `undefined`; it may not be an argument of `cmd`.
 

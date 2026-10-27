@@ -91,7 +91,11 @@ export class ExecState<Meta = unknown> {
     this.results.set(node.name, result);
     this.ready = this.ready.filter((r) => r.node.name !== node.name);
     if (isSucceeded(result))
-      this.entries.set(node.name, { outputs: result.outputs, contentHash: result.contentHash });
+      this.entries.set(node.name, {
+        outputs: result.outputs,
+        contentHash: result.contentHash,
+        outputHashes: result.outputHashes,
+      });
     const children = (this.dependents.get(node.name) ?? []).filter(
       (child) => !this.results.has(child.name) && child.deps.every((d) => this.results.has(d)),
     );

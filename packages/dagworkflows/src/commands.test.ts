@@ -204,8 +204,8 @@ describe("a command", () => {
     assert.deepEqual(Object.fromEntries(results.map((r) => [r.name, [r.status, r.actionKey]])), {
       tests: ["failed", "9c9d43ced0349e6966f09c288a2223d060fa452d1d579f9b64071f74a325b03d"],
       pack: ["done", "c9450dd8d43e15f5fe3febeaceffdc526c3928f1e291a2e1bd5e1c71ab17cfb3"],
-      publish: ["failed", "29ebfa34b19ce8a8bf7aecabadba0200fa0fcb6a92bb98f754de43ba468e0bd8"],
-      size: ["done", "96e923f2db21b20cd65e32ba103d773746858c2af1d22876e60434d63fde4306"],
+      publish: ["failed", "1b293a851dcf379455bb36dc7701d8da307f3797cb7e1ef521c8cb67057a3a4b"],
+      size: ["done", "7dfb0c52b9f7438230f0082f7527983fcb5ccc2589c1dc9a9f3ba6fe76e493a0"],
     });
   });
 
@@ -367,6 +367,7 @@ describe("a command's paths", () => {
           manifest: {
             outputs: { id: `${cas}/${ownDir}/id` },
             contentHash: own.status === "done" && own.contentHash,
+            outputHashes: own.status === "done" && own.outputHashes,
           },
           lastRun: true,
         },

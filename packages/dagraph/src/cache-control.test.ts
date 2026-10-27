@@ -45,8 +45,6 @@ const transcript = (version: number) =>
     kind: "transcript",
     deps: { source },
     inputs: { version },
-    // A re-download at another bitrate is the same speech: key only on the video's id.
-    invalidateOn: { source: async (source) => idOf(await source.content.text()) },
     action: async (c) =>
       emit(c, "transcript", `words(${idOf(await c.depOutputs.source.content.text())})`),
   });
@@ -96,7 +94,14 @@ async function lookups(
 ) {
   const entries = Object.fromEntries(
     results.flatMap((r) =>
-      isSucceeded(r) ? [[r.name, { outputs: r.outputs, contentHash: r.contentHash }]] : [],
+      isSucceeded(r)
+        ? [
+            [
+              r.name,
+              { outputs: r.outputs, contentHash: r.contentHash, outputHashes: r.outputHashes },
+            ],
+          ]
+        : [],
     ),
   );
   const looked = graph.describe().map(async ({ name }) => {
@@ -109,7 +114,7 @@ async function lookups(
 const statuses = (results: Result[]) => Object.fromEntries(results.map((r) => [r.name, r.status]));
 
 describe("cache control", () => {
-  test("a node whose key misses runs again; a dependent whose invalidateOn fingerprint is unchanged stays cached", async () => {
+  test("a node whose key misses runs again, and so does each dependent; one that writes the same bytes keeps its content hash", async () => {
     const { ports, ctx } = setup();
     const first = await execute(buildGraph(), ctx);
     const sourceKey = new Set(first.filter((r) => r.name === "source").map((r) => r.actionKey));
@@ -127,26 +132,30 @@ describe("cache control", () => {
     const synced = await execute(buildGraph(), ctx);
     const syncRan = [...ports.ran];
 
-    // A different video behind the same node: the fingerprint changes, so the transcript runs.
+    // A different video behind the same node: the transcript writes other words.
     ports.ran = [];
     ports.source = { id: "xyz", bitrate: 320 };
     await execute(buildGraph(), { ...ctx, cache: forcedCache(ctx.cache) });
 
+    const transcriptHash = (results: Result[]) =>
+      results.flatMap((r) => (r.name === "transcript" && isSucceeded(r) ? [r.contentHash] : []));
     expect({
       healRan,
       healStatuses: statuses(healed),
+      sameWords: transcriptHash(healed).join() === transcriptHash(first).join(),
       syncRan,
       syncStatuses: statuses(synced),
       changedRan: [...ports.ran].sort(),
     }).toEqual({
-      healRan: ["entry", "packaged", "source", "uploaded"],
+      healRan: ["entry", "packaged", "source", "transcript", "uploaded"],
       healStatuses: {
         source: "done",
-        transcript: "cached",
+        transcript: "done",
         packaged: "done",
         entry: "done",
         uploaded: "done",
       },
+      sameWords: true,
       syncRan: ["uploaded"],
       syncStatuses: {
         source: "cached",

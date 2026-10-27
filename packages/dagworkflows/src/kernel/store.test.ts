@@ -30,6 +30,7 @@ const built = (n: Node, key: string): ExecEvent =>
     status: "done",
     outputs: { out: key },
     contentHash: "h",
+    outputHashes: {},
     elapsed: 1,
   });
 const failed = (n: Node, key: string, message: string, cause?: JsonValue): ExecEvent =>
@@ -119,7 +120,13 @@ async function transcript(lastRunAtBegin: boolean) {
     ...started(f),
     failed(b, "kb", "make b exited 2", command),
     { type: "dispatch", node: "c" },
-    settled(c, { actionKey: "kc", status: "cached", outputs: { out: "kc" }, contentHash: "h" }),
+    settled(c, {
+      actionKey: "kc",
+      status: "cached",
+      outputs: { out: "kc" },
+      contentHash: "h",
+      outputHashes: {},
+    }),
     settled(d, { actionKey: "", status: "dep-failed", dep: "b" }),
     failed(f, "kf", "upload refused", { name: "Error", message: "ECONNREFUSED" }),
     ...started(save),
@@ -204,7 +211,13 @@ describe("run store", () => {
     store.begin(pass);
     events(
       { type: "dispatch", node: "a" },
-      settled(a, { actionKey: "ka", status: "cached", outputs: { out: "ka" }, contentHash: "h" }),
+      settled(a, {
+        actionKey: "ka",
+        status: "cached",
+        outputs: { out: "ka" },
+        contentHash: "h",
+        outputHashes: {},
+      }),
     );
     assert.deepEqual(await store.report(pass), [
       { ...a, status: "cached", start: 0, duration: 1000, previous: 500, outputs: { out: "ka" } },

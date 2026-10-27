@@ -28,6 +28,7 @@ export {
   nodeInputs,
   nodeRefNamed,
   notAString,
+  pick,
   requiredDeps,
   settled,
 } from "./graph/index.ts";
@@ -43,7 +44,6 @@ export type {
   Handles,
   InputRecord,
   InputValue,
-  InvalidateOn,
   Node,
   NodeInputsSpec,
   NodeParams,
