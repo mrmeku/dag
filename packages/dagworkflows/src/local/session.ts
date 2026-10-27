@@ -95,9 +95,7 @@ export function createLocalSession(
   };
   const terminalRenderer =
     style === "live"
-      ? createLiveRenderer(localContext, streams, clock, runOptions.schedulerOptions, () =>
-          store.getState(),
-        )
+      ? createLiveRenderer(localContext, streams, clock, () => store.getState())
       : style === "failures"
         ? createAgentRenderer(localContext, (text) => void streams.stdout.write(text))
         : undefined;

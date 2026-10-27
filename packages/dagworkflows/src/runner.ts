@@ -4,8 +4,8 @@ import {
   forcedCache,
   FsCache,
   Graph,
-  localRunNode,
   orchestrate,
+  runNode,
   throttledScheduler,
   type ExecuteOptions,
   type Result,
@@ -323,7 +323,7 @@ async function postPass(
     fs: ports.fs,
     casBaseDir: opts.casBaseDir,
   };
-  const runOwed = localRunNode(replayed, executionContext, {
+  const runOwed = runNode(replayed, executionContext, {
     onEvent: (event) => {
       store.onEvent(event);
       return history.onEvent(event);
@@ -331,9 +331,9 @@ async function postPass(
   });
   const all = await orchestrate(
     replayed.describe(),
-    (node, depEntries, waitForSlot) =>
+    (node, depEntries, waitForScheduler) =>
       owed.has(node.name)
-        ? runOwed(node, depEntries, waitForSlot)
+        ? runOwed(node, depEntries, waitForScheduler)
         : Promise.resolve(replay(node.name, before[node.name])),
     throttledScheduler(opts.schedulerOptions),
     (event) => {

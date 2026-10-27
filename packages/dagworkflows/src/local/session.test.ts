@@ -122,6 +122,7 @@ const RUN_TIMEOUT = { timeout: 10_000 };
 
 /** The engine's events for `node`, as a store hears them from a run. */
 const dispatchOf = (node: Node): ExecEvent => ({ type: "dispatch", node: node.name });
+const pendingOf = (node: Node): ExecEvent => ({ type: "pending", node: node.name });
 const startOf = (node: Node): ExecEvent => ({ type: "start", node: node.name });
 const outputOf = (node: Node, chunk: string): ExecEvent => ({
   type: "output",
@@ -1203,6 +1204,8 @@ describe("local session, live style", () => {
           contentHash: "h",
           outputHashes: {},
         }),
+        dispatchOf(testB),
+        pendingOf(testB),
       ]);
       const midRun = await session.screen();
       // The terminal echoes a ^C at the cursor, the end of the status row.
@@ -1216,7 +1219,6 @@ describe("local session, live style", () => {
       ]);
       await emitAt(1500, [
         done(testA),
-        dispatchOf(testB),
         startOf(testB),
         done(testB),
         done(e2e),
@@ -1250,7 +1252,7 @@ describe("local session, live style", () => {
             "⠦ integration:packages-da… 0.6s / ~1m0…",
             "⠦ test:a                   0.6s / ~2.0s",
             "⠦ build                    0.6s  check…",
-            "· test:b                   queued: tes…",
+            "· test:b                   queued",
             "[1/9] 4 running · 1 queued · ctrl-c ca…",
           ],
           final: [
@@ -1524,7 +1526,7 @@ describe("local session, live style", () => {
     session.streams.stdout.write(Buffer.from("linking"));
     const waiting = await screenAt(2200);
     session.streams.stdout.write("building");
-    await emitAt(2300, [done(a6), ...started(x)]);
+    await emitAt(2300, [done(a6), ...started(x), dispatchOf(y), pendingOf(y)]);
     store.onEvent(outputOf(x, "uploading"));
     await screenAt(2400);
     const queued = session.footer();
@@ -1596,15 +1598,15 @@ describe("local session, live style", () => {
           "linking",
           "⠹ a6 1.2s  ok parses the feed",
           "⠹ b  0.3s",
-          "· c  queued: 2/6 running",
+          "· c  queued",
           "· w  waits on b, c +1",
           "[12/18 ✖︎2] 2 running · 1 queued · ctrl…",
         ],
         queued: [
           `${cyan("⠼")} b 0.5s`,
           `${cyan("⠼")} x 0.1s  ${dim("uploading")}`,
-          dim("· c queued: 2/6 running"),
-          dim("· y queued: io 1/1"),
+          dim("· c queued"),
+          dim("· y queued"),
           "[13/18 ✖︎2] 2 running · 2 queued · ctrl…",
         ],
         printed: [

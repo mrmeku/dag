@@ -16,7 +16,7 @@ export {
   type NodeRefOf,
   type OutputOf,
 } from "./define-action.ts";
-export { execute, type ExecuteOptions } from "./execute.ts";
+export { execute, runNode, type ExecuteOptions } from "./execute.ts";
 export {
   Graph,
   closure,
@@ -64,7 +64,6 @@ export {
 } from "./orchestrate.ts";
 export { createMemoryDagFs, type MemoryDagFs } from "./ports/memory-fs.ts";
 export {
-  localRunNode,
   lookupNode,
   processNode,
   runAction,

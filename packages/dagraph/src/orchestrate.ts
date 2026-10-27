@@ -8,23 +8,22 @@ export type { Ready } from "./exec-state.ts";
 
 /**
  * Processes one node somewhere, given its deps' entries by dep name, and returns its result. On
- * a miss it awaits `waitForSlot` before the action runs, which resolves once the scheduler grants
- * the node's group a slot, and rejects once the execution is cancelled. A rejection of
+ * a miss it awaits `waitForScheduler` before the action runs, which resolves once the scheduler
+ * lets the action run, and rejects once the execution is cancelled. A rejection of
  * `RunNode` becomes a failure, as an action's error does, or `cancelled` once the execution is
  * cancelled.
  */
 export type RunNode<Meta = unknown> = (
   node: Node<Meta>,
   depEntries: Record<string, CacheEntry>,
-  waitForSlot: () => Promise<void>,
+  waitForScheduler: () => Promise<void>,
 ) => Promise<Result>;
 
 /**
  * What a scheduler drives. `take` returns the first ready node, in orchestration's order, that
  * `filter` admits: a node comes once when it is ready and, when its lookup misses and it has a
- * concurrency group, again with `waitingForSlot` set. `run` hands a ready node to processing, or
- * grants a waiting one its slot; it resolves once the node settles or, waiting for a slot, gives
- * its place back. `workAvailable` resolves when that may have changed what `take` returns.
+ * concurrency group, again `pending`. `run` hands a ready node to processing, or lets a pending
+ * one run; it resolves once the node settles or, as it begins to pend, gives its place back. `workAvailable` resolves when that may have changed what `take` returns.
  */
 export interface SchedulerContext<Meta = unknown> {
   take(filter?: (ready: Ready<Meta>) => boolean): Ready<Meta> | null;
@@ -86,8 +85,8 @@ export async function orchestrate<Meta>(
     places.get(name)?.();
     places.delete(name);
   };
-  /** The grant each miss waiting for its slot awaits. */
-  const slots = new Map<string, { resolve: () => void; reject: (reason: unknown) => void }>();
+  /** What each pending miss awaits: the scheduler letting it run. */
+  const pendingRuns = new Map<string, { resolve: () => void; reject: (reason: unknown) => void }>();
 
   const meta = (node: Node<Meta>) => (node.meta === undefined ? {} : { meta: node.meta });
   const settle = (node: Node<Meta>, result: Result) => {
@@ -98,28 +97,29 @@ export async function orchestrate<Meta>(
   };
 
   // Once cancelled, every node that becomes ready settles cancelled instead of running, and every
-  // miss waiting for its slot stops waiting, so the loop drains as running nodes settle.
+  // pending miss stops waiting, so the loop drains as running nodes settle.
   const drainCancelled = () => {
     let next: Ready<Meta> | null;
     while ((next = state.take())) {
-      if (next.waitingForSlot) slots.get(next.node.name)?.reject(signal?.reason);
+      if (next.pending) pendingRuns.get(next.node.name)?.reject(signal?.reason);
       else settle(next.node, { name: next.node.name, actionKey: "", status: "cancelled" });
     }
   };
 
-  const waitForSlotOf = (node: Node<Meta>) => {
-    let slot: Promise<void> | undefined;
-    const requestSlot = () => {
+  const waitForSchedulerOf = (node: Node<Meta>) => {
+    let admitted: Promise<void> | undefined;
+    const pend = () => {
       if (signal?.aborted) return Promise.reject(signal.reason);
       if (node.concurrencyGroup === undefined) return Promise.resolve();
       return new Promise<void>((resolve, reject) => {
-        slots.set(node.name, { resolve, reject });
-        state.waitForSlot(node);
+        pendingRuns.set(node.name, { resolve, reject });
+        state.waitForScheduler(node);
+        emit({ type: "pending", node: node.name, ...meta(node) });
         releasePlace(node.name);
         wake();
       });
     };
-    return () => (slot ??= requestSlot());
+    return () => (admitted ??= pend());
   };
 
   const ctx: SchedulerContext<Meta> = {
@@ -130,13 +130,13 @@ export async function orchestrate<Meta>(
       }
       return state.take(filter);
     },
-    run({ node, waitingForSlot }) {
-      if (waitingForSlot) {
-        const slot = slots.get(node.name);
-        slots.delete(node.name);
-        if (!slot) return Promise.resolve();
+    run({ node, pending }) {
+      if (pending) {
+        const pendingRun = pendingRuns.get(node.name);
+        pendingRuns.delete(node.name);
+        if (!pendingRun) return Promise.resolve();
         const place = new Promise<void>((resolve) => places.set(node.name, resolve));
-        slot.resolve();
+        pendingRun.resolve();
         return place;
       }
       const place = new Promise<void>((resolve) => places.set(node.name, resolve));
@@ -147,7 +147,7 @@ export async function orchestrate<Meta>(
       }
       emit({ type: "dispatch", node: node.name, ...meta(node) });
       processing++;
-      void run(node, state.depEntries(node), waitForSlotOf(node))
+      void run(node, state.depEntries(node), waitForSchedulerOf(node))
         .catch((e: unknown): Result => {
           if (signal?.aborted) return { name: node.name, actionKey: "", status: "cancelled" };
           return {
@@ -160,7 +160,7 @@ export async function orchestrate<Meta>(
         })
         .then((result) => {
           processing--;
-          slots.delete(node.name);
+          pendingRuns.delete(node.name);
           settle(node, result);
         });
       return place;

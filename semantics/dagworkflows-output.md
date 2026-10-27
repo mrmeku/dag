@@ -237,9 +237,9 @@ The clocks vary from run to run.
 
 **The footer** appears once the run is 500 ms old, counted from the first dispatch, and is redrawn every 100 ms. A run made only of cache hits finishes before it ever shows. Its rows:
 
-- One row per node in flight, earliest first: spinner, name, its clock, `/ ~<last run>` when `last-run.json` knows the node, then the node's **latest line** dimmed. A node dispatched but not started (checking the cache) shows `checking cache`. The latest line is the line the command is printing now, or else the last non-blank line it ended. A `::warning` or `::debug::` line is never shown as the latest line.
+- One row per node in flight (dispatched or running, not waiting for a slot), earliest first: spinner, name, its clock, `/ ~<last run>` when `last-run.json` knows the node, then the node's **latest line** dimmed. A node dispatched but not started (checking the cache) shows `checking cache`. The latest line is the line the command is printing now, or else the last non-blank line it ended. A `::warning` or `::debug::` line is never shown as the latest line.
 - When more nodes run than fit, `+N more running`.
-- Up to two waiting nodes, those queued first: `· test:b queued: test 1/1` (a full concurrency group), `· c queued: 2/6 running` (the parallelism limit; `∞` when there is none), or `· docs waits on lint` (pending dependencies, two named then `+N`).
+- Up to two waiting nodes, those queued first: `· c queued` (the scheduler holds it back: its deps have settled, but it has not been let run) or `· docs waits on lint` (pending dependencies, two named then `+N`). Why the scheduler holds a node back is the scheduler's own business, so the footer does not say; it reads only the run's node states, and holds for any scheduler.
 - The status row: `[settled/total ✖︎failed] N running · M queued · ctrl-c cancels`. During a cancel: `cancelling: waiting for N running · ctrl-c again to force`.
 
 Size rules: the footer is at most 72 columns wide (and at most the window width less one, at least 10). It has at most 8 rows and at most half the window's rows. The footer is the one place a node name is cut, with `…`.
@@ -249,7 +249,7 @@ Example footer, 40 columns, `maxParallelism: 2`:
 ```
 ⠦ lint      0.6s  src/parse.ts ok
 ⠦ typecheck 0.6s  [====== ] 60%
-· test      queued: 2/2 running
+· test      queued
 · docs      waits on lint
 [0/4] 2 running · 1 queued · ctrl-c ca…
 ```

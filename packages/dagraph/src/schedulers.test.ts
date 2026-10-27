@@ -4,10 +4,10 @@ import { getEventListeners } from "node:events";
 
 import { MemCache, type DagFs } from "./cache.ts";
 import { actionsFor } from "./define-action.ts";
+import { runNode } from "./execute.ts";
 import { Graph, nodeInputs, type Node } from "./graph/index.ts";
 import { orchestrate, type RunNode } from "./orchestrate.ts";
 import { createMemoryDagFs } from "./ports/memory-fs.ts";
-import { localRunNode } from "./process-node.ts";
 import {
   throttledScheduler,
   unboundedScheduler,
@@ -27,12 +27,12 @@ function harness(
   const log: string[] = [];
   const finishers = new Map<string, () => void>();
   const lookups = new Map<string, () => void>();
-  const run: RunNode = async (node, _depEntries, waitForSlot) => {
+  const run: RunNode = async (node, _depEntries, waitForScheduler) => {
     const entry = { actionKey: "k", outputs: {}, contentHash: "h", outputHashes: {} };
     if (hits.includes(node.name)) return { name: node.name, status: "cached", ...entry };
     if (slowLookups.includes(node.name))
       await new Promise<void>((resolve) => lookups.set(node.name, resolve));
-    await waitForSlot();
+    await waitForScheduler();
     log.push(`granted ${node.name}`);
     await new Promise<void>((resolve) => finishers.set(node.name, resolve));
     return { name: node.name, status: "done", ...entry, elapsed: 0 };
@@ -132,7 +132,7 @@ describe("throttledScheduler", () => {
     });
   });
 
-  test("an ungrouped miss keeps its place through waitForSlot, so ready nodes ahead of it in order do not take it", async () => {
+  test("an ungrouped miss keeps its place through waitForScheduler, so ready nodes ahead of it in order do not take it", async () => {
     const h = harness(
       [node("u"), node("s"), node("t", undefined, ["u"]), node("v", undefined, ["u"])],
       { maxParallelism: 2 },
@@ -273,7 +273,7 @@ describe("orchestrate", () => {
     ]);
   });
 
-  test("with localRunNode given no signal, a cancel still ends a miss's wait for its slot: it settles cancelled", async () => {
+  test("with runNode given no signal, a cancel still ends a pending miss's wait: it settles cancelled", async () => {
     const fs = createMemoryDagFs();
     const ctx = { ports: { fs }, cache: new MemCache(), fs, casBaseDir: "/cas" };
     const controller = new AbortController();
@@ -294,7 +294,7 @@ describe("orchestrate", () => {
     heavy.addNode(g, { name: "waiter", inputs: { id: 2 } });
     const results = await orchestrate(
       g.describe(),
-      localRunNode(g, ctx),
+      runNode(g, ctx),
       throttledScheduler({ concurrencyLimits: { heavy: 1 } }),
       undefined,
       controller.signal,

@@ -44,7 +44,7 @@ All of these are exported from the package index, `@mrmeku/dagraph`:
 | `lookupNode(graph, name, depEntries, executionContext)`            | function       | Computes a node's key and checks its entry. Resolves to a `Lookup`: a result, or a `Miss`.         |
 | `runAction(graph, miss, depEntries, executionContext, options?)`   | function       | Runs a missed node's action and stores what it made. Resolves to its `Result`.                     |
 | `processNode(graph, name, depEntries, executionContext, options?)` | function       | `lookupNode`, then `runAction` on a miss, with no slot to wait for.                                |
-| `localRunNode(graph, executionContext, options?)`                  | function       | The `RunNode` that `execute` uses: lookup, the slot on a miss, then the action.                    |
+| `runNode(graph, executionContext, options?)`                       | function       | The `RunNode` that `execute` uses: lookup, the slot on a miss, then the action.                    |
 | `Lookup`, `Miss`, `RunActionOptions<Meta>`                         | types          | A lookup's outcome, a miss (`{ name, actionKey, status: "missed" }`), and `{ signal?, onEvent? }`. |
 | `unboundedScheduler()`                                             | function       | The default scheduler: no limits.                                                                  |
 | `throttledScheduler(options?)`                                     | function       | A scheduler with a global limit and one limit per concurrency group.                               |
@@ -374,7 +374,7 @@ Where it lives: `packages/dagraph/src/schedulers.ts`, `orchestrate.ts`.
 
 A `Scheduler` is `async (ctx) => void`, generic in the graph's meta type. The `SchedulerContext` gives it four functions:
 
-- `take(filter?)` removes and returns the first ready entry, in the ready order, that `filter` admits, or `null`. An entry is a `Ready`: `{ node, waitingForSlot }`. `node` is the node as data (`name`, `kind`, `meta`, `deps`, `settledDeps`, `concurrencyGroup`, `cacheable`, `timeoutMs`). `waitingForSlot` is `false` the first time a node comes, when it is ready to be processed, and `true` when it comes again as a miss asking for its group's slot.
+- `take(filter?)` removes and returns the first ready entry, in the ready order, that `filter` admits, or `null`. An entry is a `Ready`: `{ node, pending }`. `node` is the node as data (`name`, `kind`, `meta`, `deps`, `settledDeps`, `concurrencyGroup`, `cacheable`, `timeoutMs`). `pending` is `false` the first time a node comes, when it is ready to be processed, and `true` when it comes again as a miss held back before its action runs, which `throttledScheduler` lets run once its group has a slot.
 - `run(ready)` hands a ready node to processing, or grants a node waiting for its slot its slot. It resolves once the node settles or, for a miss that goes to wait for its slot, once it gives its place back.
 - `hasWork()` is true while some node is ready or being processed.
 - `workAvailable()` resolves when what `take` returns may have changed: a node settled, a miss asked for its slot, or the execution was cancelled. It resolves at once when nothing is being processed.
@@ -438,16 +438,17 @@ Where it lives: `packages/dagraph/src/orchestrate.ts` (`SchedulerContext`), `sch
 
 An execution reports what happens as one stream of `ExecEvent`s. Each event has `type`, `node` (the node's name) and, when the node has one, `meta` (the node's metadata, from [dagraph-graphs](dagraph-graphs.md)). `ExecEvent` is a union that narrows on `type`: a listener reads `event.chunk` after checking `event.type === "output"` and `event.result` after `event.type === "result"`. The types:
 
-| `type`     | Extra            | Emitted by    | When                                                  |
-| ---------- | ---------------- | ------------- | ----------------------------------------------------- |
-| `dispatch` | none             | orchestration | The node is handed to processing.                     |
-| `start`    | none             | processing    | On a miss, as the action is about to run.             |
-| `output`   | `chunk` (string) | processing    | The action called `output(chunk)` to print something. |
-| `result`   | `result`         | orchestration | The node settled.                                     |
+| `type`     | Extra            | Emitted by    | When                                                                         |
+| ---------- | ---------------- | ------------- | ---------------------------------------------------------------------------- |
+| `dispatch` | none             | orchestration | The node is handed to processing.                                            |
+| `pending`  | none             | orchestration | A miss is held back before its action runs, until the scheduler lets it run. |
+| `start`    | none             | processing    | On a miss, as the action is about to run.                                    |
+| `output`   | `chunk` (string) | processing    | The action called `output(chunk)` to print something.                        |
+| `result`   | `result`         | orchestration | The node settled.                                                            |
 
-The events of one node come in the order `dispatch`, `start`, `output`…, `result`. Events of different nodes interleave, and each is emitted as it happens, so a listener sees a `start` while other nodes still run. What each kind of node gets:
+The events of one node come in the order `dispatch`, `pending`, `start`, `output`…, `result`. Events of different nodes interleave, and each is emitted as it happens, so a listener sees a `start` while other nodes still run. What each kind of node gets:
 
-- A node that runs: `dispatch`, `start`, any `output`s, `result`.
+- A node that runs: `dispatch`, `start`, any `output`s, `result`. A node the scheduler may hold back (today, one in a concurrency group) also gets `pending` before its `start`, even when it is let run at once.
 - A cached node: `dispatch`, `result`.
 - A `dep-failed` node, or one cancelled before it was dispatched: `result` only.
 - What an action prints after its result came back is dropped: no `output` event follows `result`.
@@ -456,11 +457,11 @@ An `ExecListener` is `(event) => unknown`. What it returns matters only for some
 
 - **`start`**: if it returns a promise, the action runs only once that promise resolves. This lets a journal record the start before the action has any effect: `onEvent: (event) => journal.record(event)`. If the listener throws or the promise rejects, the node fails with that error and its action never runs.
 - **`output`**: a returned promise is not awaited, and its rejection is dropped.
-- **`dispatch` and `result`**: a throw, or a returned promise that rejects before the execution ends, stops nothing. Every node still settles; then `execute` (or `orchestrate`) rejects with the first such error, and its results are not returned. The listener error is checked once, after the scheduler returns, so a promise that rejects after the execution ends is dropped silently and the execution resolves normally.
+- **`dispatch`, `pending` and `result`**: a throw, or a returned promise that rejects before the execution ends, stops nothing. Every node still settles; then `execute` (or `orchestrate`) rejects with the first such error, and its results are not returned. The listener error is checked once, after the scheduler returns, so a promise that rejects after the execution ends is dropped silently and the execution resolves normally.
 
 `ExecEvent` and `ExecListener` default `Meta` to `unknown` (`Graph`'s own `Meta` defaults to `undefined`). So a plain `const onEvent: ExecListener = (event) => console.log(event.type, event.node)` type-checks, and can be passed to `execute`, `orchestrate` and `processNode` for a graph with any `Meta`, `new Graph<unknown, { team: string }>()` included (checked with tsc).
 
-In `execute`, the one `onEvent` gets all four types. With `orchestrate` and the processing functions used apart, `orchestrate`'s `onEvent` gets `dispatch` and `result`, and the one given to `runAction`, `processNode` or `localRunNode` gets `start` and `output`.
+In `execute`, the one `onEvent` gets all five types. With `orchestrate` and the processing functions used apart, `orchestrate`'s `onEvent` gets `dispatch`, `pending` and `result`, and the one given to `runAction`, `processNode` or `runNode` gets `start` and `output`.
 
 Where it lives: `packages/dagraph/src/types.ts` (`ExecEvent`, `ExecListener`), `orchestrate.ts`, `process-node.ts`.
 
@@ -584,14 +585,14 @@ Where it lives: `packages/dagraph/src/process-node.ts` (`actionSignal`), `graph/
 `orchestrate(nodes, run, scheduler, onEvent?, signal?)` does what `execute` does, except that it never processes a node itself: it calls `run` for that.
 
 - `nodes`: the node data, any iterable of `Node`, usually `graph.describe()`. It carries no actions or inputs, so it can cross into another process when its `meta` can.
-- `run`: a `RunNode`, `(node, depEntries, waitForSlot) => Promise<Result>`. `depEntries` is the cache entry of each dep that succeeded, by dep name (a dep that did not succeed is absent). `waitForSlot` waits for the node's slot (below).
+- `run`: a `RunNode`, `(node, depEntries, waitForScheduler) => Promise<Result>`. `depEntries` is the cache entry of each dep that succeeded, by dep name (a dep that did not succeed is absent). `waitForScheduler` waits until the scheduler lets the node's action run (below).
 - `scheduler`: required here; there is no default.
 - `onEvent`: receives `dispatch` and `result`.
 - `signal`: cancels, as in `execute`.
 
 It resolves to one result per node, in settle order. It does no I/O, hashes nothing and never sees an action, so it runs inside a sandbox that allows no I/O, such as a Temporal workflow. For the same reason, the package index imports no I/O module; the file systems are on the `fs` subpaths.
 
-`execute` is nothing more than `orchestrate` over `graph.describe()` with `localRunNode(graph, context, { signal, onEvent })` as its `RunNode`. That looks each node up with `lookupNode`, and on a miss awaits `waitForSlot`, then runs the action with `runAction`. A cancel while it waits settles the node `cancelled`, with its key. So an executor built from these parts gets the same meaning for every primitive (keys, hits, `settled`, groups, timeouts, cancel, events) as `execute`: the parts are where those meanings live.
+`execute` is nothing more than `orchestrate` over `graph.describe()` with `runNode(graph, context, { signal, onEvent })` as its `RunNode`. That looks each node up with `lookupNode`, and on a miss awaits `waitForScheduler`, then runs the action with `runAction`. A cancel while it waits settles the node `cancelled`, with its key. So an executor built from these parts gets the same meaning for every primitive (keys, hits, `settled`, groups, timeouts, cancel, events) as `execute`: the parts are where those meanings live.
 
 **Determinism.** `orchestrate` reads no clock, draws no random number and does no I/O. What it does depends only on the node data, the scheduler, the results its `RunNode` calls resolve to, and the order in which they resolve. A workflow engine that replays a recorded history (Temporal) reproduces those, so the orchestration replays the same way. The code makes no promise that the ready order or the calls stay the same across dagraph versions (see "Open questions").
 
@@ -614,7 +615,7 @@ It refuses node data in which a node depends on a node it was not given, before 
 
 - It must resolve to the node's `Result`. Orchestration stores the dep entries of the nodes that succeed and holds back the dependents of those that did not, from the status alone. A `RunNode` may return a result recorded earlier instead of processing the node, as a replay does.
 - If it rejects, the node settles `failed` with the rejection's name, message and JSON cause, `elapsed: 0` and an empty `actionKey`; or `cancelled`, once the execution is cancelled.
-- `waitForSlot()` is what a miss awaits before its action runs. For a node with no concurrency group it resolves at once. For a grouped node it returns the miss's place to the scheduler and resolves once the scheduler grants the slot. It rejects once the execution is cancelled (at once if the cancel came first). Calling it twice returns the same promise. A `RunNode` that never calls it, such as one that only found a hit, never takes a slot.
+- `waitForScheduler()` is what a miss awaits before its action runs. For a node with no concurrency group it resolves at once. For a grouped node the node pends: it returns its place to the scheduler and the promise resolves once the scheduler lets it run. It rejects once the execution is cancelled (at once if the cancel came first). Calling it twice returns the same promise. A `RunNode` that never calls it, such as one that only found a hit, is never held back.
 
 Where it lives: `packages/dagraph/src/orchestrate.ts`.
 
@@ -625,7 +626,7 @@ Processing one node is two steps, and the scheduler's slot goes between them, si
 - `lookupNode(graph, name, depEntries, executionContext)` computes the node's key and reads and verifies its entry. It resolves to a `Lookup`: `cached`, `dep-failed` (a required dep missing from `depEntries`) or `failed` (the key could not be computed) as the node's `Result`, or a `Miss`, `{ name, actionKey, status: "missed" }`. It runs nothing.
 - `runAction(graph, miss, depEntries, executionContext, options?)` runs a missed node's action in a fresh attempt directory, publishes its outputs and writes its entry. It resolves to `done`, `failed` or `cancelled`. Its options are `signal`, the execution's cancel, and `onEvent`, which receives the node's `start` and `output` before the result returns.
 - `processNode(graph, name, depEntries, executionContext, options?)` is `lookupNode`, then `runAction` on a miss, with no slot to wait for: for a test, a script, or a worker whose orchestrator already holds the node's slot.
-- `localRunNode(graph, executionContext, options?)` is the `RunNode` that waits for the slot between the two, as `execute` does.
+- `runNode(graph, executionContext, options?)` is the `RunNode` that waits for the scheduler between the two, as `execute` does.
 
 `graph` must hold the node, but it need not be the graph the orchestrator walks. Any graph that declares the node the same way gives it the same key, since a key depends only on the node's own kind, inputs and deps: the whole graph, a `closure` of it, or a graph rebuilt in a worker. If `graph` holds no node `name`, each rejects (it does not return a result) with: `the graph holds no node "<name>". Pass a graph that holds it: the whole graph, a closure of it, or any graph that declares the node the same way. A key is local to its node, so each gives it the same key.`
 
@@ -635,7 +636,7 @@ The split lets the orchestrator run in one place and the work in another. The pa
 
 1. The orchestrator gets the node data (`graph.describe()`) and calls `orchestrate` with a `RunNode` that sends a request to a worker: the node's name, its `depEntries`, and whatever the worker needs to rebuild the graph.
 2. To keep hits off the group's limit, the `RunNode` first asks a worker for a lookup only: `lookupNode`. A `missed` lookup is a miss; any other is the node's result.
-3. On a miss, the `RunNode` awaits `waitForSlot()` in the orchestrator, then sends the node to a worker to run.
+3. On a miss, the `RunNode` awaits `waitForScheduler()` in the orchestrator, then sends the node to a worker to run.
 4. The worker rebuilds a graph that declares the node, and calls `processNode`, since the orchestrator already holds the slot. It sends the `Result` back as JSON; the orchestrator can check it with `isResult`.
 
 Workers and orchestrator must see the same CAS: `depEntries` and results hold paths into it (see [dagraph-caching](dagraph-caching.md) for how paths are stored). `lookupNode` looks entries up in the context's `cache`, which is separate from the CAS files, so for one worker to hit another's entries the workers also need one shared `Cache`, such as an `FsCache` over a shared directory. The orchestrator reads no files and needs neither. The `start` and `output` events happen in the worker; only `dispatch` and `result` reach the orchestrator's listener.
@@ -649,7 +650,7 @@ For a worker to compute the key the orchestrator's process would have, and to hi
 
 Results cross back as JSON with nothing lost (see "A result is plain data"), and `isResult` checks one read back. A replay passes a recorded result back from `RunNode` instead of calling a worker.
 
-Where it lives: `packages/dagraph/src/process-node.ts`, `orchestrate.ts`.
+Where it lives: `packages/dagraph/src/process-node.ts`, `execute.ts` (`runNode`), `orchestrate.ts`.
 
 ## Rules that always hold
 

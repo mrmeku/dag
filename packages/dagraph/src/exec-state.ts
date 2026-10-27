@@ -2,10 +2,10 @@ import type { CacheEntry } from "./cache.ts";
 import { requiredDeps, type Node } from "./graph/index.ts";
 import { isSucceeded, type Result } from "./types.ts";
 
-/** A node the scheduler may take: ready to be processed, or a miss waiting for its group's slot. */
+/** A node the scheduler may take: ready to be processed, or a miss pending before its action runs. */
 export interface Ready<Meta = unknown> {
   node: Node<Meta>;
-  waitingForSlot: boolean;
+  pending: boolean;
 }
 
 /** Build the reverse adjacency list: for each node, which nodes depend on it. */
@@ -43,7 +43,7 @@ function rootPriorities(nodes: Node[]): Map<string, number> {
 /**
  * Which nodes are ready, which settled and how. A node is ready once every dep has settled.
  * Ready nodes are ordered by root priority, the most recently ready first among equals, so one
- * branch finishes before the next starts. A miss waiting for its group's slot is ready again, in
+ * branch finishes before the next starts. A pending miss is ready again, in
  * the same order.
  */
 export class ExecState<Meta = unknown> {
@@ -59,7 +59,7 @@ export class ExecState<Meta = unknown> {
     this.priority = rootPriorities(allNodes);
     this.ready = allNodes
       .filter((n) => n.deps.length === 0)
-      .map((node) => ({ node, waitingForSlot: false }));
+      .map((node) => ({ node, pending: false }));
   }
 
   private priorityOf(node: Node<Meta>): number {
@@ -81,9 +81,9 @@ export class ExecState<Meta = unknown> {
     return taken ?? null;
   }
 
-  /** A miss waits for its group's slot: it is ready again, waiting for its slot. */
-  waitForSlot(node: Node<Meta>): void {
-    this.enqueue([{ node, waitingForSlot: true }]);
+  /** A miss waits for the scheduler: it is ready again, pending, until the scheduler lets it run. */
+  waitForScheduler(node: Node<Meta>): void {
+    this.enqueue([{ node, pending: true }]);
   }
 
   /** Record a node's result, and make ready each dependent whose deps have all settled. */
@@ -99,7 +99,7 @@ export class ExecState<Meta = unknown> {
     const children = (this.dependents.get(node.name) ?? []).filter(
       (child) => !this.results.has(child.name) && child.deps.every((d) => this.results.has(d)),
     );
-    this.enqueue(children.map((child) => ({ node: child, waitingForSlot: false })));
+    this.enqueue(children.map((child) => ({ node: child, pending: false })));
   }
 
   get hasReady(): boolean {

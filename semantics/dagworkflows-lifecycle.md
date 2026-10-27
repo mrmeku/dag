@@ -877,7 +877,9 @@ Where it lives: `runner.ts`, `steps.ts`, `cli.ts`.
 
 Every node of a pass is in one of these states (types exported as `NodeState` and its members):
 
-- `pending` (`PendingNodeState`): the pass has begun, the node has not been dispatched.
+- `pending` (`PendingNodeState`): not yet running. The pass has begun and the node has not been
+  dispatched, or it was dispatched, missed, and the scheduler holds it back (dagraph's `pending`
+  event). Why it waits is the scheduler's own business, so the state does not say.
 - `dispatched` or `running` (`InFlightNodeState`): handed to processing, then its action started.
   Both carry `startedAt`.
 - Settled (`SettledNodeState`):
@@ -897,7 +899,8 @@ Every state also carries the node itself (`node`, marked `post: true` for a post
 command is printing now (`unfinishedLine`), the last line with text it ended (`lastLine`) and
 whether it printed anything (`printed`). Settled states get `lineCount` once their log is read.
 
-The usual paths: `pending → dispatched → running → done|failed|cancelled`; a cache hit goes
+The usual paths: `pending → dispatched → running → done|failed|cancelled`, or
+`pending → dispatched → pending → running → …` for a miss the scheduler holds back; a cache hit goes
 `pending → dispatched → cached`; a skipped node goes `pending → dep-failed`; a node cancelled
 before it ran goes from `pending` or `dispatched` to `cancelled`.
 
@@ -924,8 +927,8 @@ The run's lifecycle (`RunLifecycle`, in `RunState.lifecycle`):
 `NodeState` over every pass so far; `lastRunDurations` the previous run's durations by node.
 
 Changes come only as actions (type `RunAction`) through one pure reducer: the engine's events,
-which keep dagraph's `ExecEvent` names rather than past-tense ones (`dispatch`, `start`, `output`,
-`result`, the non-output ones stamped with the
+which keep dagraph's `ExecEvent` names rather than past-tense ones (`dispatch`, `pending`, `start`,
+`output`, `result`, the non-output ones stamped with the
 store's clock as `occurredAt`; with `logRead`, these are the node-level subset, type
 `NodeAction`), and `logRead`, `passBegun`, `runCancelled`, `runClosed`,
 `runErrored`, `runInterrupted`, `lastRunRead`, which the store adds. An event for a node no pass

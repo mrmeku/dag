@@ -221,7 +221,7 @@ Running it, all six nodes succeed, and `home:summarize` writes `terse | 2 | <P>H
 | `inputs`           | no       | Inputs every node of the action shares, such as `{ version: 1 }`. Same value rules as node inputs. They are checked, and copied, when the action is defined.                                                                         |
 | `action`           | yes      | `async (context) => outputs`. Does the work (see The action context).                                                                                                                                                                |
 | `cacheable`        | no       | `false` runs every node of the action in every execution, and its entry is never read or written ([dagraph-caching](dagraph-caching.md)). Default: cacheable.                                                                        |
-| `concurrencyGroup` | no       | The group whose limit the node runs under with `throttledScheduler`. It must be one of the names given to `actionsFor`.                                                                                                              |
+| `concurrencyGroup` | no       | The concurrency group a scheduler may limit the node under. It must be one of the names given to `actionsFor`.                                                                                                                       |
 | `timeoutMs`        | no       | How long the action may run, counted from its start. It must be a whole number from 1 to 2147483647 (the longest delay `setTimeout` honours). It is not part of the key.                                                             |
 
 What `defineAction` checks when it is called:
@@ -552,17 +552,17 @@ The engine knows one thing: nodes. A node is a kind, inputs, deps by role, and a
 
 **The primitives, and why each lives in the engine.** Each one does something a node cannot do for itself, because it acts before the node's action runs, or after it, or across nodes:
 
-| Primitive                   | Why a node cannot do it                                                                                                                          |
-| --------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------ |
-| Deps by role                | The engine must know the order to run nodes in, and the dep content each key covers.                                                             |
-| `settled`                   | Holding a dependent back (`dep-failed`) is decided by orchestration before the dependent is ever processed, so a node cannot opt itself back in. |
-| `maybe`                     | A role a node may leave out; it changes what is keyed (an absent role is not in the key) and what the action is typed to read.                   |
-| `file()` inputs             | The file's content must be hashed into the key before the action runs.                                                                           |
-| `cacheable: false`          | The cache lookup happens before the action, so the action cannot ask to skip it.                                                                 |
-| `concurrencyGroup`          | Only a miss takes a slot, and only after its lookup; a node that limited itself would hold a slot during a hit.                                  |
-| `timeoutMs`                 | The node must fail, and not be cached, whatever the action returns once the time is up.                                                          |
-| `signal`, `waitForSlot`     | Choices about a whole execution or one node of it, made by whoever runs the graph.                                                               |
-| An awaited `start` listener | Lets a journal record a start before the action has any effect.                                                                                  |
+| Primitive                    | Why a node cannot do it                                                                                                                          |
+| ---------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------ |
+| Deps by role                 | The engine must know the order to run nodes in, and the dep content each key covers.                                                             |
+| `settled`                    | Holding a dependent back (`dep-failed`) is decided by orchestration before the dependent is ever processed, so a node cannot opt itself back in. |
+| `maybe`                      | A role a node may leave out; it changes what is keyed (an absent role is not in the key) and what the action is typed to read.                   |
+| `file()` inputs              | The file's content must be hashed into the key before the action runs.                                                                           |
+| `cacheable: false`           | The cache lookup happens before the action, so the action cannot ask to skip it.                                                                 |
+| `concurrencyGroup`           | Only a miss takes a slot, and only after its lookup; a node that limited itself would hold a slot during a hit.                                  |
+| `timeoutMs`                  | The node must fail, and not be cached, whatever the action returns once the time is up.                                                          |
+| `signal`, `waitForScheduler` | Choices about a whole execution or one node of it, made by whoever runs the graph.                                                               |
+| An awaited `start` listener  | Lets a journal record a start before the action has any effect.                                                                                  |
 
 **What the engine does not know.** The package imports nothing but `js-sha256` and `pathe` (and, in the two filesystem adapters, `node:fs`, `node:path`, `node:crypto` or Bun's file API). So:
 

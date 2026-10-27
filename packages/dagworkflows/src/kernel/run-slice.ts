@@ -31,6 +31,7 @@ interface LogRead {
   readonly lineCount?: number;
 }
 
+/** Not yet running: waiting on its deps, or held back by the scheduler, dispatched or not. */
 export type PendingNodeState = NodeLines & { readonly status: "pending" };
 
 export type InFlightNodeState = NodeLines & {
@@ -79,7 +80,7 @@ export type SettledNodeState =
 /**
  * One node as far as the run has got with it. Every duration is `endedAt - startedAt`: from when
  * its action started, or for a node that settled without starting, such as a cache hit, from its
- * dispatch. A miss waits for its concurrency group's slot between the two, which is not its time.
+ * dispatch. A miss the scheduler holds back pends between the two, which is not its time.
  */
 export type NodeState = PendingNodeState | InFlightNodeState | SettledNodeState;
 
@@ -206,6 +207,7 @@ export function nodeReducer(state: NodeState, action: NodeAction): NodeState {
     printed: state.printed,
   };
   if (action.type === "dispatch") return { ...lines, status: "dispatched", startedAt: occurredAt };
+  if (action.type === "pending") return { ...lines, status: "pending" };
   if (action.type === "start") return { ...lines, status: "running", startedAt: occurredAt };
   // The command has exited, ending its unfinished line if it left one.
   const ended = {

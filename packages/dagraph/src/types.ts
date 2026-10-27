@@ -82,11 +82,13 @@ export function tally(results: Iterable<Result>): Tally {
 
 /**
  * One stream of what happens, each event naming its node and carrying its `meta`. Orchestration
- * emits `dispatch`, as a node is handed to processing, and `result`. Processing emits `start`, on
- * a miss as the action begins, and `output`, for what the action prints.
+ * emits `dispatch`, as a node is handed to processing, `pending`, as a miss is held back before its
+ * action runs, until the scheduler lets it run, and `result`. Processing emits `start`, on a miss as
+ * the action begins, and `output`, for what the action prints.
  */
 export type ExecEvent<Meta = unknown> = { node: string; meta?: Meta } & (
   | { type: "dispatch" }
+  | { type: "pending" }
   | { type: "start" }
   | { type: "output"; chunk: string }
   | { type: "result"; result: Result }

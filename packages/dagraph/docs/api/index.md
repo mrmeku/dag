@@ -249,7 +249,7 @@ inputs it gives.
 
 ##### R
 
-`R` _extends_ [`Outputs`](#outputs-1)
+`R` _extends_ [`Outputs`](#outputs-3)
 
 ##### D
 
@@ -426,7 +426,7 @@ gives.
 
 ##### action
 
-> **action**: (`context`) => `Promise`\<`R` & [`Outputs`](#outputs-1)\>
+> **action**: (`context`) => `Promise`\<`R` & [`Outputs`](#outputs-3)\>
 
 ###### Parameters
 
@@ -436,7 +436,7 @@ gives.
 
 ###### Returns
 
-`Promise`\<`R` & [`Outputs`](#outputs-1)\>
+`Promise`\<`R` & [`Outputs`](#outputs-3)\>
 
 ##### cacheable?
 
@@ -448,7 +448,7 @@ gives.
 
 > `optional` **concurrencyGroup?**: `Group`
 
-The group whose limit it runs under, with `throttledScheduler`: one that `actionsFor` names.
+The concurrency group a scheduler may limit it under: one that `actionsFor` names.
 
 ##### deps?
 
@@ -464,10 +464,6 @@ type, `settled<T>`. A record typed `DepSpecs` takes any role.
 > `optional` **inputs?**: `I`
 
 Inputs every node of the action has, such as a version that names the action's logic.
-
-##### invalidateOn?
-
-> `optional` **invalidateOn?**: `NoInfer`\<[`InvalidateOn`](#invalidateon-1)\<`Ports`, `D`\>\>
 
 ##### kind
 
@@ -544,9 +540,15 @@ What gets stored per action key in the cache.
 
 SHA256 of actual file contents at those paths.
 
+##### outputHashes
+
+> **outputHashes**: `Record`\<`string`, `string`\>
+
+Each output's own hash, by name: what a dependent that reads that output keys on.
+
 ##### outputs
 
-> **outputs**: [`Outputs`](#outputs-1)
+> **outputs**: [`Outputs`](#outputs-3)
 
 The file paths the action produced.
 
@@ -710,13 +712,14 @@ The absolute form of `path`, as an action sees it.
 
 A dep as an action declares it in `deps`, by role: the outputs its node returns. An action is
 one, so `deps: { fetch }` takes a node of `fetch`; `dep<T>` is one for a role that more than one
-action fills. A node of the action gives the role a `NodeRef<T>`, never a `Dep`.
+action fills. A node of the action gives the role a `NodeRef<T>`, never a `Dep`. `outputs`, set
+by `pick`, names the outputs the role reads; without it, it reads them all.
 
 #### Type Parameters
 
 ##### T
 
-`T` _extends_ [`Outputs`](#outputs-1) = [`Outputs`](#outputs-1)
+`T` _extends_ [`Outputs`](#outputs-3) = [`Outputs`](#outputs-3)
 
 #### Properties
 
@@ -727,6 +730,10 @@ action fills. A node of the action gives the role a `NodeRef<T>`, never a `Dep`.
 ##### \[DEP\]
 
 > `readonly` **\[DEP\]**: `true`
+
+##### outputs?
+
+> `readonly` `optional` **outputs?**: readonly `string`[]
 
 ##### settled?
 
@@ -766,7 +773,7 @@ action returns. The returned results are complete either way.
 
 ### Node
 
-A node as data, from `graph.describe()`: no action, inputs or fingerprints, so it can cross
+A node as data, from `graph.describe()`: no action or inputs, so it can cross
 into orchestration and into another process when its `meta` can.
 
 #### Type Parameters
@@ -845,7 +852,7 @@ signature.
 
 ### Ready
 
-A node the scheduler may take: ready to be processed, or a miss waiting for its group's slot.
+A node the scheduler may take: ready to be processed, or a miss pending before its action runs.
 
 #### Type Parameters
 
@@ -859,9 +866,9 @@ A node the scheduler may take: ready to be processed, or a miss waiting for its 
 
 > **node**: [`Node`](#node)\<`Meta`\>
 
-##### waitingForSlot
+##### pending
 
-> **waitingForSlot**: `boolean`
+> **pending**: `boolean`
 
 ---
 
@@ -893,9 +900,8 @@ The execution's cancel. A node it stops settles `cancelled`, whatever its action
 
 What a scheduler drives. `take` returns the first ready node, in orchestration's order, that
 `filter` admits: a node comes once when it is ready and, when its lookup misses and it has a
-concurrency group, again with `waitingForSlot` set. `run` hands a ready node to processing, or
-grants a waiting one its slot; it resolves once the node settles or, waiting for a slot, gives
-its place back. `workAvailable` resolves when that may have changed what `take` returns.
+concurrency group, again `pending`. `run` hands a ready node to processing, or lets a pending
+one run; it resolves once the node settles or, as it begins to pend, gives its place back. `workAvailable` resolves when that may have changed what `take` returns.
 
 #### Type Parameters
 
@@ -959,7 +965,7 @@ A dep declared `settled`, which its node runs without: a node gives it a `Settle
 
 ##### T
 
-`T` _extends_ [`Outputs`](#outputs-1) = [`Outputs`](#outputs-1)
+`T` _extends_ [`Outputs`](#outputs-3) = [`Outputs`](#outputs-3)
 
 #### Properties
 
@@ -970,6 +976,10 @@ A dep declared `settled`, which its node runs without: a node gives it a `Settle
 ##### \[DEP\]
 
 > `readonly` **\[DEP\]**: `true`
+
+##### outputs?
+
+> `readonly` `optional` **outputs?**: readonly `string`[]
 
 ##### settled
 
@@ -1058,11 +1068,12 @@ each `NodeRef`, a `SettledDep` for each `SettledRef`, and `maybe` for a role tha
 
 ### ExecEvent
 
-> **ExecEvent**\<`Meta`\> = `object` & (\{ `type`: `"dispatch"`; \} \| \{ `type`: `"start"`; \} \| \{ `chunk`: `string`; `type`: `"output"`; \} \| \{ `result`: [`Result`](#result); `type`: `"result"`; \})
+> **ExecEvent**\<`Meta`\> = `object` & (\{ `type`: `"dispatch"`; \} \| \{ `type`: `"pending"`; \} \| \{ `type`: `"start"`; \} \| \{ `chunk`: `string`; `type`: `"output"`; \} \| \{ `result`: [`Result`](#result); `type`: `"result"`; \})
 
 One stream of what happens, each event naming its node and carrying its `meta`. Orchestration
-emits `dispatch`, as a node is handed to processing, and `result`. Processing emits `start`, on
-a miss as the action begins, and `output`, for what the action prints.
+emits `dispatch`, as a node is handed to processing, `pending`, as a miss is held back before its
+action runs, until the scheduler lets it run, and `result`. Processing emits `start`, on a miss as
+the action begins, and `output`, for what the action prints.
 
 #### Type Parameters
 
@@ -1171,14 +1182,13 @@ A file an action reads: a `file()` input, or an output of a dep. Where it lives 
 > `readonly` **path**: `string`
 
 Its absolute path while the action runs, for a command or a library that takes a path. It
-differs by machine and working directory, so never key on it: build no fingerprint and no
-output's content from it.
+differs by machine and working directory, so never build an output's content from it.
 
 ##### hash()
 
 > **hash**(): `Promise`\<`string`\>
 
-The SHA256 of its bytes, as the engine hashes outputs: the fingerprint of a binary file.
+The SHA256 of its bytes, as the engine hashes outputs.
 
 ###### Returns
 
@@ -1242,7 +1252,7 @@ Outputs as an action reads them: each path a `FileHandle`, each list of paths a 
 
 ##### T
 
-`T` _extends_ [`Outputs`](#outputs-1)
+`T` _extends_ [`Outputs`](#outputs-3)
 
 ---
 
@@ -1299,26 +1309,6 @@ bigint, and `undefined` in a list.
 ##### S
 
 `S` = `never`
-
----
-
-### InvalidateOn
-
-> **InvalidateOn**\<`Ports`, `D`\> = \{ \[K in keyof D\]?: (outputs: NonNullable\<DepOutputsOf\<D\>\[K\]\>, ports: Ports) =\> Promise\<string\> \| string \}
-
-For a dep its nodes read only in part, that part as a fingerprint by role. The string's hash
-stands in for the dep's content hash in the key. Build it from the files' contents, never from a
-handle's `path`, which differs by machine and working directory.
-
-#### Type Parameters
-
-##### Ports
-
-`Ports`
-
-##### D
-
-`D`
 
 ---
 
@@ -1429,7 +1419,7 @@ Handle to a node, returned by `addNode`. `T` is its action's output type.
 
 ##### T
 
-`T` _extends_ [`Outputs`](#outputs-1) = [`Outputs`](#outputs-1)
+`T` _extends_ [`Outputs`](#outputs-3) = [`Outputs`](#outputs-3)
 
 #### Type Declaration
 
@@ -1573,11 +1563,11 @@ anything else.
 
 ### RunNode
 
-> **RunNode**\<`Meta`\> = (`node`, `depEntries`, `waitForSlot`) => `Promise`\<[`Result`](#result)\>
+> **RunNode**\<`Meta`\> = (`node`, `depEntries`, `waitForScheduler`) => `Promise`\<[`Result`](#result)\>
 
 Processes one node somewhere, given its deps' entries by dep name, and returns its result. On
-a miss it awaits `waitForSlot` before the action runs, which resolves once the scheduler grants
-the node's group a slot, and rejects once the execution is cancelled. A rejection of
+a miss it awaits `waitForScheduler` before the action runs, which resolves once the scheduler
+lets the action run, and rejects once the execution is cancelled. A rejection of
 `RunNode` becomes a failure, as an action's error does, or `cancelled` once the execution is
 cancelled.
 
@@ -1597,7 +1587,7 @@ cancelled.
 
 `Record`\<`string`, [`CacheEntry`](#cacheentry)\>
 
-##### waitForSlot
+##### waitForScheduler
 
 () => `Promise`\<`void`\>
 
@@ -1687,7 +1677,7 @@ A dep its node runs without when it does not succeed, as `Promise.allSettled` wa
 
 ##### T
 
-`T` _extends_ [`Outputs`](#outputs-1) = [`Outputs`](#outputs-1)
+`T` _extends_ [`Outputs`](#outputs-3) = [`Outputs`](#outputs-3)
 
 #### Type Declaration
 
@@ -1721,7 +1711,7 @@ The result of a node that succeeded, `done` or `cached`: it carries the node's e
 
 ### defineAction
 
-> `const` **defineAction**: \<`R`, `D`, `N`, `I`\>(`spec`) => [`Action`](#action)\<`unknown`, `Extract`\<`R`, [`Outputs`](#outputs-1)\>, `D`, `N`, `I`\>
+> `const` **defineAction**: \<`R`, `D`, `N`, `I`\>(`spec`) => [`Action`](#action)\<`unknown`, `Extract`\<`R`, [`Outputs`](#outputs-3)\>, `D`, `N`, `I`\>
 
 An action that needs no ports. A program with ports binds its own: `actionsFor<Ports>()`.
 
@@ -1751,19 +1741,19 @@ An action that needs no ports. A program with ports binds its own: `actionsFor<P
 
 #### Returns
 
-[`Action`](#action)\<`unknown`, `Extract`\<`R`, [`Outputs`](#outputs-1)\>, `D`, `N`, `I`\>
+[`Action`](#action)\<`unknown`, `Extract`\<`R`, [`Outputs`](#outputs-3)\>, `D`, `N`, `I`\>
 
 ## Functions
 
 ### actionsFor()
 
-> **actionsFor**\<`Ports`, `Group`\>(): \<`R`, `D`, `N`, `I`\>(`spec`) => [`Action`](#action)\<`Ports`, `Extract`\<`R`, [`Outputs`](#outputs-1)\>, `D`, `N`, `I`\>
+> **actionsFor**\<`Ports`, `Group`\>(): \<`R`, `D`, `N`, `I`\>(`spec`) => [`Action`](#action)\<`Ports`, `Extract`\<`R`, [`Outputs`](#outputs-3)\>, `D`, `N`, `I`\>
 
 `defineAction` bound to a program's ports, the one type it cannot infer: bind it once,
 `const defineActionWithPorts = actionsFor<Ports>()`, and every other type comes from each spec.
-An action may join only a group the program names, `actionsFor<Ports, keyof typeof limits>()`
-over its `throttledScheduler`'s `concurrencyLimits`, so a misspelt group does not compile.
-An action's outputs are what it returns, a path as `string`, a list as `string[]`.
+An action may join only a group the program names, as `actionsFor<Ports, keyof typeof limits>()`
+over the limits it gives its scheduler, so a misspelt group does not compile. An action's
+outputs are the record it returns.
 
 #### Type Parameters
 
@@ -1777,7 +1767,7 @@ An action's outputs are what it returns, a path as `string`, a list as `string[]
 
 #### Returns
 
-\<`R`, `D`, `N`, `I`\>(`spec`) => [`Action`](#action)\<`Ports`, `Extract`\<`R`, [`Outputs`](#outputs-1)\>, `D`, `N`, `I`\>
+\<`R`, `D`, `N`, `I`\>(`spec`) => [`Action`](#action)\<`Ports`, `Extract`\<`R`, [`Outputs`](#outputs-3)\>, `D`, `N`, `I`\>
 
 ---
 
@@ -1846,7 +1836,7 @@ name that action: `deps: { fetch }`.
 
 ##### T
 
-`T` _extends_ [`Outputs`](#outputs-1)
+`T` _extends_ [`Outputs`](#outputs-3)
 
 #### Returns
 
@@ -1986,44 +1976,6 @@ Whether the node succeeded: its result is `done` or `cached`.
 
 ---
 
-### localRunNode()
-
-> **localRunNode**\<`Ports`, `Meta`\>(`graph`, `executionContext`, `options?`): [`RunNode`](#runnode)\<`Meta`\>
-
-The `RunNode` that `execute` uses: each node of `graph` processed in this process, its lookup
-first and, on a miss, its action once it has its slot. A cancel while it waits settles it
-`cancelled`.
-
-#### Type Parameters
-
-##### Ports
-
-`Ports`
-
-##### Meta
-
-`Meta`
-
-#### Parameters
-
-##### graph
-
-[`Graph`](#graph)\<`Ports`, `Meta`\>
-
-##### executionContext
-
-[`ExecutionContext`](#executioncontext)\<`NoInfer`\<`Ports`\>\>
-
-##### options?
-
-[`RunActionOptions`](#runactionoptions)\<`Meta`\> = `{}`
-
-#### Returns
-
-[`RunNode`](#runnode)\<`Meta`\>
-
----
-
 ### lookupNode()
 
 > **lookupNode**\<`Ports`, `Meta`\>(`graph`, `name`, `depEntries`, `executionContext`): `Promise`\<[`Lookup`](#lookup)\>
@@ -2081,7 +2033,7 @@ them.
 
 ###### T
 
-`T` _extends_ [`Outputs`](#outputs-1)
+`T` _extends_ [`Outputs`](#outputs-3)
 
 ##### Parameters
 
@@ -2106,7 +2058,7 @@ them.
 
 ###### T
 
-`T` _extends_ [`Outputs`](#outputs-1)
+`T` _extends_ [`Outputs`](#outputs-3)
 
 ##### Parameters
 
@@ -2131,7 +2083,7 @@ them.
 
 ###### T
 
-`T` _extends_ [`Outputs`](#outputs-1)
+`T` _extends_ [`Outputs`](#outputs-3)
 
 ##### Returns
 
@@ -2149,7 +2101,7 @@ The path a node's outputs hold as `name`; refused when they hold none.
 
 ##### outputs
 
-[`Outputs`](#outputs-1)
+[`Outputs`](#outputs-3)
 
 ##### name
 
@@ -2274,12 +2226,82 @@ error that it threw.
 
 ---
 
+### pick()
+
+#### Call Signature
+
+> **pick**\<`T`, `K`\>(`dep`, ...`outputs`): [`SettledDep`](#settleddep)\<`Pick`\<`T`, `K`\>\>
+
+A role that reads only some of its dep's outputs, as Bazel takes some of a target's files:
+`deps: { download: pick(download, "thumb") }`. The node keys on those outputs' hashes alone, so
+a change to another output of the dep reruns nothing, and the action reads only those. It wraps
+an action or a called `dep<T>()`, and `settled` and `maybe` keep what it picks.
+
+##### Type Parameters
+
+###### T
+
+`T` _extends_ [`Outputs`](#outputs-3)
+
+###### K
+
+`K` _extends_ `string`
+
+##### Parameters
+
+###### dep
+
+[`SettledDep`](#settleddep)\<`T`\>
+
+###### outputs
+
+...`K`[]
+
+##### Returns
+
+[`SettledDep`](#settleddep)\<`Pick`\<`T`, `K`\>\>
+
+#### Call Signature
+
+> **pick**\<`T`, `K`\>(`dep`, ...`outputs`): [`Dep`](#dep-1)\<`Pick`\<`T`, `K`\>\>
+
+A role that reads only some of its dep's outputs, as Bazel takes some of a target's files:
+`deps: { download: pick(download, "thumb") }`. The node keys on those outputs' hashes alone, so
+a change to another output of the dep reruns nothing, and the action reads only those. It wraps
+an action or a called `dep<T>()`, and `settled` and `maybe` keep what it picks.
+
+##### Type Parameters
+
+###### T
+
+`T` _extends_ [`Outputs`](#outputs-3)
+
+###### K
+
+`K` _extends_ `string`
+
+##### Parameters
+
+###### dep
+
+[`Dep`](#dep-1)\<`T`\>
+
+###### outputs
+
+...`K`[]
+
+##### Returns
+
+[`Dep`](#dep-1)\<`Pick`\<`T`, `K`\>\>
+
+---
+
 ### processNode()
 
 > **processNode**\<`Ports`, `Meta`\>(`graph`, `name`, `depEntries`, `executionContext`, `options?`): `Promise`\<[`Result`](#result)\>
 
-Process the node `name` of `graph` now, with no slot to wait for: look it up, and run its action
-on a miss. For a test, a script, or a worker whose orchestrator took the node's slot already.
+Process the node `name` of `graph` now: look it up, and run its action on a miss. For a test, a
+script, or a worker.
 
 #### Type Parameters
 
@@ -2382,6 +2404,44 @@ the ones its lookup was given.
 
 ---
 
+### runNode()
+
+> **runNode**\<`Ports`, `Meta`\>(`graph`, `executionContext`, `options?`): [`RunNode`](#runnode)\<`Meta`\>
+
+The `RunNode` that `execute` uses: each node of `graph` processed in this process, its lookup
+first and, on a miss, its action once the scheduler lets it run. A cancel while it waits settles it
+`cancelled`.
+
+#### Type Parameters
+
+##### Ports
+
+`Ports`
+
+##### Meta
+
+`Meta`
+
+#### Parameters
+
+##### graph
+
+[`Graph`](#graph)\<`Ports`, `Meta`\>
+
+##### executionContext
+
+[`ExecutionContext`](#executioncontext)\<`NoInfer`\<`Ports`\>\>
+
+##### options?
+
+[`RunActionOptions`](#runactionoptions)\<`Meta`\> = `{}`
+
+#### Returns
+
+[`RunNode`](#runnode)\<`Meta`\>
+
+---
+
 ### settled()
 
 #### Call Signature
@@ -2398,7 +2458,7 @@ settled(captionsRef) }`: a role declared one way takes no ref of the other.
 
 ###### T
 
-`T` _extends_ [`Outputs`](#outputs-1)
+`T` _extends_ [`Outputs`](#outputs-3)
 
 ##### Parameters
 
@@ -2424,7 +2484,7 @@ settled(captionsRef) }`: a role declared one way takes no ref of the other.
 
 ###### T
 
-`T` _extends_ [`Outputs`](#outputs-1)
+`T` _extends_ [`Outputs`](#outputs-3)
 
 ##### Parameters
 
@@ -2450,7 +2510,7 @@ settled(captionsRef) }`: a role declared one way takes no ref of the other.
 
 ###### T
 
-`T` _extends_ [`Outputs`](#outputs-1)
+`T` _extends_ [`Outputs`](#outputs-3)
 
 ##### Returns
 

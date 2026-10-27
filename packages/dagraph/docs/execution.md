@@ -77,7 +77,7 @@ Define `summarize` in the example with `defineLimitedAction` and `concurrencyGro
 
 ## Watch events
 
-Run the example's first execution with `{ onEvent: (event) => console.log(event.type, event.node), scheduler: throttledScheduler({ maxParallelism: 1 }) }`. It prints `dispatch fetch`, `start fetch`, `result fetch`, `dispatch summarize`, `start summarize`, `output summarize`, `result summarize`. Each node's events come in that order: `dispatch`, `start`, any `output`s, `result`. Events of different nodes interleave. A cached node gets only `dispatch` and `result`, since a hit never starts. An `output` event carries the `chunk` the action passed to `output()`, and a `result` event carries the `result`.
+Run the example's first execution with `{ onEvent: (event) => console.log(event.type, event.node), scheduler: throttledScheduler({ maxParallelism: 1 }) }`. It prints `dispatch fetch`, `start fetch`, `result fetch`, `dispatch summarize`, `start summarize`, `output summarize`, `result summarize`. Each node's events come in that order: `dispatch`, `start`, any `output`s, `result`. A node the scheduler holds back also gets `pending` between `dispatch` and `start`. Events of different nodes interleave. A cached node gets only `dispatch` and `result`, since a hit never starts. An `output` event carries the `chunk` the action passed to `output()`, and a `result` event carries the `result`.
 
 A listener that returns a promise on `start` holds the action until it resolves. So a journal can record a start before the action has any effect: `onEvent: (event) => journal.record(event)`.
 
@@ -98,35 +98,35 @@ Once it aborts, nothing new starts: every ready node, and every node that would 
 
 ## Write your own executor
 
-`execute` is `orchestrate`, the scheduling half, run over `graph.describe()`, with `localRunNode(graph, context)` as the `RunNode` that processes each node. Processing is two steps. `lookupNode` computes the node's key and checks the cache, and resolves to the node's result or to a miss. On a miss, `runAction` runs the action and stores what it made. `localRunNode` waits for the node's slot between the two, since only a miss takes one.
+`execute` is `orchestrate`, the scheduling half, run over `graph.describe()`, with `runNode(graph, context)` as the `RunNode` that processes each node. Processing is two steps. `lookupNode` computes the node's key and checks the cache, and resolves to the node's result or to a miss. On a miss, `runAction` runs the action and stores what it made. `runNode` waits for the scheduler between the two, since only a miss can be held back.
 
 Write the `RunNode` yourself to change what happens to each node. It may return a result recorded earlier instead of processing the node, as a replay does. This executor replays `fetch` from an earlier execution and processes the rest. Run it after the example's two executions, against the same `context`:
 
 ```ts
-import { localRunNode, orchestrate, throttledScheduler } from "@mrmeku/dagraph";
+import { orchestrate, runNode, throttledScheduler } from "@mrmeku/dagraph";
 
 const recorded = (await execute(graph, context)).find((result) => result.name === "fetch");
-const runNode = localRunNode(graph, context);
+const processed = runNode(graph, context);
 const results = await orchestrate(
   graph.describe(),
-  (node, depEntries, waitForSlot) =>
+  (node, depEntries, waitForScheduler) =>
     node.name === "fetch" && recorded
       ? Promise.resolve(recorded)
-      : runNode(node, depEntries, waitForSlot),
+      : processed(node, depEntries, waitForScheduler),
   throttledScheduler({ maxParallelism: 4 }),
 );
 // fetch is the recorded result; summarize is processed, and cached.
 ```
 
-A `RunNode` gets three things. The first is the node as data. The second is `depEntries`, the cache entry of each dependency that succeeded, by name. The third is `waitForSlot`, which resolves once the node's group has a slot.
+A `RunNode` gets three things. The first is the node as data. The second is `depEntries`, the cache entry of each dependency that succeeded, by name. The third is `waitForScheduler`, which resolves once the scheduler lets the node's action run.
 
-The example leaves out `signal` and `onEvent`. In your executor, pass both to both halves, as `execute` does: `orchestrate(nodes, run, scheduler, onEvent, signal)` takes them last, and `localRunNode` among its options. `orchestrate`'s listener then gets `dispatch` and `result`, and the processing gets `start` and `output`. A signal given to `orchestrate` alone never reaches running actions.
+The example leaves out `signal` and `onEvent`. In your executor, pass both to both halves, as `execute` does: `orchestrate(nodes, run, scheduler, onEvent, signal)` takes them last, and `runNode` among its options. `orchestrate`'s listener then gets `dispatch` and `result`, and the processing gets `start` and `output`. A signal given to `orchestrate` alone never reaches running actions.
 
 ## Process nodes in workers
 
 To process nodes in worker processes, the `RunNode` makes two requests. First it asks a worker to look the node up. It sends the node's name and `depEntries`, and the worker rebuilds a graph that declares the node and calls `lookupNode`. A miss comes back as `status: "missed"`. Any other lookup is the node's result, so a hit never takes a slot.
 
-On a miss, the `RunNode` awaits `waitForSlot()` in the orchestrator, then sends the same request to run. The worker calls `processNode`, which looks the node up again and runs its action, since the orchestrator already holds the slot. It sends back the `Result` as JSON, which `isResult` checks. `start` and `output` fire in the worker, so a journal that records starts listens on the worker's `processNode`, and the cancel goes there too, as its `signal`.
+On a miss, the `RunNode` awaits `waitForScheduler()` in the orchestrator, then sends the same request to run. The worker calls `processNode`, which looks the node up again and runs its action, since the orchestrator already holds the slot. It sends back the `Result` as JSON, which `isResult` checks. `start` and `output` fire in the worker, so a journal that records starts listens on the worker's `processNode`, and the cancel goes there too, as its `signal`.
 
 The worker must declare the node the way the original graph does, with the same `kind`, inputs, roles and names. Then it computes the same key and finds the node's dependencies by name. The workers share one CAS, and one `Cache`, such as an `FsCache` over a shared directory, to hit each other's entries. The orchestrator reads no files and needs neither.
 

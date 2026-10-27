@@ -1680,7 +1680,7 @@ Handle to a node, returned by `addNode`. `T` is its action's output type.
 
 One node as far as the run has got with it. Every duration is `endedAt - startedAt`: from when
 its action started, or for a node that settled without starting, such as a cache hit, from its
-dispatch. A miss waits for its concurrency group's slot between the two, which is not its time.
+dispatch. A miss the scheduler holds back pends between the two, which is not its time.
 
 ---
 
@@ -1735,6 +1735,8 @@ the ref goes only in what that call returns, so another node's ref does not comp
 ### PendingNodeState
 
 > **PendingNodeState** = `NodeLines` & `object`
+
+Not yet running: waiting on its deps, or held back by the scheduler, dispatched or not.
 
 #### Type Declaration
 

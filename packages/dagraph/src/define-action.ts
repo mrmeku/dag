@@ -60,7 +60,7 @@ export interface ActionSpec<
   action: (context: NoInfer<ActionContext<Ports, D, I & N>>) => Promise<R & Outputs>;
   /** `false` runs the node in every execution: its entry is never read or written. */
   cacheable?: boolean;
-  /** The group whose limit it runs under, with `throttledScheduler`: one that `actionsFor` names. */
+  /** The concurrency group a scheduler may limit it under: one that `actionsFor` names. */
   concurrencyGroup?: Group;
   /** How long the action may run, in ms, counted from its start. Not keyed. */
   timeoutMs?: number;
@@ -146,9 +146,9 @@ function define<
 /**
  * `defineAction` bound to a program's ports, the one type it cannot infer: bind it once,
  * `const defineActionWithPorts = actionsFor<Ports>()`, and every other type comes from each spec.
- * An action may join only a group the program names, `actionsFor<Ports, keyof typeof limits>()`
- * over its `throttledScheduler`'s `concurrencyLimits`, so a misspelt group does not compile.
- * An action's outputs are what it returns, a path as `string`, a list as `string[]`.
+ * An action may join only a group the program names, as `actionsFor<Ports, keyof typeof limits>()`
+ * over the limits it gives its scheduler, so a misspelt group does not compile. An action's
+ * outputs are the record it returns.
  */
 export function actionsFor<Ports, Group extends string = never>() {
   return <

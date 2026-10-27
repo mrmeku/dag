@@ -1,4 +1,3 @@
-import type { ThrottledSchedulerOptions } from "@mrmeku/dagraph";
 import stringWidth from "string-width";
 import {
   LIVE_FALLBACK_SIZE,
@@ -19,6 +18,7 @@ import { isDebugCommand, isWarningCommand, plainLine } from "../../kernel/format
 import type {
   InFlightNodeState,
   NodeState,
+  PendingNodeState,
   RunState,
   SettledNodeState,
 } from "../../kernel/run-slice.ts";
@@ -94,13 +94,8 @@ function settledNodeLines(
   ];
 }
 
-/** Why a pending node waits: on its deps, or queued behind its concurrency group or the limit. */
-function waitReasonOf(
-  run: RunState,
-  nodeState: NodeState,
-  inFlightNodes: NodeState[],
-  schedulerOptions: ThrottledSchedulerOptions | undefined,
-) {
+/** Why a pending node waits: on its deps, or, once they have settled, for the scheduler. */
+function waitReasonOf(run: RunState, nodeState: PendingNodeState) {
   const pendingDeps = nodeState.node.deps.filter((dep) => {
     const depState = run.nodes.get(dep);
     return depState !== undefined && !selectors.isSettled(depState);
@@ -115,18 +110,7 @@ function waitReasonOf(
       reason: `waits on ${pendingDeps.slice(0, LIVE_WAITS_ON_SHOWN).join(", ")}${moreSuffix}`,
     };
   }
-  const concurrencyGroup = nodeState.node.concurrencyGroup;
-  const groupLimit = concurrencyGroup && schedulerOptions?.concurrencyLimits?.[concurrencyGroup];
-  if (concurrencyGroup && groupLimit) {
-    const runningInGroup = inFlightNodes.filter(
-      (inFlightNode) => inFlightNode.node.concurrencyGroup === concurrencyGroup,
-    ).length;
-    return { queued: true, reason: `queued: ${concurrencyGroup} ${runningInGroup}/${groupLimit}` };
-  }
-  return {
-    queued: true,
-    reason: `queued: ${inFlightNodes.length}/${schedulerOptions?.maxParallelism ?? "∞"} running`,
-  };
+  return { queued: true, reason: "queued" };
 }
 
 /** What a node in flight says: the line it is printing, else the last line with text it ended. */
@@ -151,7 +135,6 @@ function footerRows(
     now: number;
     columns: number;
     rows: number;
-    schedulerOptions: ThrottledSchedulerOptions | undefined;
     paint: Paint;
   },
 ): string[] {
@@ -160,11 +143,8 @@ function footerRows(
   const nodeRowsRoom = Math.max(0, Math.min(LIVE_MAX_ROWS, Math.floor(view.rows / 2)) - 1);
   const inFlightNodes = selectors.nodesInFlight(run);
   const waitingNodes = [...run.nodes.values()]
-    .filter((nodeState) => nodeState.status === "pending")
-    .map((nodeState) => ({
-      nodeState,
-      ...waitReasonOf(run, nodeState, inFlightNodes, view.schedulerOptions),
-    }))
+    .filter((nodeState): nodeState is PendingNodeState => nodeState.status === "pending")
+    .map((nodeState) => ({ nodeState, ...waitReasonOf(run, nodeState) }))
     .sort((left, right) => Number(right.queued) - Number(left.queued));
   const nameColumns = nameWidth(
     [...inFlightNodes, ...waitingNodes.map((waitingNode) => waitingNode.nodeState)].map(
@@ -224,7 +204,6 @@ export function createLiveRenderer(
   localContext: LocalContext,
   streams: WriteStreams,
   clock: Clock,
-  schedulerOptions: ThrottledSchedulerOptions | undefined,
   getState: () => RunState,
 ) {
   let frame: ReturnType<typeof createFrame> | undefined;
@@ -245,9 +224,7 @@ export function createLiveRenderer(
     const { columns = LIVE_FALLBACK_SIZE.columns, rows = LIVE_FALLBACK_SIZE.rows } = streams.stdout;
     const footerShown = startedAt !== undefined && now - startedAt >= LIVE_FIRST_DRAW_MS;
     currentFrame().draw(
-      footerShown
-        ? footerRows(run, { now, columns, rows, schedulerOptions, paint: localContext.paint })
-        : [],
+      footerShown ? footerRows(run, { now, columns, rows, paint: localContext.paint }) : [],
     );
   };
   const endFooter = (lines: string[]) => {

@@ -25,7 +25,7 @@ Core idea: a node's key is built from its action's kind, its inputs and the cont
 
 When the engine processes a node, these steps happen in this order. `execute` calls it only for the nodes that `orchestrate` dispatches: a node whose required dep failed is settled `dep-failed` by `orchestrate` before dispatch, and a node still waiting when the execution is cancelled is settled `cancelled` the same way. Both get `actionKey: ""` and never reach the steps below.
 
-`lookupNode` takes the first three steps and `runAction` the last two. `processNode` runs both, and `localRunNode`, the `RunNode` that `execute` uses, waits for the node's slot between them ([dagraph-execution](dagraph-execution.md)).
+`lookupNode` takes the first three steps and `runAction` the last two. `processNode` runs both, and `runNode`, the `RunNode` that `execute` uses, waits for the scheduler between them ([dagraph-execution](dagraph-execution.md)).
 
 1. **Required deps.** `lookupNode` repeats the check for executors that call it directly. If a required dep (any dep not marked `settled`) has no entry in the `depEntries` it was given, the node settles `dep-failed` with `dep` set to that dep's name and `actionKey: ""`. Nothing is hashed.
 2. **Key.** The engine hashes every file input, then builds the key. If a file cannot be read, the node settles `failed` with `actionKey: ""` and `elapsed: 0`. The message is the file system's, such as `ENOENT: /missing.ts`.

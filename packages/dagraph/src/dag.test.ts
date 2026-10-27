@@ -1239,6 +1239,26 @@ test("early cutoff: a node that runs again to the same content keeps its depende
 });
 
 describe("events", () => {
+  test("a miss in a concurrency group is pending between its dispatch and its start; a hit and an ungrouped miss are not", async () => {
+    const { ctx } = setup();
+    const g = new Graph<Ports>();
+    task(g, "warm", { concurrencyGroup: "heavy" });
+    await execute(g, ctx);
+    task(g, "grouped", { concurrencyGroup: "heavy" });
+    task(g, "plain");
+    const events: [string, string][] = [];
+    await execute(g, ctx, {
+      scheduler: throttledScheduler({ concurrencyLimits: { heavy: 1 } }),
+      onEvent: (e) => events.push([e.node, e.type]),
+    });
+    const of = (node: string) => events.filter(([n]) => n === node).map(([, type]) => type);
+    expect({ warm: of("warm"), grouped: of("grouped"), plain: of("plain") }).toEqual({
+      warm: ["dispatch", "result"],
+      grouped: ["dispatch", "pending", "start", "result"],
+      plain: ["dispatch", "start", "result"],
+    });
+  });
+
   test("a node's dispatch, start, output and result come in that order, each named by node with its meta; start is live while other nodes run, a cached node never starts, and what prints after the result is dropped", async () => {
     const { ctx } = setup();
     const releaseSlow = Promise.withResolvers<void>();

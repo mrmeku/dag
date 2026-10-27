@@ -17,7 +17,7 @@ How a graph is declared. An action is a kind of work defined once with typed inp
 How a graph is walked. Orchestration decides when a node runs and does no I/O; processing decides what happens to one node; `execute` joins the two in one process. Every node ends with exactly one result, and a failure holds back only the nodes that need it.
 
 - Concepts: settle, ready, dispatch, hit and miss, start, places and slots, schedulers and concurrency groups, the execution context, testing one action, result statuses (`done`, `cached`, `failed`, `dep-failed`, `cancelled`), events, timeouts, cancellation, honouring the signal, replay across dagraph versions.
-- Public names: `execute`, `ExecuteOptions`, `ExecutionContext`, `orchestrate`, `RunNode`, `lookupNode`, `runAction`, `processNode`, `localRunNode`, `Lookup`, `Miss`, `RunActionOptions`, `unboundedScheduler`, `throttledScheduler`, `Scheduler`, `Result`, `isResult`, `isSucceeded`, `tally`, `ExecEvent`, `ExecListener`.
+- Public names: `execute`, `ExecuteOptions`, `ExecutionContext`, `orchestrate`, `RunNode`, `lookupNode`, `runAction`, `processNode`, `runNode`, `Lookup`, `Miss`, `RunActionOptions`, `unboundedScheduler`, `throttledScheduler`, `Scheduler`, `Result`, `isResult`, `isSucceeded`, `tally`, `ExecEvent`, `ExecListener`.
 - Read it when changing scheduling, failure propagation, events, timeouts or cancellation, or when writing an executor or a scheduler of your own.
 
 ### [dagraph-caching](dagraph-caching.md)

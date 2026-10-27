@@ -14,7 +14,6 @@ import { fileHandle } from "./file-handle.ts";
 import { graphNodes, type Graph, type GraphNode } from "./graph/graph.ts";
 import { canonical, resolveValue } from "./graph/inputs.ts";
 import { FILE_INPUT, isFileInput, isOutputs, requiredDeps, type Outputs } from "./graph/types.ts";
-import type { RunNode } from "./orchestrate.ts";
 import type { ExecListener, FailedError, Result } from "./types.ts";
 import { errorOf } from "./utils.ts";
 
@@ -284,8 +283,8 @@ export async function runAction<Ports, Meta>(
 }
 
 /**
- * Process the node `name` of `graph` now, with no slot to wait for: look it up, and run its action
- * on a miss. For a test, a script, or a worker whose orchestrator took the node's slot already.
+ * Process the node `name` of `graph` now: look it up, and run its action on a miss. For a test, a
+ * script, or a worker.
  */
 export async function processNode<Ports, Meta>(
   graph: Graph<Ports, Meta>,
@@ -297,28 +296,6 @@ export async function processNode<Ports, Meta>(
   const found = await lookupNode(graph, name, depEntries, executionContext);
   if (found.status !== "missed") return found;
   return runAction(graph, found, depEntries, executionContext, options);
-}
-
-/**
- * The `RunNode` that `execute` uses: each node of `graph` processed in this process, its lookup
- * first and, on a miss, its action once it has its slot. A cancel while it waits settles it
- * `cancelled`.
- */
-export function localRunNode<Ports, Meta>(
-  graph: Graph<Ports, Meta>,
-  executionContext: ExecutionContext<NoInfer<Ports>>,
-  options: RunActionOptions<Meta> = {},
-): RunNode<Meta> {
-  return async (node, depEntries, waitForSlot) => {
-    const found = await lookupNode(graph, node.name, depEntries, executionContext);
-    if (found.status !== "missed") return found;
-    try {
-      await waitForSlot();
-    } catch {
-      return { name: found.name, actionKey: found.actionKey, status: "cancelled" };
-    }
-    return runAction(graph, found, depEntries, executionContext, options);
-  };
 }
 
 /**
