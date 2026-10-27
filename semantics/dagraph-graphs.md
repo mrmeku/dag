@@ -25,26 +25,26 @@ Where it lives: `packages/dagraph/src/define-action.ts`, `src/graph/graph.ts`, `
 
 Main entry point `@mrmeku/dagraph` (graph-building part):
 
-| Export                                              | What it is                                                                                            |
-| --------------------------------------------------- | ----------------------------------------------------------------------------------------------------- |
-| `defineAction(spec)`                                | Defines an action that needs no ports. Returns an `Action`.                                           |
-| `actionsFor<Ports, Group>()`                        | Returns a `defineAction` bound to the program's `Ports` type and its allowed concurrency-group names. |
-| `Graph<Ports, Meta>`                                | The graph class. Methods: `subgraph(prefix, meta?)` and `describe()`.                                 |
-| `closure(graph, names)`                             | A new graph holding the named nodes and everything they depend on.                                    |
-| `dep<T>`                                            | Declares a role that more than one action can fill, by its output type.                               |
-| `settled(...)`                                      | Marks a role, or a ref, as one the node runs without if that dep does not succeed.                    |
-| `maybe(...)`                                        | Marks a role that a node may leave out.                                                               |
-| `nodeInputs<T>`                                     | Declares the inputs each node of the action must give, by name and type.                              |
-| `file(path)`                                        | A file input: the file's content becomes part of the key.                                             |
-| `nodeRefNamed(name)`                                | An untyped ref to a node known only by its name.                                                      |
-| `requiredDeps(node)`                                | A described node's deps minus its settled ones.                                                       |
-| `soleOutput(outputs)`, `namedOutput(outputs, name)` | Pick one path out of a node's outputs, or throw.                                                      |
-| `isFileHandle(value)`                               | Type guard: is a value a single file handle.                                                          |
-| `notAString(value, refusal)`                        | Makes an object refuse every conversion to a string (described below).                                |
+| Export                       | What it is                                                                                            |
+| ---------------------------- | ----------------------------------------------------------------------------------------------------- |
+| `defineAction(spec)`         | Defines an action that needs no ports. Returns an `Action`.                                           |
+| `actionsFor<Ports, Group>()` | Returns a `defineAction` bound to the program's `Ports` type and its allowed concurrency-group names. |
+| `Graph<Ports, Meta>`         | The graph class. Methods: `subgraph(prefix, meta?)` and `describe()`.                                 |
+| `closure(graph, names)`      | A new graph holding the named nodes and everything they depend on.                                    |
+| `dep<T>`                     | Declares a role that more than one action can fill, by its output type.                               |
+| `settled(...)`               | Marks a role, or a ref, as one the node runs without if that dep does not succeed.                    |
+| `maybe(...)`                 | Marks a role that a node may leave out.                                                               |
+| `nodeInputs<T>`              | Declares the inputs each node of the action must give, by name and type.                              |
+| `file(path)`                 | A file input: the file's content becomes part of the key.                                             |
+| `nodeRefNamed(name)`         | An untyped ref to a node known only by its name.                                                      |
+| `requiredDeps(node)`         | A described node's deps minus its settled ones.                                                       |
+| `namedOutput(outputs, name)` | Pick one path out of a node's outputs, or throw.                                                      |
+| `isFileHandle(value)`        | Type guard: is a value a single file handle.                                                          |
+| `notAString(value, refusal)` | Makes an object refuse every conversion to a string (described below).                                |
 
 Types, each explained further in its section:
 
-- `Action<Ports, R, D = {}, N = {}, I = {}>`: an action needing `Ports`, with outputs `R`, deps `D`, node inputs `N` and own inputs `I`. `Action<Ports, string>[]` accepts a portless action that returns one path.
+- `Action<Ports, R, D = {}, N = {}, I = {}>`: an action needing `Ports`, with outputs `R`, deps `D`, node inputs `N` and own inputs `I`. `Action<Ports, Record<never, never>>[]` accepts a portless action that returns no outputs.
 - `ActionSpec`: what `defineAction` takes.
 - `ActionContext<Ports = unknown, D = DepSpecs, I = Record<string, unknown>>`: what one call of the action gets; `I` is the action's inputs and its nodes' together.
 - `NodeRef<T>`, `SettledRef<T>`: a ref to a node, plain or wrapped in `settled`. `T` defaults to `Outputs`.
@@ -65,7 +65,7 @@ Types, each explained further in its section:
 
 Separate entry point `@mrmeku/dagraph/mermaid`: `mermaidBody(nodes, options?)`, `mermaidQuote(text)` and the type `MermaidOptions<Meta>`.
 
-The main entry point also exports the execution, caching and filesystem APIs (`execute`, `processNode`, `orchestrate`, schedulers, caches, `createMemoryDagFs`, result types). Those belong to [dagraph-execution](dagraph-execution.md) and [dagraph-caching](dagraph-caching.md). This page uses `execute`, `MemCache` and `createMemoryDagFs` only in its examples.
+The main entry point also exports the execution, caching and filesystem APIs (`execute`, `lookupNode`, `runAction`, `processNode`, `orchestrate`, schedulers, caches, `createMemoryDagFs`, result types). Those belong to [dagraph-execution](dagraph-execution.md) and [dagraph-caching](dagraph-caching.md). This page uses `execute`, `MemCache` and `createMemoryDagFs` only in its examples.
 
 ### The package
 
@@ -122,26 +122,26 @@ const translate = defineActionWithPorts({
   kind: "translate",
   deps: { page: fetchPage },
   action: async ({ depOutputs, outputDir, ports }) => {
-    const out = `${outputDir}/fr.html`;
-    await ports.fs.writeText(out, (await depOutputs.page.html.text()).toUpperCase());
-    return out;
+    const html = `${outputDir}/fr.html`;
+    await ports.fs.writeText(html, (await depOutputs.page.html.text()).toUpperCase());
+    return { html };
   },
 });
 
 const summarize = defineActionWithPorts({
   kind: "summarize",
-  deps: { page: fetchPage, translation: settled(translate), notes: maybe<string> },
+  deps: { page: fetchPage, translation: settled(translate), notes: maybe<{ notes: string }> },
   nodeInputs: nodeInputs<{ style: FileInput; argv: (string | OutputRef<string>)[] }>,
   action: async ({ inputs, depOutputs, outputDir, ports }) => {
     const style = await inputs.style.text();
     const argv = inputs.argv.map((a) => (typeof a === "string" ? a : a.path));
-    const translated = depOutputs.translation ? await depOutputs.translation.text() : "none";
-    const out = `${outputDir}/summary.txt`;
+    const translated = depOutputs.translation ? await depOutputs.translation.html.text() : "none";
+    const summary = `${outputDir}/summary.txt`;
     await ports.fs.writeText(
-      out,
-      [style, argv.length, translated, depOutputs.notes?.path ?? "no notes"].join(" | "),
+      summary,
+      [style, argv.length, translated, depOutputs.notes?.notes.path ?? "no notes"].join(" | "),
     );
-    return out;
+    return { summary };
   },
 });
 
@@ -215,7 +215,7 @@ Running it, all six nodes succeed, and `home:summarize` writes `terse | 2 | <P>H
 
 | Field              | Required | Meaning                                                                                                                                                                                                                                                                                                                                                            |
 | ------------------ | -------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `kind`             | yes      | A string naming the action's logic. It joins every node's key, so actions of two kinds never share a cache entry. A factory that makes several actions of one kind must put what differs between them into their inputs.                                                                                                                                           |
+| `kind`             | yes      | A string naming the action's logic. It joins every node's key, so actions of two kinds never share a cache entry. Nodes of one kind that differ put what differs in their node inputs (`nodeInputs`), so one action serves them all.                                                                                                                               |
 | `deps`             | no       | The roles each node fills, as a record (see Dependencies).                                                                                                                                                                                                                                                                                                         |
 | `nodeInputs`       | no       | `nodeInputs<{ ... }>` (uncalled, or called: the same thing). The names and types of the inputs each node gives.                                                                                                                                                                                                                                                    |
 | `inputs`           | no       | Inputs every node of the action shares, such as `{ version: 1 }`. Same value rules as node inputs. They are checked, and copied, when the action is defined.                                                                                                                                                                                                       |
@@ -234,7 +234,7 @@ Nothing checks that two actions have different kinds. Two actions sharing a kind
 
 ### Outputs
 
-An action returns its outputs (`Outputs`): one path (`string`), a list of paths (`string[]`), or a record whose values are each a path or a list of paths (`Record<string, string | string[]>`). Every path must lie under the context's `outputDir`. The engine enforces that and files the outputs away ([dagraph-execution](dagraph-execution.md), [dagraph-caching](dagraph-caching.md)). The output type `R` is exactly what the function returns, so `{ html }` gives `{ html: string }`, and a returned template literal is typed as a plain `string`, not a pattern type. `OutputOf<typeof fetchPage>` names an action's (or a ref's, or a dep's) output type. `NodeRefOf<typeof fetchPage>` names the type of a ref to one of its nodes.
+An action returns its outputs (`Outputs`): a record of named outputs, each a path or a list of paths (`Record<string, string | string[]>`). One file is still a record of one output, `{ html }`, and an action with no outputs returns `{}`. Every path must lie under the context's `outputDir`. The engine enforces that and files the outputs away ([dagraph-execution](dagraph-execution.md), [dagraph-caching](dagraph-caching.md)). The output type `R` is exactly what the function returns, so `{ html }` gives `{ html: string }`, and a returned template literal is typed as a plain `string`, not a pattern type. `OutputOf<typeof fetchPage>` names an action's (or a ref's, or a dep's) output type. `NodeRefOf<typeof fetchPage>` names the type of a ref to one of its nodes.
 
 Write only under `outputDir`. The directory is renamed after the action returns (from `tmp-<uuid>/` to `out-<contentHash>/`, [dagraph-caching](dagraph-caching.md)), so the absolute paths the action saw stop existing. The returned paths are rewritten for you; paths written _inside_ a file are not. A file that names another output of the same node (a playlist naming its segments, an index naming its pages) must name it relative to itself, never by its absolute path. Since the content hash covers each file's path relative to the output directory, two attempts that write the same relative names and bytes publish the same content.
 
@@ -243,7 +243,7 @@ Write only under `outputDir`. The directory is renamed after the action returns 
 Each call of the action gets one object:
 
 - `inputs`: the action's own inputs and the node's, merged, each resolved. A `file()` input arrives as a `FileHandle`. An output ref inside a value arrives as a handle, or a list of handles if that output is a list. A settled output ref arrives as `undefined` when its dep did not succeed. Everything else arrives as the JSON value it was declared as.
-- `depOutputs`: each role's dep outputs, by role, as handles in the outputs' own shape: a handle, a list of handles, or a record of either. A settled role whose dep did not succeed, or a maybe role the node left out, is `undefined`, and its type includes `| undefined`, so the compiler makes the action check before reading.
+- `depOutputs`: each role's dep outputs, by role, as a record of handles: a handle for a path, a list of handles for a list. A settled role whose dep did not succeed, or a maybe role the node left out, is `undefined`, and its type includes `| undefined`, so the compiler makes the action check before reading.
 - `ports`: the program's ports, from the execution context.
 - `outputDir`: the absolute path of a new, empty directory that only this attempt writes.
 - `signal`: an `AbortSignal` that fires on the node's timeout (reason a `TimeoutError`) or when the execution is cancelled.
@@ -334,12 +334,12 @@ Where it lives: `src/graph/graph.ts`.
 An action's `deps` is a record from role name to a declaration:
 
 - **An action**: `deps: { page: fetchPage }`. The role takes a node whose outputs have that action's output type.
-- **`dep<T>`**: a role more than one action can fill, by output type alone: `deps: { image: dep<string> }`. Write it uncalled. `dep<T>()` means the same. `dep()` with no type argument accepts any outputs.
-- **`settled(x)`**: around an action, `settled(translate)`, or by type, `settled<string>`. The node runs whether or not that dep succeeds. Unlike `Promise.all`, it waits for the dep the way `Promise.allSettled` does. When the dep fails, is cancelled or is held back, the role's outputs are `undefined`.
-- **`maybe(x)`**: around an action, `maybe(summarize)`, around a settled role, `maybe(settled(translate))`, or by type, `maybe<string>` (settled by type: `maybe(settled<string>())`). A node may leave this role out or give `undefined`. Its outputs are then `undefined`.
-- **A record typed `DepSpecs`**: `const anyRole: DepSpecs = {}; deps: anyRole`. The action takes deps in any role, and each node names its own roles. This is how an aggregating node (an index over N pages) takes a variable number of deps: `deps: Object.fromEntries(pages.map((p, i) => [\`page${i}\`, p]))`. The action's `depOutputs`is then typed by the declaration, not by what a node gives: every value is`FileHandle | FileHandle[] | { [output: string]: FileHandle | FileHandle[] } | undefined`. So `value.text()`does not compile until the action narrows the value:`isFileHandle(value)`for a single handle (which also rules out`undefined`), `Array.isArray(value)`for a list, and what remains, once checked for`undefined`, is a record. At run time a role whose dep did not succeed, or that the node gave as `undefined`, has no entry at all, so `Object.entries(depOutputs)` skips it.
+- **`dep<T>`**: a role more than one action can fill, by output type alone: `deps: { image: dep<{ image: string }> }`. Write it uncalled. `dep<T>()` means the same. `dep()` with no type argument accepts any outputs.
+- **`settled(x)`**: around an action, `settled(translate)`, or by type, `settled<{ srt: string }>`. The node runs whether or not that dep succeeds. Unlike `Promise.all`, it waits for the dep the way `Promise.allSettled` does. When the dep fails, is cancelled or is held back, the role's outputs are `undefined`.
+- **`maybe(x)`**: around an action, `maybe(summarize)`, around a settled role, `maybe(settled(translate))`, or by type, `maybe<{ notes: string }>` (settled by type: `maybe(settled<{ notes: string }>())`). A node may leave this role out or give `undefined`. Its outputs are then `undefined`.
+- **A record typed `DepSpecs`**: `const anyRole: DepSpecs = {}; deps: anyRole`. The action takes deps in any role, and each node names its own roles. This is how an aggregating node (an index over N pages) takes a variable number of deps: ``deps: Object.fromEntries(pages.map((p, i) => [`page${i}`, p]))``. The action's `depOutputs` is then typed by the declaration, not by what a node gives: every value is `{ [output: string]: FileHandle | FileHandle[] } | undefined`. So `value.out.text()` does not compile until the action narrows the value: checked for `undefined`, then `isFileHandle(value.out)` for a single handle (which also rules out a missing output) or `Array.isArray(value.out)` for a list. At run time a role whose dep did not succeed, or that the node gave as `undefined`, has no entry at all, so `Object.entries(depOutputs)` skips it.
 
-Uncalled and called markers are the same: `settled<T>` and `settled<T>()`, `maybe<T>` and `maybe<T>()`, `nodeInputs<T>` and `nodeInputs<T>()`. The one exception is a marker given to `maybe`, which must be called: `maybe(settled<string>)` and `maybe(dep<string>)` do not compile, `maybe(settled<string>())` and `maybe(dep<string>())` do.
+Uncalled and called markers are the same: `settled<T>` and `settled<T>()`, `maybe<T>` and `maybe<T>()`, `nodeInputs<T>` and `nodeInputs<T>()`. The one exception is a marker given to `maybe`, which must be called: `maybe(settled<T>)` and `maybe(dep<T>)` do not compile, `maybe(settled<T>())` and `maybe(dep<T>())` do.
 
 `DepSpecsOf<D>` goes the other way: from the deps a node gives (`{ rec: NodeRef<X> }`) to the declaration an action needs (`{ rec: Dep<X> }`). It is for an action defined for one particular node. Its members are called markers (`dep<X>()`), not uncalled ones.
 
@@ -349,7 +349,7 @@ A node gives each role a ref:
 
 - a required role takes a plain `NodeRef<T>`, the value `addNode` returned;
 - a settled role takes `settled(ref)`, a `SettledRef<T>`. A role declared one way takes no ref of the other: a plain ref in a settled role, or a settled ref in a required one, does not compile;
-- a maybe role may be left out or given `undefined`. When the node gives it, it takes the ref of the role `maybe` wraps: a plain ref for `maybe(summarize)` or `maybe<string>`, and `settled(ref)` for `maybe(settled(translate))`, which the node then runs without as it would a settled role. The rule above holds inside `maybe` too: a settled ref in `maybe<string>`, or a plain ref in `maybe(settled(translate))`, does not compile. `maybe` marks only a role, never a ref: `maybe(ref)` does not compile.
+- a maybe role may be left out or given `undefined`. When the node gives it, it takes the ref of the role `maybe` wraps: a plain ref for `maybe(summarize)` or `maybe<T>`, and `settled(ref)` for `maybe(settled(translate))`, which the node then runs without as it would a settled role. The rule above holds inside `maybe` too: a settled ref in `maybe<T>`, or a plain ref in `maybe(settled(translate))`, does not compile. `maybe` marks only a role, never a ref: `maybe(ref)` does not compile.
 
 The ref must carry the outputs its role declares. A node of the wrong action, or any node whose output record lacks the declared fields, does not compile. `nodeRefNamed(name)` builds an untyped ref (`NodeRef<Outputs>`) for a node known by name alone. It fits roles typed `dep()` or any-role actions, but not a role typed by a specific action.
 
@@ -439,7 +439,7 @@ The argument has an entry only for the roles the node actually gives: a maybe ro
 - `page.html` is an `OutputRef<string>`, or `OutputRef<string[]>` for a list output. It is a `SettledOutputRef` when the role was given as `settled(ref)`. A settled ref never fits where an `OutputRef` is declared, because it may resolve to `undefined`.
 - The action reads the ref as a handle on that output's published file, or a list of handles. A settled ref reads as `undefined` when its dep did not succeed.
 - In the key, a ref is the role(s) it points through (all of them, sorted, when two roles name one node) plus the output's name. It is never the dep node's name and never a path. So an `invalidateOn` fingerprint on that role still governs it ([dagraph-caching](dagraph-caching.md)).
-- Refs exist only for deps whose outputs are a record, and only for outputs every return of the dep includes. An optional output (`srt?: string`), or one named by an index signature, has no ref. Read it from `depOutputs`, where it is `| undefined`.
+- Refs exist only for outputs every return of the dep includes. An optional output (`srt?: string`), or one named by an index signature, has no ref. Read it from `depOutputs`, where it is `| undefined`.
 - The refs of a dep cannot be listed: a spread `{ ...page }`, or putting the whole `page` object in a value, throws `node "<name>": the refs of page cannot be listed: name each output, as page.<output>`. Their names exist only in the types.
 - Refs are scoped to the call that received them: a ref kept from another node's `inputs` function does not compile in a different node's inputs.
 - An output name that the dep turns out not to have at run time (possible only by bypassing types) fails the dependent node when it runs, with the error `"<dep node>" has no output "<name>"`.
@@ -472,7 +472,7 @@ A `FileHandle` is how an action sees any file it reads: a `file()` input, or an 
 - `json(is)`: the contents parsed and checked by the type guard `is`. It throws `<path> holds no JSON` (with the parse error as `cause`) or `<path> holds JSON that <guard function's name> refuses`. "its guard" replaces the name for an anonymous guard.
 - `hash()`: the SHA-256 hex of its bytes, the same hash the engine uses for outputs. Use it as the fingerprint of a binary file.
 
-`Handles<T>` maps an output type to its handle shape: `string` becomes `FileHandle`, `string[]` becomes `FileHandle[]`, a record maps per field, and `undefined` stays `undefined`. `isFileHandle(x)` is true only for a single handle, not for a list or record of them.
+`Handles<T>` maps an output record to its handles, field by field: a `string` becomes a `FileHandle`, a `string[]` a `FileHandle[]`, and an optional field stays `| undefined`. `isFileHandle(x)` is true only for a single handle, not for a list or record of them.
 
 Where it lives: `src/file-handle.ts`, `src/graph/types.ts` (`FileHandle`, `Handles`).
 
@@ -480,8 +480,7 @@ Where it lives: `src/file-handle.ts`, `src/graph/types.ts` (`FileHandle`, `Handl
 
 For code that reads a node's outputs back as data (results, cache entries), not as handles:
 
-- `soleOutput(outputs)` returns the path when outputs is one string. Otherwise it throws `the node's outputs are not one path`.
-- `namedOutput(outputs, name)` returns the path a record holds as `name`. It throws `the node's outputs hold no path "<name>"` when there is none, when the field is a list, or when outputs is not a record.
+- `namedOutput(outputs, name)` returns the path the outputs hold as `name`. It throws `the node's outputs hold no path "<name>"` when there is none or when the field is a list.
 
 Where it lives: `src/graph/types.ts`.
 
@@ -551,22 +550,20 @@ Where it lives: `src/mermaid.ts`, `src/mermaid.test.ts`.
 
 The engine knows one thing: nodes. A node is a kind, inputs, deps by role, and a few fields on how to run it (`cacheable`, `concurrencyGroup`, `timeoutMs`). Everything a program does beyond that is either a node of its own or a choice made by the executor that runs the nodes ([dagraph-execution](dagraph-execution.md)).
 
-**Checks are nodes.** The engine has no notion of a "check" or a "test". To check a node's outputs, add an ordinary node that depends on it, reads its outputs, and writes a record of what it found as its own output. Being a node, the check gets everything a node gets for free: its key covers its own kind and inputs and the checked node's content (or, for a role that declares one, the `invalidateOn` fingerprint in its place), so it reruns only when one of those changes, when it is forced, or when its entry is missing or does not verify; its result is cached; it shows up in events, in `describe()` and in diagrams; it can be limited by a concurrency group or a timeout; and dependents can read its record. To act on a check, for example to rerun the nodes it found degraded, an executor reads the record and forces those nodes through `processNode`'s `force` option ("Forcing some nodes", [dagraph-execution](dagraph-execution.md)). The engine sees neither the check nor the healing as special.
-
 **The primitives, and why each lives in the engine.** Each one does something a node cannot do for itself, because it acts before the node's action runs, or after it, or across nodes:
 
-| Primitive                      | Why a node cannot do it                                                                                                                          |
-| ------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------ |
-| Deps by role                   | The engine must know the order to run nodes in, and the dep content each key covers.                                                             |
-| `settled`                      | Holding a dependent back (`dep-failed`) is decided by orchestration before the dependent is ever processed, so a node cannot opt itself back in. |
-| `maybe`                        | A role a node may leave out; it changes what is keyed (an absent role is not in the key) and what the action is typed to read.                   |
-| `file()` inputs                | The file's content must be hashed into the key before the action runs.                                                                           |
-| `invalidateOn`                 | The key is computed before the action runs, and only the engine computes it.                                                                     |
-| `cacheable: false`             | The cache lookup happens before the action, so the action cannot ask to skip it.                                                                 |
-| `concurrencyGroup`             | Only a miss takes a slot, and only after its lookup; a node that limited itself would hold a slot during a hit.                                  |
-| `timeoutMs`                    | The node must fail, and not be cached, whatever the action returns once the time is up.                                                          |
-| `force`, `cacheOnly`, `signal` | Choices about a whole execution or one node of it, made by whoever runs the graph.                                                               |
-| An awaited `start` listener    | Lets a journal record a start before the action has any effect.                                                                                  |
+| Primitive                   | Why a node cannot do it                                                                                                                          |
+| --------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------ |
+| Deps by role                | The engine must know the order to run nodes in, and the dep content each key covers.                                                             |
+| `settled`                   | Holding a dependent back (`dep-failed`) is decided by orchestration before the dependent is ever processed, so a node cannot opt itself back in. |
+| `maybe`                     | A role a node may leave out; it changes what is keyed (an absent role is not in the key) and what the action is typed to read.                   |
+| `file()` inputs             | The file's content must be hashed into the key before the action runs.                                                                           |
+| `invalidateOn`              | The key is computed before the action runs, and only the engine computes it.                                                                     |
+| `cacheable: false`          | The cache lookup happens before the action, so the action cannot ask to skip it.                                                                 |
+| `concurrencyGroup`          | Only a miss takes a slot, and only after its lookup; a node that limited itself would hold a slot during a hit.                                  |
+| `timeoutMs`                 | The node must fail, and not be cached, whatever the action returns once the time is up.                                                          |
+| `signal`, `waitForSlot`     | Choices about a whole execution or one node of it, made by whoever runs the graph.                                                               |
+| An awaited `start` listener | Lets a journal record a start before the action has any effect.                                                                                  |
 
 **What the engine does not know.** The package imports nothing but `js-sha256` and `pathe` (and, in the two filesystem adapters, `node:fs`, `node:path`, `node:crypto` or Bun's file API). So:
 

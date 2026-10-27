@@ -1808,16 +1808,22 @@ How the run stands: running until a cancel or its close, then final. Only an err
 
 ### RunOptions
 
-> **RunOptions** = `Pick`\<`ExecuteOptions`, `"force"` \| `"signal"`\> & `Pick`\<[`WorkflowDef`](#workflowdef), `"implementation"` \| `"schedulerOptions"` \| `"summary"`\> & `object`
+> **RunOptions** = `Pick`\<`ExecuteOptions`, `"signal"`\> & `Pick`\<[`WorkflowDef`](#workflowdef), `"implementation"` \| `"schedulerOptions"` \| `"summary"`\> & `object`
 
 A run's options: its workflow's `implementation`, `schedulerOptions` and `summary` (the post pass
-draws with the same), `execute`'s `force` and `signal`, and these.
+draws with the same), `execute`'s `signal`, and these.
 
 #### Type Declaration
 
 ##### casBaseDir
 
 > **casBaseDir**: `string`
+
+##### force?
+
+> `optional` **force?**: `boolean`
+
+Every node runs, its entry unread, and writes its new entry.
 
 ##### historyDir?
 
@@ -3062,7 +3068,7 @@ only its main, and a dep that the workflow file has added to the main since cann
 Mark a dep its node runs without: when it does not succeed, its role is `undefined`. An action
 declares the role with it, around the action that fills it, `deps: { captions:
 settled(captions) }`, or uncalled, by the outputs of a role more than one action fills, `deps:
-{ captions: settled<string> }`. Its node marks the ref it gives, `deps: { captions:
+{ captions: settled<{ srt: string }> }`. Its node marks the ref it gives, `deps: { captions:
 settled(captionsRef) }`: a role declared one way takes no ref of the other.
 
 ##### Type Parameters
@@ -3088,7 +3094,7 @@ settled(captionsRef) }`: a role declared one way takes no ref of the other.
 Mark a dep its node runs without: when it does not succeed, its role is `undefined`. An action
 declares the role with it, around the action that fills it, `deps: { captions:
 settled(captions) }`, or uncalled, by the outputs of a role more than one action fills, `deps:
-{ captions: settled<string> }`. Its node marks the ref it gives, `deps: { captions:
+{ captions: settled<{ srt: string }> }`. Its node marks the ref it gives, `deps: { captions:
 settled(captionsRef) }`: a role declared one way takes no ref of the other.
 
 ##### Type Parameters
@@ -3114,7 +3120,7 @@ settled(captionsRef) }`: a role declared one way takes no ref of the other.
 Mark a dep its node runs without: when it does not succeed, its role is `undefined`. An action
 declares the role with it, around the action that fills it, `deps: { captions:
 settled(captions) }`, or uncalled, by the outputs of a role more than one action fills, `deps:
-{ captions: settled<string> }`. Its node marks the ref it gives, `deps: { captions:
+{ captions: settled<{ srt: string }> }`. Its node marks the ref it gives, `deps: { captions:
 settled(captionsRef) }`: a role declared one way takes no ref of the other.
 
 ##### Type Parameters

@@ -25,7 +25,13 @@ const settled = (n: Node, result: Settled): ExecEvent => ({
   result: { name: n.name, ...result },
 });
 const built = (n: Node, key: string): ExecEvent =>
-  settled(n, { actionKey: key, status: "done", outputs: key, contentHash: "h", elapsed: 1 });
+  settled(n, {
+    actionKey: key,
+    status: "done",
+    outputs: { out: key },
+    contentHash: "h",
+    elapsed: 1,
+  });
 const failed = (n: Node, key: string, message: string, cause?: JsonValue): ExecEvent =>
   settled(n, {
     actionKey: key,
@@ -113,7 +119,7 @@ async function transcript(lastRunAtBegin: boolean) {
     ...started(f),
     failed(b, "kb", "make b exited 2", command),
     { type: "dispatch", node: "c" },
-    settled(c, { actionKey: "kc", status: "cached", outputs: "kc", contentHash: "h" }),
+    settled(c, { actionKey: "kc", status: "cached", outputs: { out: "kc" }, contentHash: "h" }),
     settled(d, { actionKey: "", status: "dep-failed", dep: "b" }),
     failed(f, "kf", "upload refused", { name: "Error", message: "ECONNREFUSED" }),
     ...started(save),
@@ -198,17 +204,17 @@ describe("run store", () => {
     store.begin(pass);
     events(
       { type: "dispatch", node: "a" },
-      settled(a, { actionKey: "ka", status: "cached", outputs: "ka", contentHash: "h" }),
+      settled(a, { actionKey: "ka", status: "cached", outputs: { out: "ka" }, contentHash: "h" }),
     );
     assert.deepEqual(await store.report(pass), [
-      { ...a, status: "cached", start: 0, duration: 1000, previous: 500, outputs: "ka" },
+      { ...a, status: "cached", start: 0, duration: 1000, previous: 500, outputs: { out: "ka" } },
     ]);
   });
 
   test("a pass's report: the nodes that settled, as they ended", async () => {
     const { reports } = await failedRun();
     assert.deepEqual(reports, [
-      { ...a, status: "done", start: 1000, duration: 1000, previous: 500, outputs: "ka" },
+      { ...a, status: "done", start: 1000, duration: 1000, previous: 500, outputs: { out: "ka" } },
       { ...b, status: "failed", start: 4000, duration: 1000, error: "make b exited 2" },
       { ...c, status: "cancelled", start: 8000, duration: 1000 },
       { ...d, status: "dep-failed", error: "dependency b failed" },
@@ -236,7 +242,7 @@ describe("run store", () => {
         file: await parsed(fs.readText("/cas/last-run.json")),
       },
       {
-        reports: [{ ...a, status: "done", start: 1000, duration: 1000, outputs: "ka" }],
+        reports: [{ ...a, status: "done", start: 1000, duration: 1000, outputs: { out: "ka" } }],
         file: { durations: { a: 1000 } },
       },
     );

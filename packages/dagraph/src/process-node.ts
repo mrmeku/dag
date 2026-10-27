@@ -14,7 +14,8 @@ import {
 import { fileHandle } from "./file-handle.ts";
 import { graphNodes, type Graph, type GraphNode } from "./graph/graph.ts";
 import { canonical, resolveValue } from "./graph/inputs.ts";
-import { FILE_INPUT, isFileInput, requiredDeps, type Outputs } from "./graph/types.ts";
+import { FILE_INPUT, isFileInput, isOutputs, requiredDeps, type Outputs } from "./graph/types.ts";
+import type { RunNode } from "./orchestrate.ts";
 import type { ExecListener, FailedError, Result } from "./types.ts";
 import { errorOf } from "./utils.ts";
 
@@ -28,39 +29,23 @@ export type ExecutionContext<Ports = unknown> = {
   casBaseDir: string;
 } & (unknown extends Ports ? { ports?: Ports } : { ports: Ports });
 
-export interface ProcessNodeOptions<Meta> {
-  /** Skip the entry read: run the node, then write its new entry. */
-  force?: boolean;
-  /**
-   * Look the node up without running it: without a verified entry it fails with `NOT_CACHED` as
-   * its error's message. With `force`, there is no lookup, so it fails so at once.
-   */
-  cacheOnly?: boolean;
+export interface RunActionOptions<Meta> {
   /** The execution's cancel. A node it stops settles `cancelled`, whatever its action returns. */
   signal?: AbortSignal;
-  /**
-   * The gate of the node's concurrency group, awaited on a miss before the action runs: the
-   * `acquire` its `RunNode` gets, or `ungated` outside an orchestrator. It rejects only once the
-   * execution is cancelled, so a rejection settles the node `cancelled`.
-   */
-  acquire: () => Promise<void>;
   /** Receives the node's `start` and `output`, before its result returns. */
   onEvent?: ExecListener<Meta>;
 }
 
-/**
- * The gate of a node that waits for no slot, for `processNode` outside an orchestrator: a test, a
- * script, or a worker whose orchestrator took the node's slot already.
- */
-export const ungated = (): Promise<void> => Promise.resolve();
+/** A node whose key has no verified entry: what `runAction` runs. */
+export type Miss = { name: string; actionKey: string; status: "missed" };
+
+/** How a node's lookup ended: settled without running, or a miss to run. */
+export type Lookup = Extract<Result, { status: "cached" | "failed" | "dep-failed" }> | Miss;
 
 /** A listener's promise that nothing awaits: its rejection is dropped, not left unhandled. */
 const ignoreRejection = (returned: unknown) => {
   if (returned instanceof Promise) returned.catch(() => {});
 };
-
-/** The message of the error of a node that `cacheOnly` found no verified entry for. */
-export const NOT_CACHED = "not cached";
 
 /** Removes an attempt's directory, best effort: whether it is gone never changes a result. */
 const discard = (fs: DagFs, dir: string) => fs.remove(dir).catch(() => {});
@@ -137,49 +122,75 @@ async function actionKeyOf(
   return computeActionKey(spec.kind, keyedInputs, keyedDeps);
 }
 
+/** The node `name` of `graph`, refused when the graph holds none. */
+function nodeNamed<Ports, Meta>(graph: Graph<Ports, Meta>, name: string): GraphNode<Meta> {
+  const found = graphNodes(graph).get(name);
+  if (!found)
+    throw new Error(
+      `the graph holds no node "${name}". Pass a graph that holds it: the whole graph, a ` +
+        `closure of it, or any graph that declares the node the same way. A key is local to ` +
+        `its node, so each gives it the same key.`,
+    );
+  return found;
+}
+
 /**
- * Process the node `name` of `graph`: compute its key, read and verify its entry, and run its
- * action on a miss. `depEntries`, by dep node name, holds the entry of each dep that succeeded.
+ * Look the node `name` of `graph` up: compute its key, then read and verify its entry. It settles
+ * `cached`, `dep-failed` or `failed` without running, or is a miss. `depEntries`, by dep node
+ * name, holds the entry of each dep that succeeded.
  */
-export async function processNode<Ports, Meta>(
+export async function lookupNode<Ports, Meta>(
   graph: Graph<Ports, Meta>,
   name: string,
   depEntries: Record<string, CacheEntry>,
   executionContext: ExecutionContext<NoInfer<Ports>>,
-  options: ProcessNodeOptions<Meta>,
-): Promise<Result> {
-  const found = graphNodes(graph).get(name);
-  if (!found)
-    throw new Error(
-      `processNode: the graph holds no node "${name}". Pass a graph that holds it: the whole ` +
-        `graph, a closure of it, or any graph that declares the node the same way. A key is ` +
-        `local to its node, so each gives it the same key.`,
-    );
+): Promise<Lookup> {
+  const found = nodeNamed(graph, name);
   const { cache, fs, casBaseDir, ports }: ExecutionContext = executionContext;
-  const { node, spec, roles } = found;
-  const meta = node.meta === undefined ? {} : { meta: node.meta };
+  const { node } = found;
   const entryOf = (dep: string) => (Object.hasOwn(depEntries, dep) ? depEntries[dep] : undefined);
-  const handle = (path: string) => fileHandle(fs, path);
   const missing = requiredDeps(node).find((dep) => !entryOf(dep));
   if (missing !== undefined) return { name, actionKey: "", status: "dep-failed", dep: missing };
 
   let actionKey: string;
   try {
-    actionKey = await actionKeyOf(found, entryOf, ports, fs.hashFile, handle);
+    actionKey = await actionKeyOf(found, entryOf, ports, fs.hashFile, (path) =>
+      fileHandle(fs, path),
+    );
   } catch (e) {
     return { name, actionKey: "", status: "failed", error: errorOf(e), elapsed: 0 };
   }
-  const keyDir = join(casBaseDir, actionKey);
-  if (!options.force && node.cacheable !== false) {
+  if (node.cacheable !== false) {
     // An entry that cannot be read, the cache's own failure included, is a miss.
     const cached = await Promise.resolve()
       .then(() => cache.get(actionKey))
       .catch(() => undefined);
-    if (cached && (await verifyOutputs(cached, fs.hashFile, keyDir))) {
+    if (cached && (await verifyOutputs(cached, fs.hashFile, join(casBaseDir, actionKey)))) {
       const { outputs, contentHash } = cached;
       return { name, actionKey, status: "cached", outputs, contentHash };
     }
   }
+  return { name, actionKey, status: "missed" };
+}
+
+/**
+ * Run the action of a node that missed, store what it made, and write its entry. `depEntries` are
+ * the ones its lookup was given.
+ */
+export async function runAction<Ports, Meta>(
+  graph: Graph<Ports, Meta>,
+  { name, actionKey }: Miss,
+  depEntries: Record<string, CacheEntry>,
+  executionContext: ExecutionContext<NoInfer<Ports>>,
+  options: RunActionOptions<Meta> = {},
+): Promise<Result> {
+  const found = nodeNamed(graph, name);
+  const { cache, fs, casBaseDir, ports }: ExecutionContext = executionContext;
+  const { node, spec, roles } = found;
+  const meta = node.meta === undefined ? {} : { meta: node.meta };
+  const entryOf = (dep: string) => (Object.hasOwn(depEntries, dep) ? depEntries[dep] : undefined);
+  const handle = (path: string) => fileHandle(fs, path);
+  const keyDir = join(casBaseDir, actionKey);
   const notRun = (e: unknown): Result => ({
     name,
     actionKey,
@@ -187,15 +198,9 @@ export async function processNode<Ports, Meta>(
     error: errorOf(e),
     elapsed: 0,
   });
-  if (options.cacheOnly) return notRun(new Error(NOT_CACHED));
 
   const cancel = options.signal;
   const cancelled: Result = { name, actionKey, status: "cancelled" };
-  try {
-    await options.acquire();
-  } catch {
-    return cancelled;
-  }
   if (cancel?.aborted) return cancelled;
   const staging = `${keyDir}/tmp-${crypto.randomUUID()}`;
   const outputDir = fs.resolve(staging);
@@ -264,6 +269,11 @@ export async function processNode<Ports, Meta>(
       return await dropped(failed({ ...errorOf(thrown, message), name: "TimeoutError" }));
     }
     if ("error" in settled) return await dropped(failed(errorOf(thrown)));
+    if (!isOutputs(settled.outputs))
+      throw new Error(
+        `the action returned ${JSON.stringify(settled.outputs)}, not a record of outputs: ` +
+          "return { <name>: path }",
+      );
     // A returned path, absolute or not, is stored under the staging dir as casBaseDir gives it.
     const under = `${normalize(outputDir)}/`;
     const outside = collectPaths(settled.outputs).find(
@@ -292,6 +302,44 @@ export async function processNode<Ports, Meta>(
     // What the action prints after its result returns is dropped.
     open = false;
   }
+}
+
+/**
+ * Process the node `name` of `graph` now, with no slot to wait for: look it up, and run its action
+ * on a miss. For a test, a script, or a worker whose orchestrator took the node's slot already.
+ */
+export async function processNode<Ports, Meta>(
+  graph: Graph<Ports, Meta>,
+  name: string,
+  depEntries: Record<string, CacheEntry>,
+  executionContext: ExecutionContext<NoInfer<Ports>>,
+  options: RunActionOptions<Meta> = {},
+): Promise<Result> {
+  const found = await lookupNode(graph, name, depEntries, executionContext);
+  if (found.status !== "missed") return found;
+  return runAction(graph, found, depEntries, executionContext, options);
+}
+
+/**
+ * The `RunNode` that `execute` uses: each node of `graph` processed in this process, its lookup
+ * first and, on a miss, its action once it has its slot. A cancel while it waits settles it
+ * `cancelled`.
+ */
+export function localRunNode<Ports, Meta>(
+  graph: Graph<Ports, Meta>,
+  executionContext: ExecutionContext<NoInfer<Ports>>,
+  options: RunActionOptions<Meta> = {},
+): RunNode<Meta> {
+  return async (node, depEntries, waitForSlot) => {
+    const found = await lookupNode(graph, node.name, depEntries, executionContext);
+    if (found.status !== "missed") return found;
+    try {
+      await waitForSlot();
+    } catch {
+      return { name: found.name, actionKey: found.actionKey, status: "cancelled" };
+    }
+    return runAction(graph, found, depEntries, executionContext, options);
+  };
 }
 
 /**

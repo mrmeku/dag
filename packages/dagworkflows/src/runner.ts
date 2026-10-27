@@ -1,10 +1,11 @@
 import {
   closure,
   execute,
+  forcedCache,
   FsCache,
   Graph,
+  localRunNode,
   orchestrate,
-  processNode,
   throttledScheduler,
   type ExecuteOptions,
   type Result,
@@ -36,10 +37,12 @@ export type Implementation<R = unknown> = (
 
 /**
  * A run's options: its workflow's `implementation`, `schedulerOptions` and `summary` (the post pass
- * draws with the same), `execute`'s `force` and `signal`, and these.
+ * draws with the same), `execute`'s `signal`, and these.
  */
-export type RunOptions = Pick<ExecuteOptions, "force" | "signal"> &
+export type RunOptions = Pick<ExecuteOptions, "signal"> &
   Pick<WorkflowDef, "implementation" | "schedulerOptions" | "summary"> & {
+    /** Every node runs, its entry unread, and writes its new entry. */
+    force?: boolean;
     /** The workflow file as given: named in the summary's heading and in the log's reproduce line. */
     workflowFile?: string;
     ports: Ports;
@@ -230,6 +233,7 @@ export async function runWorkflow(opts: RunOptions): Promise<RunOutcome> {
       results: {},
     },
   );
+  const stored = new FsCache(opts.casBaseDir, ports.fs);
   let results: Result[];
   try {
     await history.begin();
@@ -237,12 +241,11 @@ export async function runWorkflow(opts: RunOptions): Promise<RunOutcome> {
       graph,
       {
         ports,
-        cache: new FsCache(opts.casBaseDir, ports.fs),
+        cache: opts.force ? forcedCache(stored) : stored,
         fs: ports.fs,
         casBaseDir: opts.casBaseDir,
       },
       {
-        force: opts.force ?? false,
         scheduler: throttledScheduler(opts.schedulerOptions),
         onEvent: (event) => {
           store.onEvent(event);
@@ -320,17 +323,17 @@ async function postPass(
     fs: ports.fs,
     casBaseDir: opts.casBaseDir,
   };
+  const runOwed = localRunNode(replayed, executionContext, {
+    onEvent: (event) => {
+      store.onEvent(event);
+      return history.onEvent(event);
+    },
+  });
   const all = await orchestrate(
     replayed.describe(),
-    (node, depEntries, acquire) =>
+    (node, depEntries, waitForSlot) =>
       owed.has(node.name)
-        ? processNode(replayed, node.name, depEntries, executionContext, {
-            acquire,
-            onEvent: (event) => {
-              store.onEvent(event);
-              return history.onEvent(event);
-            },
-          })
+        ? runOwed(node, depEntries, waitForSlot)
         : Promise.resolve(replay(node.name, before[node.name])),
     throttledScheduler(opts.schedulerOptions),
     (event) => {

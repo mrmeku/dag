@@ -75,6 +75,15 @@ export class FsCache implements Cache {
   }
 }
 
+/**
+ * `cache` with every read of `keys` a miss, or of every key without them: the nodes of those keys
+ * run again and write their new entries, which later reads hit. This is how to force nodes.
+ */
+export const forcedCache = (cache: Cache, keys?: ReadonlySet<string>): Cache => ({
+  get: async (key) => (keys && !keys.has(key) ? cache.get(key) : undefined),
+  put: (key, entry) => cache.put(key, entry),
+});
+
 /** In-memory cache for testing. Entries are lost when the process exits. */
 export class MemCache implements Cache {
   private entries = new Map<string, CacheEntry>();

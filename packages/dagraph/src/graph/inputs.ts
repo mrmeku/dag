@@ -100,9 +100,7 @@ export function resolveValue(
   if (isOutputRef(value)) {
     const entry = depEntries[value.node];
     if (entry === undefined) return undefined;
-    const outputs = entry.outputs;
-    const paths =
-      typeof outputs === "object" && !Array.isArray(outputs) ? outputs[value.output] : undefined;
+    const paths = entry.outputs[value.output];
     if (paths === undefined) throw new Error(`"${value.node}" has no output "${value.output}"`);
     return Array.isArray(paths) ? paths.map(handle) : handle(paths);
   }

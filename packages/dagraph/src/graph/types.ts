@@ -1,26 +1,19 @@
-/** What an action returns: a path, a list of paths, or a record of either, all under its outputDir. */
-export type Outputs = string | string[] | Record<string, string | string[]>;
+/** What an action returns: named outputs, each a path or a list of paths under its outputDir. */
+export type Outputs = Record<string, string | string[]>;
 
 const isPaths = (value: unknown): value is string | string[] =>
   typeof value === "string" || (Array.isArray(value) && value.every((v) => typeof v === "string"));
 
 /** Whether a value read back, such as a cache entry's, is outputs. */
 export const isOutputs = (value: unknown): value is Outputs =>
-  isPaths(value) ||
-  (typeof value === "object" &&
-    value !== null &&
-    !Array.isArray(value) &&
-    Object.values(value).every(isPaths));
+  typeof value === "object" &&
+  value !== null &&
+  !Array.isArray(value) &&
+  Object.values(value).every(isPaths);
 
-/** A node's outputs when they are one path, as its result holds them; refused otherwise. */
-export function soleOutput(outputs: Outputs): string {
-  if (typeof outputs !== "string") throw new Error("the node's outputs are not one path");
-  return outputs;
-}
-
-/** The path a node's record of outputs holds as `name`; refused when it holds none. */
+/** The path a node's outputs hold as `name`; refused when they hold none. */
 export function namedOutput(outputs: Outputs, name: string): string {
-  const path = typeof outputs === "object" && !Array.isArray(outputs) ? outputs[name] : undefined;
+  const path = outputs[name];
   if (typeof path !== "string") throw new Error(`the node's outputs hold no path "${name}"`);
   return path;
 }
@@ -100,28 +93,26 @@ export type SettledOutputRef<T extends string | string[] = string | string[], S 
 /** The output `K` where every return holds it, and an index signature does not name it. */
 type RequiredOutput<T, K extends keyof T> = Record<never, never> extends Pick<T, K> ? never : K;
 
-type OutputRefs<T, S, Settled extends boolean> = [T] extends [Record<string, string | string[]>]
-  ? {
-      readonly [K in keyof T as RequiredOutput<T, K>]: Settled extends true
-        ? SettledOutputRef<T[K], S>
-        : OutputRef<T[K], S>;
-    }
-  : Record<never, never>;
+type OutputRefs<T extends Outputs, S, Settled extends boolean> = {
+  readonly [K in keyof T as RequiredOutput<T, K>]: Settled extends true
+    ? SettledOutputRef<T[K], S>
+    : OutputRef<T[K], S>;
+};
 
 /**
  * What a node's `inputs` function receives: each dep it declares, by role, as a ref to each of
  * the dep's outputs, an `OutputRef` for a required dep and a `SettledOutputRef` for a `settled`
- * one. A dep whose outputs are not a record has no refs. The refs of a dep cannot be listed, as
- * by a spread, since its outputs' names exist only in the types: name each one, `pack.tarball`.
- * An output that some return of the dep leaves out, or that an index signature names, has no ref:
- * the action reads it from `depOutputs`, where it is `| undefined`.
+ * one. The refs of a dep cannot be listed, as by a spread, since its outputs' names exist only in
+ * the types: name each one, `pack.tarball`. An output that some return of the dep leaves out, or
+ * that an index signature names, has no ref: the action reads it from `depOutputs`, where it is
+ * `| undefined`.
  */
 export type DepRefs<D, S> = { readonly [K in keyof D]: RefsOf<D[K], S> };
 
 type RefsOf<R, S> =
-  R extends SettledRef<infer T>
+  R extends SettledRef<infer T extends Outputs>
     ? OutputRefs<T, S, true>
-    : R extends NodeRef<infer T>
+    : R extends NodeRef<infer T extends Outputs>
       ? OutputRefs<T, S, false>
       : R;
 
@@ -198,19 +189,10 @@ export type FileHandle = {
   hash(): Promise<string>;
 } & NotAString;
 
-/**
- * Outputs as an action reads them: each path a `FileHandle`, a list or a record as such, and a
- * failed settled dep's `undefined` as is.
- */
-export type Handles<T> = T extends string
-  ? FileHandle
-  : T extends string[]
-    ? FileHandle[]
-    : T extends Record<string, string | string[]>
-      ? { [K in keyof T]: Handles<T[K]> }
-      : T extends undefined
-        ? undefined
-        : never;
+/** Outputs as an action reads them: each path a `FileHandle`, each list of paths a list of them. */
+export type Handles<T extends Outputs> = { [K in keyof T]: PathHandles<T[K]> };
+
+type PathHandles<P> = P extends string ? FileHandle : P extends string[] ? FileHandle[] : P;
 
 const nodeRefusal = (name: string, settled = false) =>
   `node "${name}" can't be part of a string. Put it in deps` +
@@ -260,8 +242,8 @@ type Role<X> = X extends () => infer R ? R : X;
 
 /**
  * A role that more than one action fills, by the outputs its nodes return. It names only a type,
- * so it goes uncalled: `deps: { image: dep<string> }`. Where one action fills the role, name that
- * action: `deps: { fetch }`.
+ * so it goes uncalled: `deps: { image: dep<{ image: string }> }`. Where one action fills the role,
+ * name that action: `deps: { fetch }`.
  */
 export function dep<T extends Outputs>(): Dep<T> {
   return { [DEP]: true };
@@ -271,7 +253,7 @@ export function dep<T extends Outputs>(): Dep<T> {
  * Mark a dep its node runs without: when it does not succeed, its role is `undefined`. An action
  * declares the role with it, around the action that fills it, `deps: { captions:
  * settled(captions) }`, or uncalled, by the outputs of a role more than one action fills, `deps:
- * { captions: settled<string> }`. Its node marks the ref it gives, `deps: { captions:
+ * { captions: settled<{ srt: string }> }`. Its node marks the ref it gives, `deps: { captions:
  * settled(captionsRef) }`: a role declared one way takes no ref of the other.
  */
 export function settled<T extends Outputs>(ref: NodeRef<T>): SettledRef<T>;
@@ -287,8 +269,9 @@ const MAYBE: unique symbol = Symbol.for("@mrmeku/dagraph/maybe");
 
 /**
  * Mark a role that a node may leave out: around the action that fills it, `deps: { summary:
- * maybe(summarize) }`, or uncalled, by its outputs, `deps: { summary: maybe<string> }`. Its
- * outputs are `undefined` when the node gives no dep, so the action checks before it reads them.
+ * maybe(summarize) }`, or uncalled, by its outputs, `deps: { summary: maybe<{ text: string }> }`.
+ * Its outputs are `undefined` when the node gives no dep, so the action checks before it reads
+ * them.
  */
 export function maybe<T extends Outputs>(dep: SettledDep<T>): SettledDep<T> | undefined;
 export function maybe<T extends Outputs>(dep: Dep<T>): Dep<T> | undefined;
@@ -400,9 +383,9 @@ export type DepOutputsOf<D> = {
 export type Resolved<V> = V extends FileInput
   ? FileHandle
   : V extends SettledOutputRef<infer T>
-    ? Handles<T> | undefined
+    ? PathHandles<T> | undefined
     : V extends OutputRef<infer T>
-      ? Handles<T>
+      ? PathHandles<T>
       : V extends readonly (infer U)[]
         ? Resolved<U>[]
         : V extends object

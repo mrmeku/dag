@@ -29,8 +29,15 @@ const NODES = [
 ];
 
 const RESULTS: [Result, Result, Result, Result] = [
-  { name: "a", actionKey: "k1", status: "done", outputs: "x", contentHash: "h", elapsed: 400 },
-  { name: "b", actionKey: "k2", status: "cached", outputs: "y", contentHash: "h" },
+  {
+    name: "a",
+    actionKey: "k1",
+    status: "done",
+    outputs: { out: "x" },
+    contentHash: "h",
+    elapsed: 400,
+  },
+  { name: "b", actionKey: "k2", status: "cached", outputs: { out: "y" }, contentHash: "h" },
   {
     name: "c",
     actionKey: "k3",

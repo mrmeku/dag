@@ -5,7 +5,7 @@ import { isSucceeded, type Result } from "./types.ts";
 /** A node the scheduler may take: ready to be processed, or a miss waiting for its group's slot. */
 export interface Ready<Meta = unknown> {
   node: Node<Meta>;
-  acquiring: boolean;
+  waitingForSlot: boolean;
 }
 
 /** Build the reverse adjacency list: for each node, which nodes depend on it. */
@@ -59,7 +59,7 @@ export class ExecState<Meta = unknown> {
     this.priority = rootPriorities(allNodes);
     this.ready = allNodes
       .filter((n) => n.deps.length === 0)
-      .map((node) => ({ node, acquiring: false }));
+      .map((node) => ({ node, waitingForSlot: false }));
   }
 
   private priorityOf(node: Node<Meta>): number {
@@ -81,9 +81,9 @@ export class ExecState<Meta = unknown> {
     return taken ?? null;
   }
 
-  /** A miss waits for its group's slot: it is ready again, acquiring. */
+  /** A miss waits for its group's slot: it is ready again, waiting for its slot. */
   waitForSlot(node: Node<Meta>): void {
-    this.enqueue([{ node, acquiring: true }]);
+    this.enqueue([{ node, waitingForSlot: true }]);
   }
 
   /** Record a node's result, and make ready each dependent whose deps have all settled. */
@@ -95,7 +95,7 @@ export class ExecState<Meta = unknown> {
     const children = (this.dependents.get(node.name) ?? []).filter(
       (child) => !this.results.has(child.name) && child.deps.every((d) => this.results.has(d)),
     );
-    this.enqueue(children.map((child) => ({ node: child, acquiring: false })));
+    this.enqueue(children.map((child) => ({ node: child, waitingForSlot: false })));
   }
 
   get hasReady(): boolean {

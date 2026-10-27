@@ -63,17 +63,17 @@ export function throttledScheduler(opts?: ThrottledSchedulerOptions): Scheduler 
 
   let inflight = 0;
   const groupInflight = new Map<string, number>();
-  const count = ({ node, acquiring }: Ready, delta: number) => {
+  const count = ({ node, waitingForSlot }: Ready, delta: number) => {
     inflight += delta;
     const group = node.concurrencyGroup;
-    if (acquiring && group) groupInflight.set(group, (groupInflight.get(group) ?? 0) + delta);
+    if (waitingForSlot && group) groupInflight.set(group, (groupInflight.get(group) ?? 0) + delta);
   };
 
   return schedulingLoop({
-    admits({ node, acquiring }) {
+    admits({ node, waitingForSlot }) {
       if (inflight >= maxParallelism) return false;
       const group = node.concurrencyGroup;
-      if (!acquiring || !group) return true;
+      if (!waitingForSlot || !group) return true;
       return (groupInflight.get(group) ?? 0) < (concurrencyLimits[group] ?? Infinity);
     },
     onRun: (ready) => count(ready, 1),

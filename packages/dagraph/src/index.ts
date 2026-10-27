@@ -1,6 +1,13 @@
 // The API reference's name for this entry point: TypeDoc names the "." export "".
 /** @module index */
-export { FsCache, MemCache, type Cache, type CacheEntry, type DagFs } from "./cache.ts";
+export {
+  FsCache,
+  MemCache,
+  forcedCache,
+  type Cache,
+  type CacheEntry,
+  type DagFs,
+} from "./cache.ts";
 export {
   actionsFor,
   defineAction,
@@ -23,7 +30,6 @@ export {
   notAString,
   requiredDeps,
   settled,
-  soleOutput,
 } from "./graph/index.ts";
 export type {
   ActionContext,
@@ -57,7 +63,16 @@ export {
   type SchedulerContext,
 } from "./orchestrate.ts";
 export { createMemoryDagFs, type MemoryDagFs } from "./ports/memory-fs.ts";
-export { NOT_CACHED, processNode, ungated, type ExecutionContext } from "./process-node.ts";
+export {
+  localRunNode,
+  lookupNode,
+  processNode,
+  runAction,
+  type ExecutionContext,
+  type Lookup,
+  type Miss,
+  type RunActionOptions,
+} from "./process-node.ts";
 export {
   throttledScheduler,
   unboundedScheduler,

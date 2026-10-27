@@ -36,18 +36,18 @@ const count = defineAction({
   inputs: { version: 1 },
   nodeInputs: nodeInputs<{ text: string }>,
   action: async ({ inputs, outputDir }) => {
-    const path = join(outputDir, "count.txt");
-    await writeFile(path, String(inputs.text.split(/\s+/).length));
-    return path;
+    const words = join(outputDir, "count.txt");
+    await writeFile(words, String(inputs.text.split(/\s+/).length));
+    return { words };
   },
 });
 const report = defineAction({
   kind: "report",
   deps: { count },
   action: async ({ depOutputs, outputDir }) => {
-    const path = join(outputDir, "report.txt");
-    await writeFile(path, `${await depOutputs.count.text()} words`);
-    return path;
+    const sentence = join(outputDir, "report.txt");
+    await writeFile(sentence, `${await depOutputs.count.words.text()} words`);
+    return { sentence };
   },
 });
 
@@ -79,7 +79,7 @@ The first time, both of them do the job. The second time nothing changed, so nob
 
 ## How it works
 
-An **action** is a kind of work, defined once with `defineAction`. Its `kind` names its logic. Its `deps` name the actions whose outputs it reads, each under a **role**. Its function returns the files it wrote. A **node** is one use of an action in a `Graph`. `addNode` returns a typed **ref** that you hand to the nodes that depend on it. A node can depend only on refs that already exist, so no cycle can be written.
+An **action** is a kind of work, defined once with `defineAction`. Its `kind` names its logic. Its `deps` name the actions whose outputs it reads, each under a **role**. Its function returns the files it wrote, each under a name. A **node** is one use of an action in a `Graph`. `addNode` returns a typed **ref** that you hand to the nodes that depend on it. A node can depend only on refs that already exist, so no cycle can be written.
 
 A node's **action key** is a hash of its action's kind, its inputs and its dependencies' content by role, and nothing else. So when you change an action's logic, bump an input such as `version`. Outputs live in a content-addressed store, the **CAS**, under the context's `casBaseDir`. A dependent keys on what its dependency produced, not on whether it ran. That is **early cutoff**, and it is why `report` stayed `cached` on the third run.
 

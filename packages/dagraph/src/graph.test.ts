@@ -19,7 +19,7 @@ import {
   type OutputRef,
 } from "./graph/index.ts";
 import { createMemoryDagFs } from "./ports/memory-fs.ts";
-import { processNode, ungated } from "./process-node.ts";
+import { processNode } from "./process-node.ts";
 import { isSucceeded } from "./types.ts";
 import { errorMessage } from "./utils.ts";
 
@@ -46,7 +46,7 @@ const download = defineActionWithPorts({
 const captions = defineActionWithPorts({
   kind: "captions",
   deps: { download },
-  action: async (): Promise<string> => {
+  action: async (): Promise<{ vtt: string }> => {
     throw new Error("no captions");
   },
 });
@@ -55,18 +55,18 @@ const entry = defineActionWithPorts({
   deps: { download, captions: settled(captions) },
   cacheable: false,
   action: async (c) => {
-    const path = `${c.outputDir}/entry.json`;
-    await c.ports.fs.writeText(path, "{}");
-    return path;
+    const entry = `${c.outputDir}/entry.json`;
+    await c.ports.fs.writeText(entry, "{}");
+    return { entry };
   },
 });
 const feed = defineActionWithPorts({
   kind: "feed",
   deps: anyRole,
   action: async (c) => {
-    const path = `${c.outputDir}/feed.xml`;
-    await c.ports.fs.writeText(path, "<rss/>");
-    return path;
+    const feed = `${c.outputDir}/feed.xml`;
+    await c.ports.fs.writeText(feed, "<rss/>");
+    return { feed };
   },
 });
 
@@ -113,7 +113,7 @@ describe("declarations", () => {
     const versioned = defineActionWithPorts({
       kind: "versioned",
       inputs: { version: 1 },
-      action: async () => "",
+      action: async () => ({}),
     });
     class Prompt {
       constructor(readonly text: string) {}
@@ -122,8 +122,8 @@ describe("declarations", () => {
     const prompt: { readonly text: string } = new Prompt("clean");
     const optional = defineActionWithPorts({
       kind: "optional",
-      deps: { dl: maybe(download), text: maybe<string> },
-      action: async () => "",
+      deps: { dl: maybe(download), text: maybe<{ prose: string }> },
+      action: async () => ({}),
     });
     // Steps in the wrong order: the first reads a ref that the second assigns.
     let later: NodeRef<{ audio: string }>;
@@ -191,7 +191,7 @@ describe("declarations", () => {
   });
 
   test("defineAction refuses a timeoutMs setTimeout does not honor, and NaN in its inputs", () => {
-    const action = async () => "";
+    const action = async () => ({});
     const timeout = (timeoutMs: number) => () => defineAction({ kind: "t", timeoutMs, action });
     expect({
       timeouts: [0, -1, 1.5, Number.NaN, Infinity, 2 ** 31, 1, 2 ** 31 - 1].map((t) =>
@@ -319,9 +319,8 @@ describe("graphs", () => {
     };
     const oneVideo = new Graph<Ports, Meta>();
     addVideo(oneVideo, "v2");
-    const options = { acquire: ungated };
-    const viaOneVideo = await processNode(oneVideo, "v2:download", {}, ctx, options);
-    const failedDep = await processNode(oneVideo, "v2:captions", {}, ctx, options);
+    const viaOneVideo = await processNode(oneVideo, "v2:download", {}, ctx);
+    const failedDep = await processNode(oneVideo, "v2:captions", {}, ctx);
     const downloadEntry = entryOf("v2:download");
     assert.ok(downloadEntry, "v2:download's entry");
     const settledMissing = await processNode(
@@ -329,10 +328,9 @@ describe("graphs", () => {
       "v2:entry",
       { "v2:download": downloadEntry },
       ctx,
-      options,
     );
     let refused = "";
-    await processNode(oneVideo, "v1:download", {}, ctx, options).catch(
+    await processNode(oneVideo, "v1:download", {}, ctx).catch(
       (e: unknown) => (refused = errorMessage(e)),
     );
     const downloaded = results.find((r) => r.name === "v2:download");
@@ -347,7 +345,7 @@ describe("graphs", () => {
       failedDep: { name: "v2:captions", actionKey: "", status: "dep-failed", dep: "v2:download" },
       settledMissing: "done",
       refused:
-        'processNode: the graph holds no node "v1:download". Pass a graph that holds it: the whole graph, a closure of it, or any graph that declares the node the same way. A key is local to its node, so each gives it the same key.',
+        'the graph holds no node "v1:download". Pass a graph that holds it: the whole graph, a closure of it, or any graph that declares the node the same way. A key is local to its node, so each gives it the same key.',
     });
   });
 });
@@ -366,9 +364,9 @@ describe("refs", () => {
       kind: "read",
       deps: anyRole,
       action: async (c) => {
-        const path = `${c.outputDir}/read.txt`;
-        await c.ports.fs.writeText(path, "read");
-        return path;
+        const read = `${c.outputDir}/read.txt`;
+        await c.ports.fs.writeText(read, "read");
+        return { read };
       },
     });
     let output: string[] = [];
@@ -420,13 +418,13 @@ export function wrongDeclarationsDoNotCompile() {
     kind: "cmd",
     deps: anyRole,
     inputs: { version: 1 },
-    action: async () => "",
+    action: async () => ({}),
   });
   const plain = defineActionWithPorts({
     kind: "plain",
     deps: { dl: settled(download) },
     nodeInputs: nodeInputs<{ audio: OutputRef<string> }>,
-    action: async () => "",
+    action: async () => ({}),
   });
   // Its outputs are a record, as download's are, under another name.
   const video = defineActionWithPorts({
@@ -444,7 +442,7 @@ export function wrongDeclarationsDoNotCompile() {
   const maybeDownload = defineActionWithPorts({
     kind: "m",
     deps: { dl: maybe(download) },
-    action: async () => "",
+    action: async () => ({}),
   });
   maybeDownload.addNode(g, { name: "left out" });
   // Deps in a variable, each a role its action declares.
@@ -453,17 +451,17 @@ export function wrongDeclarationsDoNotCompile() {
   // An action that takes any role takes the roles a node names.
   feed.addNode(g, { name: "named", deps: { dl, feedRef } });
   // An action that needs no ports goes on a graph that gives none, and on one that gives some.
-  const portless = defineAction({ kind: "portless", action: async () => "" });
+  const portless = defineAction({ kind: "portless", action: async () => ({}) });
   portless.addNode(new Graph(), {});
   portless.addNode(g, {});
   // An action goes where one that needs more ports is expected.
-  const needsPorts: Action<Ports, string>[] = [portless];
+  const needsPorts: Action<Ports, Record<never, never>>[] = [portless];
   // A returned template string is a path, so a role it declares takes any node that returns one.
   const written = defineActionWithPorts({
     kind: "written",
-    action: async ({ outputDir }) => `${outputDir}/out.txt`,
+    action: async ({ outputDir }) => ({ feed: `${outputDir}/out.txt` }),
   });
-  defineActionWithPorts({ kind: "reads", deps: { written }, action: async () => "" }).addNode(g, {
+  defineActionWithPorts({ kind: "reads", deps: { written }, action: async () => ({}) }).addNode(g, {
     deps: { written: feedRef },
   });
   // Own inputs typed by an index signature name no input, so a node's inputs still compile.
@@ -472,7 +470,7 @@ export function wrongDeclarationsDoNotCompile() {
     kind: "configured",
     nodeInputs: nodeInputs<{ videoId: string }>,
     inputs: config,
-    action: async () => "",
+    action: async () => ({}),
   }).addNode(g, { inputs: { videoId: "v" } });
   // An input may take a name that every object has.
   cmd.addNode(g, { name: "named inputs", inputs: { constructor: "x", valueOf: 1 } });
@@ -487,7 +485,7 @@ export function wrongDeclarationsDoNotCompile() {
       audio?: OutputRef<string>;
     }>,
     inputs: { version: "translate-v1" },
-    action: async () => "",
+    action: async () => ({}),
   });
   const german = { videoId: "v1", language: "de" };
   translate.addNode(g, { name: "t1", deps: { download: dl }, inputs: german });
@@ -507,20 +505,24 @@ export function wrongDeclarationsDoNotCompile() {
   defineActionWithPorts({
     kind: "tagged",
     nodeInputs: nodeInputs<Record<string, string>>,
-    action: async () => "",
+    action: async () => ({}),
   }).addNode(g, { name: "tags", inputs: { anything: "x" } });
   // A node gives the names of one member where nodeInputs is a union of records.
   defineActionWithPorts({
     kind: "source",
     nodeInputs: nodeInputs<{ from: "youtube"; videoId: string } | { from: "disk"; path: string }>,
-    action: async () => "",
+    action: async () => ({}),
   }).addNode(g, { name: "from disk", inputs: { from: "disk", path: "a.mp3" } });
   // A marker that names only a type goes uncalled, and called it means the same.
   defineActionWithPorts({
     kind: "called",
     nodeInputs: nodeInputs<{ videoId: string }>(),
-    deps: { chapters: dep<string>(), captions: settled<string>(), summary: maybe<string>() },
-    action: async () => "",
+    deps: {
+      chapters: dep<{ feed: string }>(),
+      captions: settled<{ feed: string }>(),
+      summary: maybe<{ feed: string }>(),
+    },
+    action: async () => ({}),
   }).addNode(g, {
     inputs: { videoId: "v" },
     deps: { chapters: feedRef, captions: settled(feedRef) },
@@ -555,15 +557,15 @@ export function wrongDeclarationsDoNotCompile() {
   // @ts-expect-error a missing dep: captions reads download
   captions.addNode(g, { name: "m" });
   // @ts-expect-error a role declared by no action and no dep()
-  defineActionWithPorts({ kind: "bare", deps: { source: {} }, action: async () => "" });
+  defineActionWithPorts({ kind: "bare", deps: { source: {} }, action: async () => ({}) });
   // @ts-expect-error a role declared by a node: an action declares a role by an action or dep()
-  defineActionWithPorts({ kind: "by ref", deps: { source: dl }, action: async () => "" });
+  defineActionWithPorts({ kind: "by ref", deps: { source: dl }, action: async () => ({}) });
   // @ts-expect-error an action's own inputs are JSON too
-  defineAction({ kind: "limits", inputs: { limits: new Set<string>() }, action: async () => "" });
+  defineAction({ kind: "limits", inputs: { limits: new Set<string>() }, action: async () => ({}) });
   // @ts-expect-error a group its program does not name: actionsFor<Ports, "ytdlp">()
-  defineActionWithPorts({ kind: "misspelt", concurrencyGroup: "ytdl", action: async () => "" });
+  defineActionWithPorts({ kind: "misspelt", concurrencyGroup: "ytdl", action: async () => ({}) });
   // @ts-expect-error a group where its program names none: actionsFor<Ports, "ytdlp">()
-  defineAction({ kind: "ungrouped", concurrencyGroup: "ytdlp", action: async () => "" });
+  defineAction({ kind: "ungrouped", concurrencyGroup: "ytdlp", action: async () => ({}) });
   // @ts-expect-error a ref to a dep the node does not declare: its deps hold no mirror
   cmd.addNode(g, { deps: { dl }, inputs: (_deps: { mirror: unknown }) => ({}) });
   // @ts-expect-error a ref that another node's function received
@@ -574,7 +576,7 @@ export function wrongDeclarationsDoNotCompile() {
   download.addNode(g, { name: "x" });
   // @ts-expect-error a node input of the wrong type: videoId is a string
   download.addNode(g, { name: "x2", inputs: { videoId: 1 } });
-  // @ts-expect-error a dep from the wrong action: feed's output is a path, not download's record
+  // @ts-expect-error a dep from the wrong action: feed's record holds no audio
   captions.addNode(g, { name: "y", deps: { download: feedRef } });
   // @ts-expect-error a dep from the wrong action: video's record holds no audio
   captions.addNode(g, { name: "y2", deps: { download: video } });
@@ -588,7 +590,7 @@ export function wrongDeclarationsDoNotCompile() {
     action: async ({ depOutputs }) => {
       // @ts-expect-error a misspelt output: download returns audio
       void depOutputs.download.audoi;
-      return "";
+      return {};
     },
   });
   defineActionWithPorts({
@@ -601,38 +603,38 @@ export function wrongDeclarationsDoNotCompile() {
         return "";
       },
     },
-    action: async () => "",
+    action: async () => ({}),
   });
   defineActionWithPorts({
     kind: "misspelt",
     deps: { download },
     // @ts-expect-error a fingerprint for a role the action does not declare
     invalidateOn: { mirror: () => "" },
-    action: async () => "",
+    action: async () => ({}),
   });
   defineActionWithPorts({
     kind: "unchecked",
     deps: { captions: settled(captions) },
     // @ts-expect-error a settled dep's outputs used as present: it may have failed
-    action: async ({ depOutputs }) => depOutputs.captions.text(),
+    action: async ({ depOutputs }) => ({ vtt: depOutputs.captions.vtt.path }),
   });
   defineActionWithPorts({
     kind: "unchecked",
     deps: { download: maybe(download) },
     // @ts-expect-error a maybe role's outputs used as present: a node may leave it out
-    action: async ({ depOutputs }) => depOutputs.download.audio.path,
+    action: async ({ depOutputs }) => ({ audio: depOutputs.download.audio.path }),
   });
   defineActionWithPorts({
     kind: "unchecked",
-    deps: { captions: settled<string> },
+    deps: { captions: settled<{ vtt: string }> },
     // @ts-expect-error a settled role declared by its type, used as present: it may have failed
-    action: async ({ depOutputs }) => depOutputs.captions.text(),
+    action: async ({ depOutputs }) => ({ vtt: depOutputs.captions.vtt.path }),
   });
   defineActionWithPorts({
     kind: "unchecked",
-    deps: { summary: maybe<string> },
+    deps: { summary: maybe<{ prose: string }> },
     // @ts-expect-error a maybe role declared by its type, used as present: a node may leave it out
-    action: async ({ depOutputs }) => depOutputs.summary.text(),
+    action: async ({ depOutputs }) => ({ prose: depOutputs.summary.prose.path }),
   });
   // @ts-expect-error params hold no videoId: it is an input
   download.addNode(g, { name: "p", inputs: { videoId: "v" }, videoId: "v" });
@@ -664,7 +666,7 @@ export function wrongDeclarationsDoNotCompile() {
   // @ts-expect-error a graph typed as one whose nodes carry other meta
   const otherMeta: Graph<Ports, Meta | { other: true }> = g;
   // @ts-expect-error an action typed as one that needs no ports: its type is typeof written
-  const portlessAction: Action<unknown, string> = written;
+  const portlessAction: Action<unknown, { feed: string }> = written;
   // @ts-expect-error an action typed as one whose nodes give no inputs: download's give a videoId
   const noInputs: Action<Ports, { audio: string }> = download;
   void [needsPorts, portlessGraph, otherMeta, portlessAction, noInputs];
@@ -696,8 +698,6 @@ export function wrongDeclarationsDoNotCompile() {
   });
   // @ts-expect-error a bare name is a list of its characters: closure(g, ["v1:entry"])
   void closure(g, "v1:entry");
-  // @ts-expect-error a processNode that drops its RunNode's acquire runs past its group's limit
-  void processNode(g, "v1:download", {}, setup().ctx, { force: true });
   translate.addNode(g, {
     name: "x1",
     deps: { download: dl },

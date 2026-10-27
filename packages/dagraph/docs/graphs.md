@@ -40,26 +40,26 @@ const translate = defineActionWithPorts({
   kind: "translate",
   deps: { page: fetchPage },
   action: async ({ depOutputs, outputDir, ports }) => {
-    const out = `${outputDir}/fr.html`;
-    await ports.fs.writeText(out, (await depOutputs.page.html.text()).toUpperCase());
-    return out;
+    const html = `${outputDir}/fr.html`;
+    await ports.fs.writeText(html, (await depOutputs.page.html.text()).toUpperCase());
+    return { html };
   },
 });
 
 const summarize = defineActionWithPorts({
   kind: "summarize",
-  deps: { page: fetchPage, translation: settled(translate), notes: maybe<string> },
+  deps: { page: fetchPage, translation: settled(translate), notes: maybe<{ notes: string }> },
   nodeInputs: nodeInputs<{ style: FileInput; argv: (string | OutputRef<string>)[] }>,
   action: async ({ inputs, depOutputs, outputDir, ports }) => {
     const style = await inputs.style.text();
     const argv = inputs.argv.map((a) => (typeof a === "string" ? a : a.path));
-    const translated = depOutputs.translation ? await depOutputs.translation.text() : "none";
-    const out = `${outputDir}/summary.txt`;
+    const translated = depOutputs.translation ? await depOutputs.translation.html.text() : "none";
+    const summary = `${outputDir}/summary.txt`;
     await ports.fs.writeText(
-      out,
-      [style, argv.length, translated, depOutputs.notes?.path ?? "no notes"].join(" | "),
+      summary,
+      [style, argv.length, translated, depOutputs.notes?.notes.path ?? "no notes"].join(" | "),
     );
-    return out;
+    return { summary };
   },
 });
 
@@ -112,7 +112,7 @@ flowchart LR
 
 In the spec, `kind` names the action's logic and joins every node's cache key. `action` is `async (context) => outputs`. `deps` declares the roles each node fills, `nodeInputs` the inputs each node gives, and `inputs` the ones every node shares, such as `{ version: 1 }`. `invalidateOn` and `cacheable` change what the key covers and whether a node is cached at all ([When a node runs again](caching.md)). `concurrencyGroup` and `timeoutMs` change how it runs ([Run a graph](execution.md)).
 
-The action's context holds `inputs`, `depOutputs`, `ports`, `outputDir`, a `signal` that fires on a timeout or a cancel, and `output(chunk)` for text it prints. The action returns its outputs: one path, a list of paths, or a record whose values are a path or a list. The output type is exactly what it returns. So `fetchPage` has outputs `{ html: string }`, and `translate` can read `depOutputs.page.html`. Only `inputs` and `depOutputs` join the key, not the function, so a change to the action's logic needs a bump to an input such as `version`.
+The action's context holds `inputs`, `depOutputs`, `ports`, `outputDir`, a `signal` that fires on a timeout or a cancel, and `output(chunk)` for text it prints. The action returns its outputs as a record of names, each a path or a list of paths. The output type is exactly what it returns. So `fetchPage` has outputs `{ html: string }`, and `translate` can read `depOutputs.page.html`. Only `inputs` and `depOutputs` join the key, not the function, so a change to the action's logic needs a bump to an input such as `version`.
 
 You add a node through its action, never the graph: `fetchPage.addNode(graph, { name, meta, deps, inputs })`. It returns a ref, the typed handle you give to the nodes that depend on it.
 
@@ -155,7 +155,7 @@ To test one action, add one node of it to a fresh `Graph<Ports>` and execute it 
 
 An action with a required role can't be added alone. Add a node for that role first, as the example adds each `fetch` before its `translate`.
 
-Then read the output. Narrow the result with `isSucceeded`, and take its path with `soleOutput(result.outputs)`, or with `namedOutput(result.outputs, name)` for a record. Look that path up in the memory file system's `.files`, a `Map` from path to contents. [Run a graph](execution.md) covers the context and results.
+Then read the output. Narrow the result with `isSucceeded`, and take a path with `namedOutput(result.outputs, name)`. Look that path up in the memory file system's `.files`, a `Map` from path to contents. [Run a graph](execution.md) covers the context and results.
 
 ## Names, subgraphs and meta
 

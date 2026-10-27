@@ -5,7 +5,7 @@ import { cp, mkdir, mkdtemp, realpath, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join, relative } from "node:path";
 
-import { FsCache, MemCache, type Cache, type DagFs } from "./cache.ts";
+import { forcedCache, FsCache, MemCache, type Cache, type DagFs } from "./cache.ts";
 import { actionsFor } from "./define-action.ts";
 import { execute } from "./execute.ts";
 import { fileHandle } from "./file-handle.ts";
@@ -17,7 +17,6 @@ import {
   namedOutput,
   nodeInputs,
   settled,
-  soleOutput,
   type ActionContext,
   type DepRecord,
   type DepSpecs,
@@ -48,6 +47,9 @@ const defineActionWithPorts = actionsFor<Ports, Group>();
 /** Deps in any role, as an action declares a record that its nodes name. */
 const anyRole: DepSpecs = {};
 
+/** The outputs of an action that writes one file. */
+type OneFile = { out: string };
+
 async function write(c: { outputDir: string; ports: Ports }, name: string, content: string) {
   const path = `${c.outputDir}/${name}`;
   await c.ports.fs.writeText(path, content);
@@ -70,13 +72,15 @@ function task<Meta, D extends DepRecord = Record<never, never>>(
   g: Graph<Ports, Meta>,
   name: string,
   opts: TaskOptions<D> = {},
-): NodeRef<string> {
+): NodeRef<OneFile> {
   const { deps, inputs, run, ...howToRun } = opts;
   return defineActionWithPorts({
     kind: "task",
     deps: anyRole,
     ...howToRun,
-    action: async (c) => write(c, "out", (await run?.(c)) ?? JSON.stringify(c.inputs)),
+    action: async (c) => ({
+      out: await write(c, "out", (await run?.(c)) ?? JSON.stringify(c.inputs)),
+    }),
   }).addNode(g, {
     name,
     ...(deps && { deps }),
@@ -92,21 +96,23 @@ function setup(cacheOf: (fs: MemoryDagFs) => Cache = () => new MemCache()) {
 
 const statuses = (rs: Result[]) => Object.fromEntries(rs.map((r) => [r.name, r.status]));
 const counts = (rs: Result[]) => ({ ran: tally(rs).done, hit: tally(rs).cached });
-const outputsOf = (r: Result | undefined) => (r && isSucceeded(r) ? soleOutput(r.outputs) : "");
+const outputsOf = (r: Result | undefined) =>
+  r && isSucceeded(r) ? namedOutput(r.outputs, "out") : "";
 /** A result that succeeded; refused when it did not. */
 const succeeded = (r: Result | undefined) => {
   assert.ok(r && isSucceeded(r), `${r?.name ?? "the node"} did not succeed`);
   return r;
 };
-/** A dep's outputs when they are one path. */
+/** The path of a dep's `out`. */
 const depPath = (outputs: Outputs | undefined) => {
   assert.ok(outputs !== undefined, "the dep has outputs");
-  return soleOutput(outputs);
+  return namedOutput(outputs, "out");
 };
-/** The text of a dep's outputs when they are one file. */
+/** The text of a dep's `out`. */
 const depText = (outputs: Handles<Outputs> | undefined) => {
-  assert.ok(isFileHandle(outputs), "the dep's outputs are one file");
-  return outputs.text();
+  const out = outputs?.["out"];
+  assert.ok(isFileHandle(out), "the dep's out is one file");
+  return out.text();
 };
 
 function buildItems(ids: string[]): Graph<Ports, { item: string } | undefined> {
@@ -259,7 +265,7 @@ describe("execute", () => {
     expect({ peak, counts: counts(results) }).toEqual({ peak: 2, counts: { ran: 6, hit: 0 } });
   });
 
-  test("force runs every node, and writes their new entries", async () => {
+  test("a cache whose reads miss runs every node, and its writes are the next run's entries", async () => {
     const { ctx } = setup();
     const build = () => {
       const g = new Graph<Ports>();
@@ -269,7 +275,7 @@ describe("execute", () => {
     };
     expect([
       counts(await execute(build(), ctx)),
-      counts(await execute(build(), ctx, { force: true })),
+      counts(await execute(build(), { ...ctx, cache: forcedCache(ctx.cache) })),
       counts(await execute(build(), ctx)),
     ]).toEqual([
       { ran: 2, hit: 0 },
@@ -287,7 +293,7 @@ describe("the action key", () => {
         kind,
         inputs: { version: 1 },
         ...(group && { concurrencyGroup: group, timeoutMs: 1000 }),
-        action: async (c) => write(c, "out", content),
+        action: async (c) => ({ out: await write(c, "out", content) }),
       });
     const first = new Graph<Ports, { video: string }>();
     make("one", "made by one").addNode(first, { name: "a", meta: { video: "x" } });
@@ -367,7 +373,9 @@ describe("the action key", () => {
     const reader = defineActionWithPorts({
       kind: "reader",
       nodeInputs: nodeInputs<{ id: string; src: FileInput }>,
-      action: async (c) => write(c, "out", `${c.inputs.src.path}: ${await c.inputs.src.text()}`),
+      action: async (c) => ({
+        out: await write(c, "out", `${c.inputs.src.path}: ${await c.inputs.src.text()}`),
+      }),
     });
     const run = async (add: (g: Graph<Ports>, name: string) => void) => {
       const g = new Graph<Ports>();
@@ -399,7 +407,7 @@ describe("the action key", () => {
       kind: "reader",
       deps: anyRole,
       nodeInputs: nodeInputs<{ id: string; src: FileInput }>,
-      action: async (c) => write(c, "out", await c.inputs.src.text()),
+      action: async (c) => ({ out: await write(c, "out", await c.inputs.src.text()) }),
     });
     const run = async (generated: string) => {
       await fs.writeText("/src/gen.ts", "old");
@@ -437,7 +445,7 @@ describe("the action key", () => {
       invalidateOn: { pack: (outputs) => outputs.notes.text() },
       action: async (c) => {
         const argv = c.inputs.cmd.map((arg) => (typeof arg === "string" ? arg : arg.path));
-        return write(c, "cmd.json", JSON.stringify(argv));
+        return { out: await write(c, "cmd.json", JSON.stringify(argv)) };
       },
     });
     const run = async (version: string) => {
@@ -468,9 +476,9 @@ describe("the action key", () => {
     const src = task(g, "src");
     defineActionWithPorts({
       kind: "keyed",
-      deps: { src: dep<string> },
+      deps: { src: dep<OneFile> },
       invalidateOn: { src: () => JSON.stringify(undefined) },
-      action: async (c) => write(c, "out", "x"),
+      action: async (c) => ({ out: await write(c, "out", "x") }),
     }).addNode(g, { deps: { src } });
     const keyed = (await execute(g, ctx)).find((r) => r.name === "keyed");
     expect(keyed?.status === "failed" && keyed.error.message).toBe(
@@ -590,13 +598,13 @@ describe("refs and outputs in the key", () => {
     const src = task(g, "src");
     defineActionWithPorts({
       kind: "fingerprinted",
-      deps: { src: dep<string> },
+      deps: { src: dep<OneFile> },
       invalidateOn: {
         src: () => {
           throw new Error("cannot fingerprint");
         },
       },
-      action: async (c) => write(c, "out", "x"),
+      action: async (c) => ({ out: await write(c, "out", "x") }),
     }).addNode(g, { deps: { src } });
     const results = await execute(g, ctx);
     expect(
@@ -616,15 +624,10 @@ describe("refs and outputs in the key", () => {
 });
 
 describe("file handles", () => {
-  test("an action reads each dep's outputs as handles in their shape, a file, a list or a record of either, and isFileHandle tells a handle from the others", async () => {
+  test("an action reads each dep's outputs as handles, a file for a path and a list for a list, and isFileHandle tells a handle from the others", async () => {
     const { ctx } = setup();
     type Notes = { notes: string; parts: string[] };
     const g = new Graph<Ports>();
-    const one = task(g, "one", { run: () => "one" });
-    const list = defineActionWithPorts({
-      kind: "list",
-      action: async (c) => [await write(c, "a", "A"), await write(c, "b", "B")],
-    }).addNode(g, {});
     const record = defineActionWithPorts({
       kind: "record",
       action: async (c) => ({
@@ -635,42 +638,29 @@ describe("file handles", () => {
     const read = async (h: FileHandle) => [h.path, await h.text()];
     defineActionWithPorts({
       kind: "reads",
-      deps: { one: dep<string>, list: dep<string[]>, record: dep<Notes> },
-      action: async ({ depOutputs: d, ...c }) =>
-        write(
+      deps: { record: dep<Notes> },
+      action: async ({ depOutputs: { record: d }, ...c }) => ({
+        out: await write(
           c,
           "read.json",
           JSON.stringify({
-            one: await read(d.one),
-            list: await Promise.all(d.list.map(read)),
-            record: {
-              notes: await read(d.record.notes),
-              parts: await Promise.all(d.record.parts.map(read)),
-            },
-            isFileHandle: [d.one, d.list, d.record].map(isFileHandle),
+            notes: await read(d.notes),
+            parts: await Promise.all(d.parts.map(read)),
+            isFileHandle: [d.notes, d.parts, d].map(isFileHandle),
           }),
         ),
-    }).addNode(g, { deps: { one, list, record } });
-    const results = await execute(g, ctx);
-    const by = Object.fromEntries(results.map((r) => [r.name, r]));
-    const listed = succeeded(by["list"]).outputs;
-    const recorded = succeeded(by["record"]).outputs;
-    assert.ok(Array.isArray(listed) && typeof recorded === "object" && !Array.isArray(recorded));
-    const parts = recorded["parts"];
+      }),
+    }).addNode(g, { deps: { record } });
+    const [recorded, reads] = await execute(g, ctx);
+    const outputs = succeeded(recorded).outputs;
+    const parts = outputs["parts"];
     assert.ok(Array.isArray(parts));
-    expect(JSON.parse(await ctx.fs.readText(outputsOf(by["reads"])))).toEqual({
-      one: [outputsOf(by["one"]), "one"],
-      list: [
-        [listed[0], "A"],
-        [listed[1], "B"],
+    expect(JSON.parse(await ctx.fs.readText(outputsOf(reads)))).toEqual({
+      notes: [namedOutput(outputs, "notes"), "N"],
+      parts: [
+        [parts[0], "P1"],
+        [parts[1], "P2"],
       ],
-      record: {
-        notes: [namedOutput(recorded, "notes"), "N"],
-        parts: [
-          [parts[0], "P1"],
-          [parts[1], "P2"],
-        ],
-      },
       isFileHandle: [true, false, false],
     });
   });
@@ -699,15 +689,17 @@ describe("file handles", () => {
       deps: { data: dep<{ counted: string; prose: string }> },
       action: async (c) => {
         const { counted, prose } = c.depOutputs.data;
-        return write(
-          c,
-          "parsed.json",
-          JSON.stringify({
-            value: await counted.json(isCount),
-            refused: await refusal(counted.json(isWords)),
-            notJson: await refusal(prose.json(isWords)),
-          }),
-        );
+        return {
+          out: await write(
+            c,
+            "parsed.json",
+            JSON.stringify({
+              value: await counted.json(isCount),
+              refused: await refusal(counted.json(isWords)),
+              notJson: await refusal(prose.json(isWords)),
+            }),
+          ),
+        };
       },
     }).addNode(g, { deps: { data } });
     const [made, parsed] = await execute(g, ctx);
@@ -747,9 +739,9 @@ describe("file handles", () => {
     const src = task(g, "src");
     defineActionWithPorts({
       kind: "converts",
-      deps: { src: dep<string> },
+      deps: { src: dep<OneFile> },
       action: async (c) => {
-        const h = c.depOutputs.src;
+        const h = c.depOutputs.src.out;
         const conversions = [
           // @ts-expect-error -- TS2731, as for a symbol
           () => `${h}`,
@@ -765,7 +757,7 @@ describe("file handles", () => {
           } catch (e) {
             thrown.push(errorMessage(e));
           }
-        return write(c, "out", "x");
+        return { out: await write(c, "out", "x") };
       },
     }).addNode(g, { deps: { src } });
     const [made] = await execute(g, ctx);
@@ -784,7 +776,7 @@ describe("the CAS", () => {
         kind: "m",
         action: async (c) => {
           seen.push(c.outputDir);
-          return write(c, "manifest.json", "an output, not the cache entry");
+          return { out: await write(c, "manifest.json", "an output, not the cache entry") };
         },
       }).addNode(g, {});
       task(g, "broken", {
@@ -813,11 +805,14 @@ describe("the CAS", () => {
     });
   });
 
-  test("a returned path outside the output dir fails the node", async () => {
+  test("a returned path outside the output dir, or outputs that are no record, fail the node", async () => {
     const { ctx } = setup();
     const g = new Graph<Ports>();
     const returning = (name: string, path: (c: ActionContext<Ports>) => Promise<string>) =>
-      defineActionWithPorts({ kind: name, action: path }).addNode(g, {
+      defineActionWithPorts({
+        kind: name,
+        action: async (c) => ({ out: await path(c) }),
+      }).addNode(g, {
         inputs: { id: name },
       });
     returning("escapes", (c) => write(c, "../sibling", "x"));
@@ -825,6 +820,8 @@ describe("the CAS", () => {
       "elsewhere",
       async (c) => (await c.ports.fs.writeText("/elsewhere", "x"), "/elsewhere"),
     );
+    // @ts-expect-error a bare path is no record of outputs: return { out: path }
+    defineActionWithPorts({ kind: "bare", action: async () => "x" }).addNode(g, {});
     const results = await execute(g, ctx);
     expect(
       Object.fromEntries(
@@ -833,7 +830,20 @@ describe("the CAS", () => {
     ).toEqual({
       escapes: "output not under the output dir",
       elsewhere: "output not under the output dir",
+      bare: 'the action returned "x", not a record of outputs',
     });
+  });
+
+  test("FsCache: a manifest whose outputs are no record, as a bare path or a list once stored, reads as a miss", async () => {
+    const fs = createMemoryDagFs();
+    const cache = new FsCache("/cas", fs);
+    const stored = { bare: "/cas/bare/out-1/f", list: ["/cas/list/out-1/f"] };
+    for (const [key, outputs] of Object.entries(stored))
+      await fs.writeText(
+        `/cas/${key}/manifest.json`,
+        JSON.stringify({ outputs, contentHash: "1" }),
+      );
+    expect([await cache.get("bare"), await cache.get("list")]).toEqual([undefined, undefined]);
   });
 
   test("FsCache: a get while a put is half written sees the old entry, then the new one", async () => {
@@ -849,8 +859,8 @@ describe("the CAS", () => {
         await base.writeText(path, content);
       },
     };
-    const old = { outputs: "/cas/k/out-1/f", contentHash: "1" };
-    const next = { outputs: "/cas/k/out-2/f", contentHash: "2" };
+    const old = { outputs: { out: "/cas/k/out-1/f" }, contentHash: "1" };
+    const next = { outputs: { out: "/cas/k/out-2/f" }, contentHash: "2" };
     await new FsCache("/cas", base).put("k", old);
     const cache = new FsCache("/cas", fs);
     const putting = cache.put("k", next);
@@ -867,18 +877,18 @@ describe("the CAS", () => {
     const chapters = defineActionWithPorts({
       kind: "chapters",
       inputs: { version: "chapters-v1" },
-      action: async (c) => write(c, "chapters.json", "[]"),
+      action: async (c) => ({ out: await write(c, "chapters.json", "[]") }),
     });
     const clean = defineActionWithPorts({
       kind: "clean_description",
       inputs: { version: "clean-v1", prompt: "clean" },
-      action: async (c) => write(c, "description.txt", `call ${++calls}`),
+      action: async (c) => ({ out: await write(c, "description.txt", `call ${++calls}`) }),
     });
     const upload = defineActionWithPorts({
       kind: "upload",
       cacheable: false,
       inputs: { version: "upload-v1" },
-      action: async (c) => write(c, "id.txt", `call ${++calls}`),
+      action: async (c) => ({ out: await write(c, "id.txt", `call ${++calls}`) }),
     });
     const build = (videos: string[]) => {
       const g = new Graph<Ports>();
@@ -903,7 +913,7 @@ describe("the CAS", () => {
       entry: both("clean_description").includes(depPath(entry?.outputs)),
       uploaded: await Promise.all(both("upload").map((p) => fs.exists(p))),
     };
-    const next = by(await execute(build(["v1"]), ctx, { force: true }));
+    const next = by(await execute(build(["v1"]), { ...ctx, cache: forcedCache(cache) }));
     const dirsOf = async (node: string) => {
       const r = succeeded(next[`v1:${node}`]);
       const dirs = await fs.readdir(`/cas/${r.actionKey}`);
@@ -959,7 +969,7 @@ describe("the CAS", () => {
     task(g, "a");
     const [r] = await execute(g, { ...ctx, cache: unreachable });
     assert.ok(r, "the node settles");
-    expect([r.status, (await memory.get(r.actionKey))?.outputs === outputsOf(r)]).toEqual([
+    expect([r.status, (await memory.get(r.actionKey))?.outputs["out"] === outputsOf(r)]).toEqual([
       "done",
       true,
     ]);
@@ -991,7 +1001,7 @@ describe("the CAS", () => {
         deps: { written: dep<Written> },
         action: async (c) => {
           seen.handle = c.depOutputs.written.joined.path;
-          return write(c, "out", await c.depOutputs.written.joined.text());
+          return { out: await write(c, "out", await c.depOutputs.written.joined.text()) };
         },
       }).addNode(g, { deps: { written } });
       return g;
@@ -1095,7 +1105,7 @@ describe("the CAS", () => {
     Object.fromEntries(rs.map((r) => [r.name, r.status === "failed" ? r.error.message : r.status]));
 
   for (const [label, createFs] of filesystems)
-    test(`${label} fs: a returned path with no file fails its node, naming the output by its name or as the one path, and the failure is never cached`, async () => {
+    test(`${label} fs: a returned path with no file fails its node, naming the output and its file, and the failure is never cached`, async () => {
       const fs = createFs();
       const casBaseDir = `${await mkdtemp(join(tmpdir(), "dagraph-"))}/cas`;
       const c = { ports: { fs }, cache: new FsCache(casBaseDir, fs), fs, casBaseDir };
@@ -1112,7 +1122,7 @@ describe("the CAS", () => {
         defineActionWithPorts({
           kind: "thumbnail",
           inputs: { id: "thumbnail" },
-          action: async (c) => `${c.outputDir}/art/audio.jpg`,
+          action: async (c) => ({ art: `${c.outputDir}/art/audio.jpg` }),
         }).addNode(g, {});
         return g;
       };
@@ -1124,7 +1134,7 @@ describe("the CAS", () => {
         `Write it at \`\${outputDir}/${file}\` before the action returns.`;
       const failed = {
         download: `output "thumb" (audio.jpg) was not written. ${fix("audio.jpg")}`,
-        thumbnail: `output art/audio.jpg was not written. ${fix("art/audio.jpg")}`,
+        thumbnail: `output "art" (art/audio.jpg) was not written. ${fix("art/audio.jpg")}`,
       };
       expect({ first: errors(first), second: errors(second), entries }).toEqual({
         first: failed,
@@ -1143,7 +1153,7 @@ describe("the CAS", () => {
         kind: "frames",
         action: async (c) => {
           await c.ports.fs.ensureDir(`${c.outputDir}/frames`);
-          return `${c.outputDir}/frames`;
+          return { frames: `${c.outputDir}/frames` };
         },
       }).addNode(g, {});
       const results = await execute(g, c);
@@ -1382,13 +1392,15 @@ describe("a result is plain data", () => {
   });
 
   test("isResult refuses a record that lacks a field its status needs, or whose status no result has", () => {
-    const cached = { name: "a", actionKey: "k", status: "cached", outputs: "/o", contentHash: "h" };
+    const outputs = { out: "/o" };
+    const cached = { name: "a", actionKey: "k", status: "cached", outputs, contentHash: "h" };
     const records = {
       // Only a node that ran has an elapsed time.
       cached,
       doneWithoutElapsed: { ...cached, status: "done" },
-      cachedWithoutHash: { name: "a", actionKey: "k", status: "cached", outputs: "/o" },
-      outputsNotPaths: { ...cached, outputs: 1 },
+      cachedWithoutHash: { name: "a", actionKey: "k", status: "cached", outputs },
+      outputsNotPaths: { ...cached, outputs: { out: 1 } },
+      outputsNotRecord: { ...cached, outputs: "/o" },
       failedWithoutMessage: {
         name: "a",
         actionKey: "k",
@@ -1412,6 +1424,7 @@ describe("a result is plain data", () => {
       doneWithoutElapsed: false,
       cachedWithoutHash: false,
       outputsNotPaths: false,
+      outputsNotRecord: false,
       failedWithoutMessage: false,
       causeNotJson: false,
       depFailedWithoutDep: false,
@@ -1599,7 +1612,7 @@ test("a settled dep: its dependent runs without it, keyed as missing, and runs a
         c.depOutputs.captions === undefined,
         c.inputs.srt?.path === c.depOutputs.captions?.srt.path,
       ]);
-      return write(c, "entry.txt", "entry");
+      return { out: await write(c, "entry.txt", "entry") };
     },
   });
   const run = async () => {
@@ -1634,10 +1647,10 @@ test("a node two roles name is one dep: the dependent runs once with it in both 
   const runs: unknown[] = [];
   const both = defineActionWithPorts({
     kind: "both",
-    deps: { main: dep<string>, after: settled<string> },
+    deps: { main: dep<OneFile>, after: settled<OneFile> },
     action: async (c) => {
-      runs.push(c.depOutputs.main.path === c.depOutputs.after?.path);
-      return write(c, "both.txt", "both");
+      runs.push(c.depOutputs.main.out.path === c.depOutputs.after?.out.path);
+      return { out: await write(c, "both.txt", "both") };
     },
   });
   const run = async () => {

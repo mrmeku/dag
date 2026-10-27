@@ -8,23 +8,23 @@ export type { Ready } from "./exec-state.ts";
 
 /**
  * Processes one node somewhere, given its deps' entries by dep name, and returns its result. On
- * a miss it awaits `acquire`, the gate the scheduler answers once the node's group has a slot,
- * before the action runs. `acquire` rejects once the execution is cancelled. A rejection of
+ * a miss it awaits `waitForSlot` before the action runs, which resolves once the scheduler grants
+ * the node's group a slot, and rejects once the execution is cancelled. A rejection of
  * `RunNode` becomes a failure, as an action's error does, or `cancelled` once the execution is
  * cancelled.
  */
 export type RunNode<Meta = unknown> = (
   node: Node<Meta>,
   depEntries: Record<string, CacheEntry>,
-  acquire: () => Promise<void>,
+  waitForSlot: () => Promise<void>,
 ) => Promise<Result>;
 
 /**
  * What a scheduler drives. `take` returns the first ready node, in orchestration's order, that
  * `filter` admits: a node comes once when it is ready and, when its lookup misses and it has a
- * concurrency group, again `acquiring` its group's slot. `run` hands a ready node to processing,
- * or grants an acquiring one its slot; it resolves once the node settles or, waiting for a slot,
- * gives its place back. `workAvailable` resolves when that may have changed what `take` returns.
+ * concurrency group, again with `waitingForSlot` set. `run` hands a ready node to processing, or
+ * grants a waiting one its slot; it resolves once the node settles or, waiting for a slot, gives
+ * its place back. `workAvailable` resolves when that may have changed what `take` returns.
  */
 export interface SchedulerContext<Meta = unknown> {
   take(filter?: (ready: Ready<Meta>) => boolean): Ready<Meta> | null;
@@ -102,14 +102,14 @@ export async function orchestrate<Meta>(
   const drainCancelled = () => {
     let next: Ready<Meta> | null;
     while ((next = state.take())) {
-      if (next.acquiring) slots.get(next.node.name)?.reject(signal?.reason);
+      if (next.waitingForSlot) slots.get(next.node.name)?.reject(signal?.reason);
       else settle(next.node, { name: next.node.name, actionKey: "", status: "cancelled" });
     }
   };
 
-  const acquireFor = (node: Node<Meta>) => {
-    let gate: Promise<void> | undefined;
-    const waitForSlot = () => {
+  const waitForSlotOf = (node: Node<Meta>) => {
+    let slot: Promise<void> | undefined;
+    const requestSlot = () => {
       if (signal?.aborted) return Promise.reject(signal.reason);
       if (node.concurrencyGroup === undefined) return Promise.resolve();
       return new Promise<void>((resolve, reject) => {
@@ -119,7 +119,7 @@ export async function orchestrate<Meta>(
         wake();
       });
     };
-    return () => (gate ??= waitForSlot());
+    return () => (slot ??= requestSlot());
   };
 
   const ctx: SchedulerContext<Meta> = {
@@ -130,8 +130,8 @@ export async function orchestrate<Meta>(
       }
       return state.take(filter);
     },
-    run({ node, acquiring }) {
-      if (acquiring) {
+    run({ node, waitingForSlot }) {
+      if (waitingForSlot) {
         const slot = slots.get(node.name);
         slots.delete(node.name);
         if (!slot) return Promise.resolve();
@@ -147,7 +147,7 @@ export async function orchestrate<Meta>(
       }
       emit({ type: "dispatch", node: node.name, ...meta(node) });
       processing++;
-      void run(node, state.depEntries(node), acquireFor(node))
+      void run(node, state.depEntries(node), waitForSlotOf(node))
         .catch((e: unknown): Result => {
           if (signal?.aborted) return { name: node.name, actionKey: "", status: "cancelled" };
           return {

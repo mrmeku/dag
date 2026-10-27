@@ -32,7 +32,15 @@ An action defined with `cacheable: false` never reads or writes its entry, so it
 
 ## Force a run
 
-`execute(graph, context, { force: true })` makes every node skip the lookup, run, and replace its entry. The next plain execution hits the new entries. A forced node's dependents key on its new content, so they rerun only if that content changed.
+To run nodes whose entries are good, wrap the cache with `forcedCache`. Its reads miss and its writes go through, so the next plain execution hits the new entries. Against the `graph` and `context` of the [Run a graph](execution.md#execute-a-graph) example:
+
+```ts
+import { execute, forcedCache } from "@mrmeku/dagraph";
+
+await execute(graph, { ...context, cache: forcedCache(context.cache) });
+```
+
+`forcedCache(cache, keys)` forces only the nodes of those keys, such as the `actionKey`s of results you saved. A forced node's dependents key on its new content, so they rerun only if that content changed.
 
 ## What is never cached
 

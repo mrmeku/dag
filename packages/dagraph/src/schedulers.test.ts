@@ -7,7 +7,7 @@ import { actionsFor } from "./define-action.ts";
 import { Graph, nodeInputs, type Node } from "./graph/index.ts";
 import { orchestrate, type RunNode } from "./orchestrate.ts";
 import { createMemoryDagFs } from "./ports/memory-fs.ts";
-import { processNode } from "./process-node.ts";
+import { localRunNode } from "./process-node.ts";
 import {
   throttledScheduler,
   unboundedScheduler,
@@ -27,12 +27,12 @@ function harness(
   const log: string[] = [];
   const finishers = new Map<string, () => void>();
   const lookups = new Map<string, () => void>();
-  const run: RunNode = async (node, _depEntries, acquire) => {
-    const entry = { actionKey: "k", outputs: [], contentHash: "h" };
+  const run: RunNode = async (node, _depEntries, waitForSlot) => {
+    const entry = { actionKey: "k", outputs: {}, contentHash: "h" };
     if (hits.includes(node.name)) return { name: node.name, status: "cached", ...entry };
     if (slowLookups.includes(node.name))
       await new Promise<void>((resolve) => lookups.set(node.name, resolve));
-    await acquire();
+    await waitForSlot();
     log.push(`granted ${node.name}`);
     await new Promise<void>((resolve) => finishers.set(node.name, resolve));
     return { name: node.name, status: "done", ...entry, elapsed: 0 };
@@ -132,7 +132,7 @@ describe("throttledScheduler", () => {
     });
   });
 
-  test("an ungrouped miss keeps its place through acquire, so ready nodes ahead of it in order do not take it", async () => {
+  test("an ungrouped miss keeps its place through waitForSlot, so ready nodes ahead of it in order do not take it", async () => {
     const h = harness(
       [node("u"), node("s"), node("t", undefined, ["u"]), node("v", undefined, ["u"])],
       { maxParallelism: 2 },
@@ -205,7 +205,7 @@ describe("orchestrate", () => {
     name: n.name,
     actionKey: "k",
     status: "done",
-    outputs: [],
+    outputs: {},
     contentHash: "h",
     elapsed: 0,
   });
@@ -272,7 +272,7 @@ describe("orchestrate", () => {
     ]);
   });
 
-  test("with processNode given no signal, a cancel still ends a miss's wait for its slot: it settles cancelled", async () => {
+  test("with localRunNode given no signal, a cancel still ends a miss's wait for its slot: it settles cancelled", async () => {
     const fs = createMemoryDagFs();
     const ctx = { ports: { fs }, cache: new MemCache(), fs, casBaseDir: "/cas" };
     const controller = new AbortController();
@@ -285,7 +285,7 @@ describe("orchestrate", () => {
         controller.abort();
         await new Promise((r) => setTimeout(r, 10));
         await c.ports.fs.writeText(`${c.outputDir}/f`, "x");
-        return `${c.outputDir}/f`;
+        return { file: `${c.outputDir}/f` };
       },
     });
     const g = new Graph<{ fs: DagFs }>();
@@ -293,7 +293,7 @@ describe("orchestrate", () => {
     heavy.addNode(g, { name: "waiter", inputs: { id: 2 } });
     const results = await orchestrate(
       g.describe(),
-      (n, depEntries, acquire) => processNode(g, n.name, depEntries, ctx, { acquire }),
+      localRunNode(g, ctx),
       throttledScheduler({ concurrencyLimits: { heavy: 1 } }),
       undefined,
       controller.signal,

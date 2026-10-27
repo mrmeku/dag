@@ -55,7 +55,7 @@ written beside it and renamed into place, so a reader never sees half of one.
 
 ###### Implementation of
 
-[`Cache`](#cache).[`get`](#get-3)
+[`Cache`](#cache).[`get`](#get-2)
 
 ##### put()
 
@@ -77,7 +77,7 @@ written beside it and renamed into place, so a reader never sees half of one.
 
 ###### Implementation of
 
-[`Cache`](#cache).[`put`](#put-3)
+[`Cache`](#cache).[`put`](#put-2)
 
 ---
 
@@ -208,7 +208,7 @@ In-memory cache for testing. Entries are lost when the process exits.
 
 ###### Implementation of
 
-[`Cache`](#cache).[`get`](#get-3)
+[`Cache`](#cache).[`get`](#get-2)
 
 ##### put()
 
@@ -230,92 +230,7 @@ In-memory cache for testing. Entries are lost when the process exits.
 
 ###### Implementation of
 
-[`Cache`](#cache).[`put`](#put-3)
-
----
-
-### TieredCache
-
-Two-level cache (local + remote). Reads check local first, then remote (populating local on
-remote hit). Writes go to both.
-
-#### Implements
-
-- [`Cache`](#cache)
-
-#### Constructors
-
-##### Constructor
-
-> **new TieredCache**(`opts`): [`TieredCache`](#tieredcache)
-
-###### Parameters
-
-###### opts
-
-###### local
-
-[`Cache`](#cache)
-
-###### remote
-
-[`Cache`](#cache)
-
-###### Returns
-
-[`TieredCache`](#tieredcache)
-
-#### Properties
-
-##### local
-
-> **local**: [`Cache`](#cache)
-
-##### remote
-
-> **remote**: [`Cache`](#cache)
-
-#### Methods
-
-##### get()
-
-> **get**(`key`): `Promise`\<[`CacheEntry`](#cacheentry) \| `undefined`\>
-
-###### Parameters
-
-###### key
-
-`string`
-
-###### Returns
-
-`Promise`\<[`CacheEntry`](#cacheentry) \| `undefined`\>
-
-###### Implementation of
-
-[`Cache`](#cache).[`get`](#get-3)
-
-##### put()
-
-> **put**(`key`, `entry`): `Promise`\<`void`\>
-
-###### Parameters
-
-###### key
-
-`string`
-
-###### entry
-
-[`CacheEntry`](#cacheentry)
-
-###### Returns
-
-`Promise`\<`void`\>
-
-###### Implementation of
-
-[`Cache`](#cache).[`put`](#put-3)
+[`Cache`](#cache).[`put`](#put-2)
 
 ## Interfaces
 
@@ -559,8 +474,8 @@ Inputs every node of the action has, such as a version that names the action's l
 > **kind**: `string`
 
 What kind of work it is, as Bazel's mnemonic. It names the action's logic and joins the key,
-so actions of two kinds never share an entry. A factory of actions of one kind puts what
-differs between them in their inputs.
+so actions of two kinds never share an entry. Nodes of one kind that differ put what differs
+in their node inputs.
 
 ##### nodeInputs?
 
@@ -831,12 +746,6 @@ The options of one execution. The execution context outlives it.
 
 #### Properties
 
-##### force?
-
-> `optional` **force?**: `boolean`
-
-Every node skips its entry read, runs, and writes its new entry.
-
 ##### onEvent?
 
 > `optional` **onEvent?**: [`ExecListener`](#execlistener)\<`Meta`\>
@@ -946,13 +855,37 @@ A node the scheduler may take: ready to be processed, or a miss waiting for its 
 
 #### Properties
 
-##### acquiring
-
-> **acquiring**: `boolean`
-
 ##### node
 
 > **node**: [`Node`](#node)\<`Meta`\>
+
+##### waitingForSlot
+
+> **waitingForSlot**: `boolean`
+
+---
+
+### RunActionOptions
+
+#### Type Parameters
+
+##### Meta
+
+`Meta`
+
+#### Properties
+
+##### onEvent?
+
+> `optional` **onEvent?**: [`ExecListener`](#execlistener)\<`Meta`\>
+
+Receives the node's `start` and `output`, before its result returns.
+
+##### signal?
+
+> `optional` **signal?**: `AbortSignal`
+
+The execution's cancel. A node it stops settles `cancelled`, whatever its action returns.
 
 ---
 
@@ -960,9 +893,9 @@ A node the scheduler may take: ready to be processed, or a miss waiting for its 
 
 What a scheduler drives. `take` returns the first ready node, in orchestration's order, that
 `filter` admits: a node comes once when it is ready and, when its lookup misses and it has a
-concurrency group, again `acquiring` its group's slot. `run` hands a ready node to processing,
-or grants an acquiring one its slot; it resolves once the node settles or, waiting for a slot,
-gives its place back. `workAvailable` resolves when that may have changed what `take` returns.
+concurrency group, again with `waitingForSlot` set. `run` hands a ready node to processing, or
+grants a waiting one its slot; it resolves once the node settles or, waiting for a slot, gives
+its place back. `workAvailable` resolves when that may have changed what `take` returns.
 
 #### Type Parameters
 
@@ -1076,10 +1009,10 @@ The deps a node may give, by role.
 
 What a node's `inputs` function receives: each dep it declares, by role, as a ref to each of
 the dep's outputs, an `OutputRef` for a required dep and a `SettledOutputRef` for a `settled`
-one. A dep whose outputs are not a record has no refs. The refs of a dep cannot be listed, as
-by a spread, since its outputs' names exist only in the types: name each one, `pack.tarball`.
-An output that some return of the dep leaves out, or that an index signature names, has no ref:
-the action reads it from `depOutputs`, where it is `| undefined`.
+one. The refs of a dep cannot be listed, as by a spread, since its outputs' names exist only in
+the types: name each one, `pack.tarball`. An output that some return of the dep leaves out, or
+that an index signature names, has no ref: the action reads it from `depOutputs`, where it is
+`| undefined`.
 
 #### Type Parameters
 
@@ -1301,16 +1234,15 @@ A file input: its path, as given, and its content's hash join the key.
 
 ### Handles
 
-> **Handles**\<`T`\> = `T` _extends_ `string` ? [`FileHandle`](#filehandle) : `T` _extends_ `string`[] ? [`FileHandle`](#filehandle)[] : `T` _extends_ `Record`\<`string`, `string` \| `string`[]\> ? `{ [K in keyof T]: Handles<T[K]> }` : `T` _extends_ `undefined` ? `undefined` : `never`
+> **Handles**\<`T`\> = `{ [K in keyof T]: PathHandles<T[K]> }`
 
-Outputs as an action reads them: each path a `FileHandle`, a list or a record as such, and a
-failed settled dep's `undefined` as is.
+Outputs as an action reads them: each path a `FileHandle`, each list of paths a list of them.
 
 #### Type Parameters
 
 ##### T
 
-`T`
+`T` _extends_ [`Outputs`](#outputs-1)
 
 ---
 
@@ -1398,6 +1330,14 @@ A value as JSON holds it. A property that is `undefined` is left out when it is 
 
 ---
 
+### Lookup
+
+> **Lookup** = `Extract`\<[`Result`](#result), \{ `status`: `"cached"` \| `"failed"` \| `"dep-failed"`; \}\> \| [`Miss`](#miss)
+
+How a node's lookup ended: settled without running, or a miss to run.
+
+---
+
 ### MemoryDagFs
 
 > **MemoryDagFs** = [`DagFs`](#dagfs) & `object`
@@ -1407,6 +1347,28 @@ A value as JSON holds it. A property that is `undefined` is left out when it is 
 ##### files
 
 > **files**: `Map`\<`string`, `string` \| `Uint8Array`\>
+
+---
+
+### Miss
+
+> **Miss** = `object`
+
+A node whose key has no verified entry: what `runAction` runs.
+
+#### Properties
+
+##### actionKey
+
+> **actionKey**: `string`
+
+##### name
+
+> **name**: `string`
+
+##### status
+
+> **status**: `"missed"`
 
 ---
 
@@ -1582,9 +1544,9 @@ the ref goes only in what that call returns, so another node's ref does not comp
 
 ### Outputs
 
-> **Outputs** = `string` \| `string`[] \| `Record`\<`string`, `string` \| `string`[]\>
+> **Outputs** = `Record`\<`string`, `string` \| `string`[]\>
 
-What an action returns: a path, a list of paths, or a record of either, all under its outputDir.
+What an action returns: named outputs, each a path or a list of paths under its outputDir.
 
 ---
 
@@ -1611,11 +1573,11 @@ anything else.
 
 ### RunNode
 
-> **RunNode**\<`Meta`\> = (`node`, `depEntries`, `acquire`) => `Promise`\<[`Result`](#result)\>
+> **RunNode**\<`Meta`\> = (`node`, `depEntries`, `waitForSlot`) => `Promise`\<[`Result`](#result)\>
 
 Processes one node somewhere, given its deps' entries by dep name, and returns its result. On
-a miss it awaits `acquire`, the gate the scheduler answers once the node's group has a slot,
-before the action runs. `acquire` rejects once the execution is cancelled. A rejection of
+a miss it awaits `waitForSlot` before the action runs, which resolves once the scheduler grants
+the node's group a slot, and rejects once the execution is cancelled. A rejection of
 `RunNode` becomes a failure, as an action's error does, or `cancelled` once the execution is
 cancelled.
 
@@ -1635,7 +1597,7 @@ cancelled.
 
 `Record`\<`string`, [`CacheEntry`](#cacheentry)\>
 
-##### acquire
+##### waitForSlot
 
 () => `Promise`\<`void`\>
 
@@ -1791,14 +1753,6 @@ An action that needs no ports. A program with ports binds its own: `actionsFor<P
 
 [`Action`](#action)\<`unknown`, `Extract`\<`R`, [`Outputs`](#outputs-1)\>, `D`, `N`, `I`\>
 
----
-
-### NOT_CACHED
-
-> `const` **NOT_CACHED**: `"not cached"` = `"not cached"`
-
-The message of the error of a node that `cacheOnly` found no verified entry for.
-
 ## Functions
 
 ### actionsFor()
@@ -1824,29 +1778,6 @@ An action's outputs are what it returns, a path as `string`, a list as `string[]
 #### Returns
 
 \<`R`, `D`, `N`, `I`\>(`spec`) => [`Action`](#action)\<`Ports`, `Extract`\<`R`, [`Outputs`](#outputs-1)\>, `D`, `N`, `I`\>
-
----
-
-### checkInputs()
-
-> **checkInputs**(`inputs`, `where`): `Record`\<`string`, `unknown`\>
-
-Inputs as declared, or as their function returns them, checked for what their type cannot
-see. Returns a copy, as the key reads it: a later change to the caller's object keys nothing.
-
-#### Parameters
-
-##### inputs
-
-[`InputRecord`](#inputrecord)\<`unknown`\> \| (() => [`InputRecord`](#inputrecord)\<`unknown`\> \| `undefined`) \| `undefined`
-
-##### where
-
-`string`
-
-#### Returns
-
-`Record`\<`string`, `unknown`\>
 
 ---
 
@@ -1908,8 +1839,8 @@ absolute form: `resolve` returns it as given.
 > **dep**\<`T`\>(): [`Dep`](#dep-1)\<`T`\>
 
 A role that more than one action fills, by the outputs its nodes return. It names only a type,
-so it goes uncalled: `deps: { image: dep<string> }`. Where one action fills the role, name that
-action: `deps: { fetch }`.
+so it goes uncalled: `deps: { image: dep<{ image: string }> }`. Where one action fills the role,
+name that action: `deps: { fetch }`.
 
 #### Type Parameters
 
@@ -1978,6 +1909,29 @@ A file input, read by the action as a handle on the file.
 
 ---
 
+### forcedCache()
+
+> **forcedCache**(`cache`, `keys?`): [`Cache`](#cache)
+
+`cache` with every read of `keys` a miss, or of every key without them: the nodes of those keys
+run again and write their new entries, which later reads hit. This is how to force nodes.
+
+#### Parameters
+
+##### cache
+
+[`Cache`](#cache)
+
+##### keys?
+
+`ReadonlySet`\<`string`\>
+
+#### Returns
+
+[`Cache`](#cache)
+
+---
+
 ### isFileHandle()
 
 > **isFileHandle**(`value`): `value is FileHandle`
@@ -1993,24 +1947,6 @@ Whether a value is a handle: a list or a record of handles is not.
 #### Returns
 
 `value is FileHandle`
-
----
-
-### isOutputs()
-
-> **isOutputs**(`value`): `value is Outputs`
-
-Whether a value read back, such as a cache entry's, is outputs.
-
-#### Parameters
-
-##### value
-
-`unknown`
-
-#### Returns
-
-`value is Outputs`
 
 ---
 
@@ -2050,6 +1986,86 @@ Whether the node succeeded: its result is `done` or `cached`.
 
 ---
 
+### localRunNode()
+
+> **localRunNode**\<`Ports`, `Meta`\>(`graph`, `executionContext`, `options?`): [`RunNode`](#runnode)\<`Meta`\>
+
+The `RunNode` that `execute` uses: each node of `graph` processed in this process, its lookup
+first and, on a miss, its action once it has its slot. A cancel while it waits settles it
+`cancelled`.
+
+#### Type Parameters
+
+##### Ports
+
+`Ports`
+
+##### Meta
+
+`Meta`
+
+#### Parameters
+
+##### graph
+
+[`Graph`](#graph)\<`Ports`, `Meta`\>
+
+##### executionContext
+
+[`ExecutionContext`](#executioncontext)\<`NoInfer`\<`Ports`\>\>
+
+##### options?
+
+[`RunActionOptions`](#runactionoptions)\<`Meta`\> = `{}`
+
+#### Returns
+
+[`RunNode`](#runnode)\<`Meta`\>
+
+---
+
+### lookupNode()
+
+> **lookupNode**\<`Ports`, `Meta`\>(`graph`, `name`, `depEntries`, `executionContext`): `Promise`\<[`Lookup`](#lookup)\>
+
+Look the node `name` of `graph` up: compute its key, then read and verify its entry. It settles
+`cached`, `dep-failed` or `failed` without running, or is a miss. `depEntries`, by dep node
+name, holds the entry of each dep that succeeded.
+
+#### Type Parameters
+
+##### Ports
+
+`Ports`
+
+##### Meta
+
+`Meta`
+
+#### Parameters
+
+##### graph
+
+[`Graph`](#graph)\<`Ports`, `Meta`\>
+
+##### name
+
+`string`
+
+##### depEntries
+
+`Record`\<`string`, [`CacheEntry`](#cacheentry)\>
+
+##### executionContext
+
+[`ExecutionContext`](#executioncontext)\<`NoInfer`\<`Ports`\>\>
+
+#### Returns
+
+`Promise`\<[`Lookup`](#lookup)\>
+
+---
+
 ### maybe()
 
 #### Call Signature
@@ -2057,8 +2073,9 @@ Whether the node succeeded: its result is `done` or `cached`.
 > **maybe**\<`T`\>(`dep`): [`SettledDep`](#settleddep)\<`T`\> \| `undefined`
 
 Mark a role that a node may leave out: around the action that fills it, `deps: { summary:
-maybe(summarize) }`, or uncalled, by its outputs, `deps: { summary: maybe<string> }`. Its
-outputs are `undefined` when the node gives no dep, so the action checks before it reads them.
+maybe(summarize) }`, or uncalled, by its outputs, `deps: { summary: maybe<{ text: string }> }`.
+Its outputs are `undefined` when the node gives no dep, so the action checks before it reads
+them.
 
 ##### Type Parameters
 
@@ -2081,8 +2098,9 @@ outputs are `undefined` when the node gives no dep, so the action checks before 
 > **maybe**\<`T`\>(`dep`): [`Dep`](#dep-1)\<`T`\> \| `undefined`
 
 Mark a role that a node may leave out: around the action that fills it, `deps: { summary:
-maybe(summarize) }`, or uncalled, by its outputs, `deps: { summary: maybe<string> }`. Its
-outputs are `undefined` when the node gives no dep, so the action checks before it reads them.
+maybe(summarize) }`, or uncalled, by its outputs, `deps: { summary: maybe<{ text: string }> }`.
+Its outputs are `undefined` when the node gives no dep, so the action checks before it reads
+them.
 
 ##### Type Parameters
 
@@ -2105,8 +2123,9 @@ outputs are `undefined` when the node gives no dep, so the action checks before 
 > **maybe**\<`T`\>(): [`Dep`](#dep-1)\<`T`\> \| `undefined`
 
 Mark a role that a node may leave out: around the action that fills it, `deps: { summary:
-maybe(summarize) }`, or uncalled, by its outputs, `deps: { summary: maybe<string> }`. Its
-outputs are `undefined` when the node gives no dep, so the action checks before it reads them.
+maybe(summarize) }`, or uncalled, by its outputs, `deps: { summary: maybe<{ text: string }> }`.
+Its outputs are `undefined` when the node gives no dep, so the action checks before it reads
+them.
 
 ##### Type Parameters
 
@@ -2124,7 +2143,7 @@ outputs are `undefined` when the node gives no dep, so the action checks before 
 
 > **namedOutput**(`outputs`, `name`): `string`
 
-The path a node's record of outputs holds as `name`; refused when it holds none.
+The path a node's outputs hold as `name`; refused when they hold none.
 
 #### Parameters
 
@@ -2257,10 +2276,10 @@ error that it threw.
 
 ### processNode()
 
-> **processNode**\<`Ports`, `Meta`\>(`graph`, `name`, `depEntries`, `executionContext`, `options`): `Promise`\<[`Result`](#result)\>
+> **processNode**\<`Ports`, `Meta`\>(`graph`, `name`, `depEntries`, `executionContext`, `options?`): `Promise`\<[`Result`](#result)\>
 
-Process the node `name` of `graph`: compute its key, read and verify its entry, and run its
-action on a miss. `depEntries`, by dep node name, holds the entry of each dep that succeeded.
+Process the node `name` of `graph` now, with no slot to wait for: look it up, and run its action
+on a miss. For a test, a script, or a worker whose orchestrator took the node's slot already.
 
 #### Type Parameters
 
@@ -2290,9 +2309,9 @@ action on a miss. `depEntries`, by dep node name, holds the entry of each dep th
 
 [`ExecutionContext`](#executioncontext)\<`NoInfer`\<`Ports`\>\>
 
-##### options
+##### options?
 
-`ProcessNodeOptions`\<`Meta`\>
+[`RunActionOptions`](#runactionoptions)\<`Meta`\> = `{}`
 
 #### Returns
 
@@ -2318,6 +2337,51 @@ The deps a node runs only once they succeed: its deps less its `settled` ones.
 
 ---
 
+### runAction()
+
+> **runAction**\<`Ports`, `Meta`\>(`graph`, `__namedParameters`, `depEntries`, `executionContext`, `options?`): `Promise`\<[`Result`](#result)\>
+
+Run the action of a node that missed, store what it made, and write its entry. `depEntries` are
+the ones its lookup was given.
+
+#### Type Parameters
+
+##### Ports
+
+`Ports`
+
+##### Meta
+
+`Meta`
+
+#### Parameters
+
+##### graph
+
+[`Graph`](#graph)\<`Ports`, `Meta`\>
+
+##### \_\_namedParameters
+
+[`Miss`](#miss)
+
+##### depEntries
+
+`Record`\<`string`, [`CacheEntry`](#cacheentry)\>
+
+##### executionContext
+
+[`ExecutionContext`](#executioncontext)\<`NoInfer`\<`Ports`\>\>
+
+##### options?
+
+[`RunActionOptions`](#runactionoptions)\<`Meta`\> = `{}`
+
+#### Returns
+
+`Promise`\<[`Result`](#result)\>
+
+---
+
 ### settled()
 
 #### Call Signature
@@ -2327,7 +2391,7 @@ The deps a node runs only once they succeed: its deps less its `settled` ones.
 Mark a dep its node runs without: when it does not succeed, its role is `undefined`. An action
 declares the role with it, around the action that fills it, `deps: { captions:
 settled(captions) }`, or uncalled, by the outputs of a role more than one action fills, `deps:
-{ captions: settled<string> }`. Its node marks the ref it gives, `deps: { captions:
+{ captions: settled<{ srt: string }> }`. Its node marks the ref it gives, `deps: { captions:
 settled(captionsRef) }`: a role declared one way takes no ref of the other.
 
 ##### Type Parameters
@@ -2353,7 +2417,7 @@ settled(captionsRef) }`: a role declared one way takes no ref of the other.
 Mark a dep its node runs without: when it does not succeed, its role is `undefined`. An action
 declares the role with it, around the action that fills it, `deps: { captions:
 settled(captions) }`, or uncalled, by the outputs of a role more than one action fills, `deps:
-{ captions: settled<string> }`. Its node marks the ref it gives, `deps: { captions:
+{ captions: settled<{ srt: string }> }`. Its node marks the ref it gives, `deps: { captions:
 settled(captionsRef) }`: a role declared one way takes no ref of the other.
 
 ##### Type Parameters
@@ -2379,7 +2443,7 @@ settled(captionsRef) }`: a role declared one way takes no ref of the other.
 Mark a dep its node runs without: when it does not succeed, its role is `undefined`. An action
 declares the role with it, around the action that fills it, `deps: { captions:
 settled(captions) }`, or uncalled, by the outputs of a role more than one action fills, `deps:
-{ captions: settled<string> }`. Its node marks the ref it gives, `deps: { captions:
+{ captions: settled<{ srt: string }> }`. Its node marks the ref it gives, `deps: { captions:
 settled(captionsRef) }`: a role declared one way takes no ref of the other.
 
 ##### Type Parameters
@@ -2391,24 +2455,6 @@ settled(captionsRef) }`: a role declared one way takes no ref of the other.
 ##### Returns
 
 [`SettledDep`](#settleddep)\<`T`\>
-
----
-
-### soleOutput()
-
-> **soleOutput**(`outputs`): `string`
-
-A node's outputs when they are one path, as its result holds them; refused otherwise.
-
-#### Parameters
-
-##### outputs
-
-[`Outputs`](#outputs-1)
-
-#### Returns
-
-`string`
 
 ---
 
@@ -2459,16 +2505,3 @@ Scheduler with no limits: admits every ready node at once. This is the default.
 #### Returns
 
 [`Scheduler`](#scheduler-1)
-
----
-
-### ungated()
-
-> **ungated**(): `Promise`\<`void`\>
-
-The gate of a node that waits for no slot, for `processNode` outside an orchestrator: a test, a
-script, or a worker whose orchestrator took the node's slot already.
-
-#### Returns
-
-`Promise`\<`void`\>

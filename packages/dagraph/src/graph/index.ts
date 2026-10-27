@@ -13,7 +13,6 @@ export {
   notAString,
   requiredDeps,
   settled,
-  soleOutput,
 } from "./types.ts";
 export type {
   ActionContext,

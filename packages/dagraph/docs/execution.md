@@ -14,8 +14,9 @@ import { createNodeDagFs } from "@mrmeku/dagraph/fs/node";
 const fetchPage = defineAction({
   kind: "fetch",
   action: async ({ outputDir }) => {
-    await writeFile(join(outputDir, "page.txt"), "a page");
-    return join(outputDir, "page.txt");
+    const body = join(outputDir, "page.txt");
+    await writeFile(body, "a page");
+    return { body };
   },
 });
 const summarize = defineAction({
@@ -23,8 +24,9 @@ const summarize = defineAction({
   deps: { page: fetchPage },
   action: async ({ depOutputs, outputDir, output }) => {
     output("summarizing\n");
-    await writeFile(join(outputDir, "summary.txt"), (await depOutputs.page.text()).toUpperCase());
-    return join(outputDir, "summary.txt");
+    const summary = join(outputDir, "summary.txt");
+    await writeFile(summary, (await depOutputs.page.body.text()).toUpperCase());
+    return { summary };
   },
 });
 
@@ -96,30 +98,35 @@ Once it aborts, nothing new starts: every ready node, and every node that would 
 
 ## Write your own executor
 
-`execute` is `orchestrate`, the scheduling half, run over `graph.describe()`. Its `RunNode` calls `processNode`, the processing half, on the same graph. Write that yourself to change what happens to each node. This executor forces only `summarize`. Run it after the example's two executions, against the same `context`:
+`execute` is `orchestrate`, the scheduling half, run over `graph.describe()`, with `localRunNode(graph, context)` as the `RunNode` that processes each node. Processing is two steps. `lookupNode` computes the node's key and checks the cache, and resolves to the node's result or to a miss. On a miss, `runAction` runs the action and stores what it made. `localRunNode` waits for the node's slot between the two, since only a miss takes one.
+
+Write the `RunNode` yourself to change what happens to each node. It may return a result recorded earlier instead of processing the node, as a replay does. This executor replays `fetch` from an earlier execution and processes the rest. Run it after the example's two executions, against the same `context`:
 
 ```ts
-import { orchestrate, processNode, throttledScheduler } from "@mrmeku/dagraph";
+import { localRunNode, orchestrate, throttledScheduler } from "@mrmeku/dagraph";
 
-const forced = new Set(["summarize"]);
+const recorded = (await execute(graph, context)).find((result) => result.name === "fetch");
+const runNode = localRunNode(graph, context);
 const results = await orchestrate(
   graph.describe(),
-  (node, depEntries, acquire) =>
-    processNode(graph, node.name, depEntries, context, { acquire, force: forced.has(node.name) }),
+  (node, depEntries, waitForSlot) =>
+    node.name === "fetch" && recorded
+      ? Promise.resolve(recorded)
+      : runNode(node, depEntries, waitForSlot),
   throttledScheduler({ maxParallelism: 4 }),
 );
-// summarize is done; fetch is cached (on a fresh CAS it would be done too).
+// fetch is the recorded result; summarize is processed, and cached.
 ```
 
-A `RunNode` gets three things. The first is the node as data. The second is `depEntries`, the cache entry of each dependency that succeeded, by name. The third is `acquire`, the gate a miss awaits before its action runs, where a group's slot is taken.
+A `RunNode` gets three things. The first is the node as data. The second is `depEntries`, the cache entry of each dependency that succeeded, by name. The third is `waitForSlot`, which resolves once the node's group has a slot.
 
-The example leaves out `signal` and `onEvent`. In your executor, pass both to both halves, as `execute` does: `orchestrate(nodes, run, scheduler, onEvent, signal)` takes them last, and `processNode` among its options. `orchestrate`'s listener then gets `dispatch` and `result`, and `processNode`'s gets `start` and `output`. A signal given to `orchestrate` alone never reaches running actions.
+The example leaves out `signal` and `onEvent`. In your executor, pass both to both halves, as `execute` does: `orchestrate(nodes, run, scheduler, onEvent, signal)` takes them last, and `localRunNode` among its options. `orchestrate`'s listener then gets `dispatch` and `result`, and the processing gets `start` and `output`. A signal given to `orchestrate` alone never reaches running actions.
 
 ## Process nodes in workers
 
-To process nodes in worker processes, the `RunNode` makes two requests. First it asks a worker to look the node up only. It sends the node's name and `depEntries`, and the worker rebuilds a graph that declares the node and calls `processNode` with `cacheOnly: true` and `acquire: ungated`. A `failed` result whose `error.message` equals `NOT_CACHED` is a miss. Any other result is the node's, so a hit never takes a slot.
+To process nodes in worker processes, the `RunNode` makes two requests. First it asks a worker to look the node up. It sends the node's name and `depEntries`, and the worker rebuilds a graph that declares the node and calls `lookupNode`. A miss comes back as `status: "missed"`. Any other lookup is the node's result, so a hit never takes a slot.
 
-On a miss, the `RunNode` awaits `acquire()` in the orchestrator, then sends the same request to run. The worker calls `processNode` with `acquire: ungated` again, since the orchestrator already holds the slot. It sends back the `Result` as JSON, which `isResult` checks. `start` and `output` fire in the worker, so a journal that records starts listens on the worker's `processNode`, and the cancel goes there too, as its `signal`.
+On a miss, the `RunNode` awaits `waitForSlot()` in the orchestrator, then sends the same request to run. The worker calls `processNode`, which looks the node up again and runs its action, since the orchestrator already holds the slot. It sends back the `Result` as JSON, which `isResult` checks. `start` and `output` fire in the worker, so a journal that records starts listens on the worker's `processNode`, and the cancel goes there too, as its `signal`.
 
 The worker must declare the node the way the original graph does, with the same `kind`, inputs, roles and names. Then it computes the same key and finds the node's dependencies by name. The workers share one CAS, and one `Cache`, such as an `FsCache` over a shared directory, to hit each other's entries. The orchestrator reads no files and needs neither.
 

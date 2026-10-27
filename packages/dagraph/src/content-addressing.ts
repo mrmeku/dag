@@ -4,19 +4,13 @@ import type { CacheEntry, DagFs } from "./cache.ts";
 import type { Outputs } from "./graph/index.ts";
 import { isMissingFileError } from "./utils.ts";
 
-/** Flatten an Outputs value (string, array, or record) into a flat list of file paths. */
-export function collectPaths(outputs: Outputs): string[] {
-  if (typeof outputs === "string") return [outputs];
-  if (Array.isArray(outputs)) return outputs;
-  return Object.values(outputs).flatMap((v) => (Array.isArray(v) ? v : [v]));
-}
+/** Every path the outputs hold, in one list. */
+export const collectPaths = (outputs: Outputs): string[] => Object.values(outputs).flat();
 
-/** The same outputs with each path passed through `f`: a path, a list, or a record of either. */
-export function mapPaths<T>(outputs: Outputs, f: (path: string) => T) {
-  if (typeof outputs === "string") return f(outputs);
-  if (Array.isArray(outputs)) return outputs.map(f);
+/** The same outputs with each path passed through `f`. */
+export function mapPaths<T>(outputs: Outputs, f: (path: string) => T): Record<string, T | T[]> {
   return Object.fromEntries(
-    Object.entries(outputs).map(([role, v]) => [role, Array.isArray(v) ? v.map(f) : f(v)]),
+    Object.entries(outputs).map(([name, v]) => [name, Array.isArray(v) ? v.map(f) : f(v)]),
   );
 }
 
@@ -61,14 +55,14 @@ function relativeTo(keyDir: string, path: string): string {
  * A hash of a node's outputs, early cutoff compares it and dependents key on it: each output's
  * name, each file's path relative to its output directory, and each file's content. So which
  * file an output names is part of it, wherever the directory sits. A path with no file rejects,
- * naming the output by its name, if it has one, and its file.
+ * naming the output and its file.
  */
 export async function hashOutputFiles(
   outputs: Outputs,
   hashFile: HashFileFn,
   keyDir: string,
 ): Promise<string> {
-  const files = async (paths: string[], name?: string) => {
+  const files = async (paths: string[], name: string) => {
     const hashed: string[][] = [];
     for (const path of paths) {
       const file = relativeTo(keyDir, path);
@@ -76,9 +70,8 @@ export async function hashOutputFiles(
         hashed.push([file, await hashFile(path)]);
       } catch (e) {
         if (!isMissingFileError(e)) throw e;
-        const output = name === undefined ? file : `"${name}" (${file})`;
         throw new Error(
-          `output ${output} was not written. ` +
+          `output "${name}" (${file}) was not written. ` +
             `Write it at \`\${outputDir}/${file}\` before the action returns.`,
         );
       }
@@ -86,11 +79,8 @@ export async function hashOutputFiles(
     return hashed;
   };
   const shape: unknown[] = [];
-  if (typeof outputs === "string") shape.push(...(await files([outputs])));
-  else if (Array.isArray(outputs)) shape.push(await files(outputs));
-  else
-    for (const [name, value] of Object.entries(outputs).sort(([a], [b]) => (a < b ? -1 : 1)))
-      shape.push([name, await files(Array.isArray(value) ? value : [value], name)]);
+  for (const [name, value] of Object.entries(outputs).sort(([a], [b]) => (a < b ? -1 : 1)))
+    shape.push([name, await files([value].flat(), name)]);
   return sha256.hex(JSON.stringify(shape));
 }
 

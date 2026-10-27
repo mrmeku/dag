@@ -36,8 +36,8 @@ export interface ActionSpec<
 > {
   /**
    * What kind of work it is, as Bazel's mnemonic. It names the action's logic and joins the key,
-   * so actions of two kinds never share an entry. A factory of actions of one kind puts what
-   * differs between them in their inputs.
+   * so actions of two kinds never share an entry. Nodes of one kind that differ put what differs
+   * in their node inputs.
    */
   kind: string;
   /**

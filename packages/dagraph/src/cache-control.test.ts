@@ -1,15 +1,13 @@
 import { describe, expect, test } from "bun:test";
 import assert from "node:assert/strict";
 
-import { MemCache } from "./cache.ts";
+import { forcedCache, MemCache } from "./cache.ts";
 import { actionsFor } from "./define-action.ts";
 import { execute } from "./execute.ts";
 import { dep, Graph, nodeInputs, type ActionContext } from "./graph/index.ts";
-import { orchestrate } from "./orchestrate.ts";
 import { createMemoryDagFs, type MemoryDagFs } from "./ports/memory-fs.ts";
-import { NOT_CACHED, processNode } from "./process-node.ts";
-import { unboundedScheduler } from "./schedulers.ts";
-import type { Result } from "./types.ts";
+import { lookupNode } from "./process-node.ts";
+import { isSucceeded, type Result } from "./types.ts";
 
 interface Ports {
   fs: MemoryDagFs;
@@ -21,7 +19,7 @@ async function emit(c: ActionContext<Ports>, kind: string, content: string) {
   c.ports.ran.push(kind);
   const path = `${c.outputDir}/${kind}.txt`;
   await c.ports.fs.writeText(path, content);
-  return path;
+  return { content: path };
 }
 /** The video id a source file holds. */
 const idOf = (text: string): string => {
@@ -48,22 +46,23 @@ const transcript = (version: number) =>
     deps: { source },
     inputs: { version },
     // A re-download at another bitrate is the same speech: key only on the video's id.
-    invalidateOn: { source: async (source) => idOf(await source.text()) },
-    action: async (c) => emit(c, "transcript", `words(${idOf(await c.depOutputs.source.text())})`),
+    invalidateOn: { source: async (source) => idOf(await source.content.text()) },
+    action: async (c) =>
+      emit(c, "transcript", `words(${idOf(await c.depOutputs.source.content.text())})`),
   });
 const packaged = defineActionWithPorts({
   kind: "packaged",
   deps: { source },
-  action: async (c) => emit(c, "packaged", `pkg(${await c.depOutputs.source.text()})`),
+  action: async (c) => emit(c, "packaged", `pkg(${await c.depOutputs.source.content.text()})`),
 });
 const entry = defineActionWithPorts({
   kind: "entry",
-  deps: { transcript: dep<string>, packaged },
+  deps: { transcript: dep<{ content: string }>, packaged },
   action: async (c) =>
     emit(
       c,
       "entry",
-      `${await c.depOutputs.transcript.text()}+${await c.depOutputs.packaged.text()}`,
+      `${await c.depOutputs.transcript.content.text()}+${await c.depOutputs.packaged.content.text()}`,
     ),
 });
 const uploaded = defineActionWithPorts({
@@ -89,32 +88,39 @@ function setup() {
   return { ports, ctx: { ports, cache: new MemCache(), fs: ports.fs, casBaseDir: "/cas" } };
 }
 
-/** An executor whose choice per node goes to processNode, as podpiper's heal and serve make it. */
-const executeChoosing = (
+/** How each node of `graph` looks up against the entries of `results`, none of them run. */
+async function lookups(
   graph: Graph<Ports>,
   ctx: ReturnType<typeof setup>["ctx"],
-  choose: (name: string) => { force?: boolean; cacheOnly?: boolean },
-) =>
-  orchestrate(
-    graph.describe(),
-    (node, depEntries, acquire) =>
-      processNode(graph, node.name, depEntries, ctx, { ...choose(node.name), acquire }),
-    unboundedScheduler(),
+  results: Result[],
+) {
+  const entries = Object.fromEntries(
+    results.flatMap((r) =>
+      isSucceeded(r) ? [[r.name, { outputs: r.outputs, contentHash: r.contentHash }]] : [],
+    ),
   );
+  const looked = graph.describe().map(async ({ name }) => {
+    const found = await lookupNode(graph, name, entries, ctx);
+    return [name, found.status] as const;
+  });
+  return Object.fromEntries(await Promise.all(looked));
+}
 
 const statuses = (results: Result[]) => Object.fromEntries(results.map((r) => [r.name, r.status]));
 
 describe("cache control", () => {
-  test("a forced node runs again; a dependent whose invalidateOn fingerprint is unchanged stays cached", async () => {
+  test("a node whose key misses runs again; a dependent whose invalidateOn fingerprint is unchanged stays cached", async () => {
     const { ports, ctx } = setup();
-    await execute(buildGraph(), ctx);
+    const first = await execute(buildGraph(), ctx);
+    const sourceKey = new Set(first.filter((r) => r.name === "source").map((r) => r.actionKey));
 
     // A re-download at a higher bitrate: same speech, different bytes.
     ports.ran = [];
     ports.source = { id: "abc", bitrate: 320 };
-    const healed = await executeChoosing(buildGraph(), ctx, (name) => ({
-      force: name === "source",
-    }));
+    const healed = await execute(buildGraph(), {
+      ...ctx,
+      cache: forcedCache(ctx.cache, sourceKey),
+    });
     const healRan = [...ports.ran].sort();
 
     ports.ran = [];
@@ -124,7 +130,7 @@ describe("cache control", () => {
     // A different video behind the same node: the fingerprint changes, so the transcript runs.
     ports.ran = [];
     ports.source = { id: "xyz", bitrate: 320 };
-    await execute(buildGraph(), ctx, { force: true });
+    await execute(buildGraph(), { ...ctx, cache: forcedCache(ctx.cache) });
 
     expect({
       healRan,
@@ -153,44 +159,31 @@ describe("cache control", () => {
     });
   });
 
-  test("cacheOnly looks each node up without running it: a node without a verified entry fails as not cached, a cacheable: false one too", async () => {
+  test("lookupNode looks a node up without running it: a node without a verified entry is a miss, a cacheable: false one too", async () => {
     const { ports, ctx } = setup();
-    await execute(buildGraph(), ctx);
+    const first = await execute(buildGraph(), ctx);
 
     ports.ran = [];
-    const results = await executeChoosing(buildGraph(2), ctx, () => ({ cacheOnly: true }));
-    const unchanged = await executeChoosing(buildGraph(), ctx, () => ({ cacheOnly: true }));
-    // With force there is no lookup, so even a cached node fails as not cached.
-    const forced = await executeChoosing(buildGraph(), ctx, () => ({
-      force: true,
-      cacheOnly: true,
-    }));
     expect({
+      changed: await lookups(buildGraph(2), ctx, first),
+      unchanged: await lookups(buildGraph(), ctx, first),
       ran: ports.ran,
-      results: results.map((r) =>
-        r.status === "failed"
-          ? [r.name, r.status, r.error.message]
-          : [r.name, r.status, r.status === "dep-failed" ? r.dep : ""],
-      ),
-      unchanged: statuses(unchanged),
-      forced: forced.map((r) => (r.status === "failed" ? r.error.message : r.status)),
     }).toEqual({
-      ran: [],
-      results: [
-        ["source", "cached", ""],
-        ["transcript", "failed", NOT_CACHED],
-        ["packaged", "cached", ""],
-        ["entry", "dep-failed", "transcript"],
-        ["uploaded", "dep-failed", "entry"],
-      ],
+      changed: {
+        source: "cached",
+        transcript: "missed",
+        packaged: "cached",
+        entry: "cached",
+        uploaded: "missed",
+      },
       unchanged: {
         source: "cached",
         transcript: "cached",
         packaged: "cached",
         entry: "cached",
-        uploaded: "failed",
+        uploaded: "missed",
       },
-      forced: [NOT_CACHED, "dep-failed", "dep-failed", "dep-failed", "dep-failed"],
+      ran: [],
     });
   });
 });
