@@ -9,7 +9,7 @@ This directory is the semantics tier of `@mrmeku/dagraph` and `@mrmeku/dagworkfl
 How a graph is declared. An action is a kind of work defined once with typed inputs, deps and outputs; a node is one use of it, added with `addNode`, which returns a typed ref. Graphs are acyclic by construction, and wiring mistakes are caught at compile time or when the node is added. The page also covers the package itself: entry points, runtimes and compiler settings.
 
 - Concepts: action, kind, node, role, dep, ref, ports, meta, settled and optional (`maybe`) roles, node inputs and the action's own inputs, output refs, file handles, values that are never part of a string, subgraphs, closure.
-- Public names: `defineAction`, `actionsFor`, `Graph` (`subgraph`, `describe`), `closure`, `dep`, `settled`, `maybe`, `nodeInputs`, `file`, `nodeRefNamed`, `requiredDeps`, `soleOutput`, `namedOutput`, `isOutputs`, `isFileHandle`, `notAString`, `checkInputs`, `Action`, `ActionSpec`, `ActionContext`, `NodeRef`, `OutputRef`, `NodeParams`, `Outputs`; `@mrmeku/dagraph/mermaid` (`mermaidBody`, `mermaidQuote`).
+- Public names: `defineAction`, `actionsFor`, `Graph` (`subgraph`, `describe`), `closure`, `dep`, `settled`, `maybe`, `nodeInputs`, `file`, `nodeRefNamed`, `requiredDeps`, `soleOutput`, `namedOutput`, `isFileHandle`, `notAString`, `Action`, `ActionSpec`, `ActionContext`, `NodeRef`, `OutputRef`, `NodeParams`, `Outputs`; `@mrmeku/dagraph/mermaid` (`mermaidBody`, `mermaidQuote`).
 - Read it when defining actions, wiring nodes, changing what `addNode` checks or the type-level guarantees, or drawing a graph.
 
 ### [dagraph-execution](dagraph-execution.md)
@@ -25,7 +25,7 @@ How a graph is walked. Orchestration decides when a node runs and does no I/O; p
 What makes a second run cheap. A node's action key hashes its kind, its inputs and its deps' content by role; a verified entry under that key is a hit and the action does not run. Outputs live in a content-addressed store, and early cutoff stops a rerun that produced the same bytes from spreading.
 
 - Concepts: action key and exactly what joins it, version inputs, keys across dagraph versions, content hash, early cutoff, output verification, the CAS layout, nodes that share a key, `invalidateOn` fingerprints, `cacheable: false`, what is never cached, finding out why a node reran, the `DagFs` port.
-- Public names: `Cache`, `CacheEntry`, `FsCache`, `MemCache`, `TieredCache`, `DagFs`, `createMemoryDagFs`; `@mrmeku/dagraph/fs` (`createBunDagFs`), `@mrmeku/dagraph/fs/node` (`createNodeDagFs`).
+- Public names: `Cache`, `CacheEntry`, `FsCache`, `MemCache`, `DagFs`, `createMemoryDagFs`; `@mrmeku/dagraph/fs` (`createBunDagFs`), `@mrmeku/dagraph/fs/node` (`createNodeDagFs`).
 - Read it when a node reruns or fails to rerun unexpectedly, when changing the key, the CAS or a cache implementation, or when an action reads something it has not declared.
 
 ## dagworkflows

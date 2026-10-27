@@ -25,24 +25,22 @@ Where it lives: `packages/dagraph/src/define-action.ts`, `src/graph/graph.ts`, `
 
 Main entry point `@mrmeku/dagraph` (graph-building part):
 
-| Export                                              | What it is                                                                                                                                                        |
-| --------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `defineAction(spec)`                                | Defines an action that needs no ports. Returns an `Action`.                                                                                                       |
-| `actionsFor<Ports, Group>()`                        | Returns a `defineAction` bound to the program's `Ports` type and its allowed concurrency-group names.                                                             |
-| `Graph<Ports, Meta>`                                | The graph class. Methods: `subgraph(prefix, meta?)` and `describe()`.                                                                                             |
-| `closure(graph, names)`                             | A new graph holding the named nodes and everything they depend on.                                                                                                |
-| `dep<T>`                                            | Declares a role that more than one action can fill, by its output type.                                                                                           |
-| `settled(...)`                                      | Marks a role, or a ref, as one the node runs without if that dep does not succeed.                                                                                |
-| `maybe(...)`                                        | Marks a role that a node may leave out.                                                                                                                           |
-| `nodeInputs<T>`                                     | Declares the inputs each node of the action must give, by name and type.                                                                                          |
-| `file(path)`                                        | A file input: the file's content becomes part of the key.                                                                                                         |
-| `nodeRefNamed(name)`                                | An untyped ref to a node known only by its name.                                                                                                                  |
-| `requiredDeps(node)`                                | A described node's deps minus its settled ones.                                                                                                                   |
-| `soleOutput(outputs)`, `namedOutput(outputs, name)` | Pick one path out of a node's outputs, or throw.                                                                                                                  |
-| `isOutputs(value)`                                  | Type guard: is a value read back (for example from a cache entry) an `Outputs` shape.                                                                             |
-| `isFileHandle(value)`                               | Type guard: is a value a single file handle.                                                                                                                      |
-| `notAString(value, refusal)`                        | Makes an object refuse every conversion to a string (described below).                                                                                            |
-| `checkInputs(inputs, where)`                        | The input validator `addNode` uses, exported for executors that build inputs themselves. It returns a checked copy, or throws with `where` as the message prefix. |
+| Export                                              | What it is                                                                                            |
+| --------------------------------------------------- | ----------------------------------------------------------------------------------------------------- |
+| `defineAction(spec)`                                | Defines an action that needs no ports. Returns an `Action`.                                           |
+| `actionsFor<Ports, Group>()`                        | Returns a `defineAction` bound to the program's `Ports` type and its allowed concurrency-group names. |
+| `Graph<Ports, Meta>`                                | The graph class. Methods: `subgraph(prefix, meta?)` and `describe()`.                                 |
+| `closure(graph, names)`                             | A new graph holding the named nodes and everything they depend on.                                    |
+| `dep<T>`                                            | Declares a role that more than one action can fill, by its output type.                               |
+| `settled(...)`                                      | Marks a role, or a ref, as one the node runs without if that dep does not succeed.                    |
+| `maybe(...)`                                        | Marks a role that a node may leave out.                                                               |
+| `nodeInputs<T>`                                     | Declares the inputs each node of the action must give, by name and type.                              |
+| `file(path)`                                        | A file input: the file's content becomes part of the key.                                             |
+| `nodeRefNamed(name)`                                | An untyped ref to a node known only by its name.                                                      |
+| `requiredDeps(node)`                                | A described node's deps minus its settled ones.                                                       |
+| `soleOutput(outputs)`, `namedOutput(outputs, name)` | Pick one path out of a node's outputs, or throw.                                                      |
+| `isFileHandle(value)`                               | Type guard: is a value a single file handle.                                                          |
+| `notAString(value, refusal)`                        | Makes an object refuse every conversion to a string (described below).                                |
 
 Types, each explained further in its section:
 
@@ -484,7 +482,6 @@ For code that reads a node's outputs back as data (results, cache entries), not 
 
 - `soleOutput(outputs)` returns the path when outputs is one string. Otherwise it throws `the node's outputs are not one path`.
 - `namedOutput(outputs, name)` returns the path a record holds as `name`. It throws `the node's outputs hold no path "<name>"` when there is none, when the field is a list, or when outputs is not a record.
-- `isOutputs(value)` reports whether a value is a string, a string array, or a record of those. An empty list and an empty record both count.
 
 Where it lives: `src/graph/types.ts`.
 
@@ -593,7 +590,7 @@ Where it lives: `packages/dagraph/package.json` (`dependencies`), `src/index.ts`
 
 - **No minimum runtime version is declared.** `package.json` has no `engines` field, and neither has the published `0.3.0` (`npm view @mrmeku/dagraph engines` prints nothing, checked on 2026-10-26). CI pins Node 24 and Bun 1.4.2, the engine runs from Node 19.0 and `/mermaid` from 21.0 (see "The package"), and the quick start runs on Node 22.18 through 25 and Bun 1.4.4, but which Node and Bun versions are supported, and so what a reader may be promised, is not settled by the code. Should `engines` state a range, and should CI run the oldest one? One lower bound for Bun is known: under Bun 1.3.14 and earlier (tried from 1.3.1, on 2026-10-26), `JSON.stringify` skips the non-enumerable own `toJSON` that `notAString` installs on a plain object. So a node ref or a settled ref stringifies as `{"name":"download"}` (with `"settled":true`) instead of throwing, while output refs and file inputs still throw. From Bun 1.4.0 it throws, as on Node. Apart from this, the engine's tests fail on those versions only through a transpiler bug that touches the tests alone, covered in [dagworkflows-cli-action-release](dagworkflows-cli-action-release.md) ("Layout and tools").
 - **No comparison with other tools or with a plain script.** The code compares dagraph with other tools only in passing: a kind is like Bazel's mnemonic, `throttledScheduler`'s limits are like Ninja's `-j` and its pools, and orchestration does no I/O so that it can run in a Temporal workflow's sandbox. Nothing in the code, its tests or the repository's public description (on GitHub, `DAG packages: @mrmeku/dagraph and @mrmeku/dagworkflows. Read-only export; see CONTRIBUTING.md.`, checked with `gh repo view mrmeku/dag` on 2026-10-26) says when dagraph is the better choice than a plain script that calls each step in turn, or than another build tool or workflow engine, beyond the problem statement at the top of this page and of [dagraph-caching](dagraph-caching.md) and [dagraph-execution](dagraph-execution.md). Is that problem statement the whole answer, or is there a comparison to state?
-- **A nested `file()` or node ref slips through at run time.** The types refuse `file()` or a node ref inside a value, but the run-time check does not. When the types are bypassed (`any`, casts), `{ v: { lock: file("x"), dep: ref } }` is accepted, keyed and delivered to the action as `{ lock: {}, dep: { name: "rec" } }`. A file's content then never reaches the key. Is that intended, or should `checkInputs` refuse these by path, as it does a class instance?
+- **A nested `file()` or node ref slips through at run time.** The types refuse `file()` or a node ref inside a value, but the run-time check does not. When the types are bypassed (`any`, casts), `{ v: { lock: file("x"), dep: ref } }` is accepted, keyed and delivered to the action as `{ lock: {}, dep: { name: "rec" } }`. A file's content then never reaches the key. Is that intended, or should the run-time check refuse these by path, as it does a class instance?
 - **Undeclared roles and missing `nodeInputs` are accepted at run time.** `addNode` checks only required roles and that refs exist. An extra role becomes a real dep and joins the key, and a missing declared node input reaches the action as `undefined`. Both are compile errors only. Should the run-time checks match?
 - **Refs are bare names.** A ref from one `Graph` is accepted by another graph that has a node of the same name, and silently binds to it. Intended?
 - **`describe()` copies arrays but not `meta`.** A caller who mutates a described node's meta object mutates the graph's. Harmless if meta is treated as read-only; worth stating or deep-copying.

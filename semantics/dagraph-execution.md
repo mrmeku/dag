@@ -80,7 +80,7 @@ The options, all optional:
 
 `ExecutionContext<Ports>` has four fields:
 
-- `cache`: a `Cache` (`FsCache`, `MemCache`, `TieredCache` or your own), where action keys map to entries.
+- `cache`: a `Cache` (`FsCache`, `MemCache` or your own), where action keys map to entries.
 - `fs`: a `DagFs`, the file system the engine reads, hashes and moves files with.
 - `casBaseDir`: the directory under which each action key gets its own directory of outputs.
 - `ports`: the tools the actions use, passed through to each action as `ports`. It is required when the graph's actions declare ports, and optional (and may be left out) when they need none.

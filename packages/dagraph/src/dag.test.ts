@@ -5,7 +5,7 @@ import { cp, mkdir, mkdtemp, realpath, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join, relative } from "node:path";
 
-import { FsCache, MemCache, TieredCache, type Cache, type DagFs } from "./cache.ts";
+import { FsCache, MemCache, type Cache, type DagFs } from "./cache.ts";
 import { actionsFor } from "./define-action.ts";
 import { execute } from "./execute.ts";
 import { fileHandle } from "./file-handle.ts";
@@ -138,21 +138,6 @@ describe("execute", () => {
       first: { ran: 15, hit: 0 },
       again: { ran: 0, hit: 15 },
       added: { ran: 8, hit: 14 },
-    });
-  });
-
-  test("tiered cache: a remote hit fills the local cache", async () => {
-    const { ctx } = setup();
-    const local = new MemCache();
-    const tiered = { ...ctx, cache: new TieredCache({ local, remote: ctx.cache }) };
-    expect({
-      remote: counts(await execute(buildItems(["aaa"]), ctx)),
-      tiered: counts(await execute(buildItems(["aaa"]), tiered)),
-      local: counts(await execute(buildItems(["aaa"]), { ...ctx, cache: local })),
-    }).toEqual({
-      remote: { ran: 8, hit: 0 },
-      tiered: { ran: 0, hit: 8 },
-      local: { ran: 0, hit: 8 },
     });
   });
 

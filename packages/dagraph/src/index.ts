@@ -1,13 +1,6 @@
 // The API reference's name for this entry point: TypeDoc names the "." export "".
 /** @module index */
-export {
-  FsCache,
-  MemCache,
-  TieredCache,
-  type Cache,
-  type CacheEntry,
-  type DagFs,
-} from "./cache.ts";
+export { FsCache, MemCache, type Cache, type CacheEntry, type DagFs } from "./cache.ts";
 export {
   actionsFor,
   defineAction,
@@ -19,12 +12,10 @@ export {
 export { execute, type ExecuteOptions } from "./execute.ts";
 export {
   Graph,
-  checkInputs,
   closure,
   dep,
   file,
   isFileHandle,
-  isOutputs,
   maybe,
   namedOutput,
   nodeInputs,

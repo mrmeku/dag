@@ -85,30 +85,3 @@ export class MemCache implements Cache {
     this.entries.set(key, entry);
   }
 }
-
-/**
- * Two-level cache (local + remote). Reads check local first, then remote (populating local on
- * remote hit). Writes go to both.
- */
-export class TieredCache implements Cache {
-  public local: Cache;
-  public remote: Cache;
-  constructor(opts: { local: Cache; remote: Cache }) {
-    this.local = opts.local;
-    this.remote = opts.remote;
-  }
-  async get(key: string): Promise<CacheEntry | undefined> {
-    const local = await this.local.get(key);
-    if (local) return local;
-    const remote = await this.remote.get(key);
-    if (remote) {
-      await this.local.put(key, remote);
-      return remote;
-    }
-    return undefined;
-  }
-  async put(key: string, entry: CacheEntry): Promise<void> {
-    await this.local.put(key, entry);
-    await this.remote.put(key, entry);
-  }
-}
