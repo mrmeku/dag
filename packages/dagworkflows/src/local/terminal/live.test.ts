@@ -57,7 +57,7 @@ function heldExec(held: string[]) {
     run: async (cmd, opts) => {
       const [name] = cmd;
       if (name === undefined || !held.includes(name))
-        return { code: 0, stdout: "", stderr: "", output: "", ok: true };
+        return { ended: "exited", code: 0, stdout: "", stderr: "", output: "", ok: true };
       return new Promise((resolve) => {
         let output = "";
         running.set(name, {
@@ -65,7 +65,8 @@ function heldExec(held: string[]) {
             output += chunk;
             opts?.onOutput?.(chunk);
           },
-          exit: (code) => resolve({ code, stdout: output, stderr: "", output, ok: code === 0 }),
+          exit: (code) =>
+            resolve({ ended: "exited", code, stdout: output, stderr: "", output, ok: code === 0 }),
         });
       });
     },

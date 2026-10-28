@@ -1,5 +1,4 @@
 import type { styleText } from "node:util";
-import { quote } from "shlex";
 import { SCROLLBACK_LINE_MAX_CHARS, STATUS_ICON } from "../config.ts";
 import {
   annotationLine,
@@ -37,6 +36,10 @@ export function clockOf(durationMs: number): string {
   return `${Math.floor(seconds / 60)}m${String(seconds % 60).padStart(2, "0")}s`;
 }
 
+/** The error says no more than the exit status does: `<cmd> exited <code>`. */
+export const errorSaysOnlyExitCode = (nodeState: FailedNodeState): boolean =>
+  nodeState.command?.ended === "exited" && nodeState.command.code !== 0 && !nodeState.timedOut;
+
 /** How a node ended, how long it took and how much it printed: `exit 1 · 2.9s · 8 lines`. */
 export function detailOf(nodeState: SettledNodeState): string {
   const duration = selectors.durationOf(nodeState);
@@ -45,8 +48,8 @@ export function detailOf(nodeState: SettledNodeState): string {
       ? ""
       : nodeState.timedOut
         ? "timed out"
-        : nodeState.command?.code
-          ? `exit ${nodeState.command.code}`
+        : errorSaysOnlyExitCode(nodeState)
+          ? `exit ${nodeState.command?.code}`
           : "",
     duration === undefined ? "" : clockOf(duration),
     nodeState.lineCount ? plural(nodeState.lineCount, "line") : "",
@@ -54,10 +57,6 @@ export function detailOf(nodeState: SettledNodeState): string {
     .filter(Boolean)
     .join(" · ");
 }
-
-/** The error says no more than the exit status does: `<cmd> exited <code>`. */
-export const errorSaysOnlyExitCode = (nodeState: FailedNodeState): boolean =>
-  !!nodeState.command?.code && !nodeState.timedOut;
 
 /** The messages of a node's warnings, from its log. */
 export const warningsOf = (log: string[]): string[] =>
@@ -80,16 +79,12 @@ export const withoutWarnings = (log: string[]): string[] => {
   return log.filter((_line, index) => messages[index] === undefined);
 };
 
-export const rerunLine = (rerunCommand: string, nodeNames: string[]): string =>
-  `${rerunCommand} --only ${quote(nodeNames.join(","))}`;
-
-/** That the run errored, its own failures, that it was cancelled, or else what it came to. */
+/** That the run errored, its failures, that it was cancelled, or else what it came to. */
 export function runHeadline(run: RunState): string {
   if (run.lifecycle.status === "errored")
     return `${STATUS_ICON.failed} errored: ${logLines(run.lifecycle.error)[0] ?? ""}`;
   const nodeReports = selectors.nodeReports(run);
-  const ownFailureNames = selectors.ownFailures(run).map((failure) => failure.node.name);
-  if (ownFailureNames.length > 0) return reportHeadline(nodeReports, ownFailureNames);
+  if (namesOf(nodeReports, "failed").length > 0) return reportHeadline(nodeReports);
   const notRunCount =
     namesOf(nodeReports, "cancelled").length + namesOf(nodeReports, "dep-failed").length;
   if (run.lifecycle.status === "cancelling" || run.lifecycle.status === "cancelled")

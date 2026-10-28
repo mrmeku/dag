@@ -42,7 +42,7 @@ How a workflow file is written: it default-exports `defineWorkflow({ implementat
 
 The life of one run, from building the graph to its outcome. Post steps are obligations: owed once their task starts, recorded before any effect, and paid by a later run before any task if left unpaid. The page also covers services, run history and its lock, cancellation and signals, timeouts, exit codes, and the run store and its kernel.
 
-- Concepts: main and post, owed, pass and post pass, run history, services kept up across runs, cancel, node states and the run's lifecycle, the run store and its listeners, ports and step records.
+- Concepts: main and post, owed, pass and post pass, run history, services kept up across runs, cancel, node states (`DepFailedNodeState`; a cancelled node's `cancelledWhile`) and the run's lifecycle, the run store and its listeners, ports (`ExecResult.ended`) and step records (`CommandCause.ended`).
 - Public names: `runWorkflow`, `runJob`, `runPost`, `RunOptions`, `RunOutcome`, `createRunHistory`, `readRunHistory`, `runHistoryLive`, `RunHistory`, `DEFAULT_HISTORY_DIR`, `RunState`, `RunLifecycle`, `RunAction`, `NodeAction`, `Pass`, `NodeState` and its cases, `selectors`, `createRunStore`, `RunStore`, `RunListener`.
 - Read it when touching post steps, cancellation, history, exit codes, the run store or the kernel's reducers and state types.
 
@@ -58,7 +58,7 @@ The cache and artifacts as nodes of the graph. `workflow.cache` adds a restore n
 
 What a run shows. Every output is a listener on the run store: the terminal in the `live`, `failures` or `grouped` style, per-node log files, the failures report, GitHub's log groups and check runs; the step summary is rendered from the store's report at the end of each pass.
 
-- Concepts: own failure and root failure, the recap, log files and the CAS log, `failures.md`, check runs, the step summary and its renderers, warnings, secrets and masking, hosts.
+- Concepts: which failure is the cause (every failed node is named; a skipped one only under its causes), the recap, log files and the CAS log, `failures.md`, check runs, the step summary and its renderers, warnings, secrets and masking, hosts.
 - Public names: `createReporter`, `SummaryRenderer`, `RunReport`, `NodeReport`, `DEFAULT_SUMMARY_RENDERERS`, `renderStatus`, `renderTimeline`, `renderCriticalPath`, `renderDag`, `renderFailures`, `renderTable`, `formatDuration`, `Host`, `CommandCause`, `createLocalHost`, `nullHost`, `createRecordingHost`, `logPath`, `DEFAULT_SUMMARY_PATH`; `@mrmeku/dagworkflows/github` (`createGithubHost`).
 - Read it when changing anything a run prints or writes for a reader, which failure counts as the cause, or a host.
 

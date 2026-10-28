@@ -9,7 +9,7 @@ import { describe, test } from "node:test";
  * alone: this walks the entries' import graph and fails on the first module under `local/`, or
  * of the packages only it uses.
  */
-const LOCAL_ONLY = /(^\.{1,2}\/(.+\/)?local\/|^(std-env|shlex|string-width|supports-hyperlinks)$)/;
+const LOCAL_ONLY = /(^\.{1,2}\/(.+\/)?local\/|^(std-env|string-width|supports-hyperlinks)$)/;
 const IMPORT_RE =
   /(?:import|export)\s[^"'`]*?from\s+["']([^"']+)["']|import\s*["']([^"']+)["']|import\(\s*["'`]([^"'`]+)["'`]\s*\)/g;
 

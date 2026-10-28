@@ -6,7 +6,6 @@ import {
   AGENT_WARNINGS_SHOWN,
 } from "../../config.ts";
 import { plural, textOf } from "../../kernel/format.ts";
-import * as selectors from "../../kernel/selectors.ts";
 import type { RunListener } from "../../kernel/store.ts";
 import { warningLines, warningsOf, type LocalContext } from "../words.ts";
 import {
@@ -41,7 +40,7 @@ function budgetedWriter(budgetChars: number, writeText: (text: string) => void) 
 }
 
 /**
- * The `failures` style, an agent's: append-only, own failures and warnings alone, within the
+ * The `failures` style, an agent's: append-only, failures and warnings alone, within the
  * budgets in config.ts. Warnings have a budget of their own, so they never push a failure out.
  * Lines past a budget are counted, and the recap says where all of it is.
  */
@@ -70,7 +69,7 @@ export function createAgentRenderer(localContext: LocalContext, writeText: (text
         ),
       ),
     settle: (nodeState, run, log) => {
-      if (selectors.isOwnFailure(run, nodeState)) {
+      if (nodeState.status === "failed") {
         if (failureBlocksPrinted === AGENT_FAILURE_BLOCKS)
           printLines([failureLine(nodeState, 0, localContext)]);
         else {

@@ -31,7 +31,7 @@ export function createLogFiles(logDir: string, fs: SyncFs, warn: (message: strin
       output: (nodeState, lines) => writeLog(nodeState.node.name, textOf(lines), true),
     },
     settle: (nodeState, _run, log) => {
-      if (selectors.actionKeyOf(nodeState) && !nodeState.printed)
+      if (selectors.logKeyOf(nodeState) && !nodeState.printed)
         writeLog(nodeState.node.name, textOf(log.map((line) => plainLine(line))));
     },
     interrupt: (run) => {

@@ -1,6 +1,6 @@
 import { join } from "shlex";
 import { FAILURES_REPORT_LOG_LINES, STATUS_ICON } from "../../config.ts";
-import { logLines, plainLine, plural, textOf, titleOf } from "../../kernel/format.ts";
+import { logLines, plainLine, plural, rerunLine, textOf, titleOf } from "../../kernel/format.ts";
 import type { RunState } from "../../kernel/run-slice.ts";
 import * as selectors from "../../kernel/selectors.ts";
 import type { RunListener } from "../../kernel/store.ts";
@@ -9,7 +9,6 @@ import {
   clockOf,
   detailOf,
   errorSaysOnlyExitCode,
-  rerunLine,
   runHeadline,
   tallyOf,
   type LocalContext,
@@ -71,29 +70,25 @@ function statusLines(run: RunState, hasFailures: boolean): string[] {
   }
 }
 
-/** failures.md: the run's status and outcome, then each own failure and what it takes to fix. */
+/** failures.md: the run's status and outcome, then each failure and what it takes to fix. */
 function failuresReportMarkdown(run: RunState, localContext: LocalContext): string {
-  const ownFailures = selectors.ownFailures(run);
+  const failures = selectors.failedNodes(run);
   const markdownLines = [
     `# Failures · ${titleOf(localContext.workflowFile)}`,
     "",
-    ...statusLines(run, ownFailures.length > 0),
+    ...statusLines(run, failures.length > 0),
   ];
-  for (const nodeState of ownFailures) {
+  for (const nodeState of failures) {
     const name = nodeState.node.name;
-    const { failed, skipped } = selectors.consequencesOf(run, name);
-    const alsoFailedDeps = selectors.failedDepsOf(run, nodeState);
+    const skipped = selectors.skippedBecauseOf(run, name);
+    const alsoFailedDeps = selectors
+      .getDependencyFailures(run, nodeState)
+      .map((depState) => depState.node.name);
     const logFile = localContext.logFile(name);
     const logTail = (nodeState.log ?? [])
       .slice(-FAILURES_REPORT_LOG_LINES)
       .map((line) => plainLine(line));
     const inlineCodeList = (names: string[]) => names.map(inlineCode).join(", ");
-    // Its own error too: a node that ran no command may also have failed for a reason of its own.
-    const nameWithError = (name: string) => {
-      const consequence = run.nodes.get(name);
-      const error = consequence?.status === "failed" ? consequence.error : "";
-      return `${inlineCode(name)} (${logLines(error)[0] ?? "failed"})`;
-    };
     markdownLines.push(
       `## ${STATUS_ICON.failed} ${name} · ${detailOf(nodeState)}`,
       "",
@@ -110,9 +105,6 @@ function failuresReportMarkdown(run: RunState, localContext: LocalContext): stri
         : []),
       ...(alsoFailedDeps.length > 0
         ? [`- dependencies that also failed: ${inlineCodeList(alsoFailedDeps)}`]
-        : []),
-      ...(failed.length > 0
-        ? [`- failed because of it: ${failed.map(nameWithError).join(", ")}`]
         : []),
       ...(skipped.length > 0 ? [`- skipped because of it: ${inlineCodeList(skipped)}`] : []),
       `- rerun: ${inlineCode(rerunLine(localContext.rerunCommand, [name]))}`,

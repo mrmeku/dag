@@ -104,7 +104,7 @@ describe("summary", () => {
     );
   });
 
-  test("the headline, the failures and the recap lead with a failure's cause, not the failures it caused", async () => {
+  test("the headline, the failures and the recap name every failure, requireAll beside what it requires", async () => {
     const nodes = [
       settled("restore:cas", "cached", [0, 5]),
       settled("test:unit", "failed", [10, 3000], ["restore:cas"]),
@@ -125,7 +125,7 @@ describe("summary", () => {
       },
       {
         status: [
-          "### ✖\uFE0E test:unit failed",
+          "### ✖\uFE0E test:unit, require-all failed",
           "",
           "built **1** · cached **1** · failed **2** · skipped **1** · wall 3.0s · parallelism 1.7× · cache 1/2 hits",
         ],
@@ -154,10 +154,10 @@ describe("summary", () => {
           "- ⏭\uFE0E deploy: skipped, dependency failed",
         ],
         footer: [
-          "✖\uFE0E test:unit failed · ci.ts · built 1 · cached 1 · failed 2 · skipped 1 · wall 3.0s",
+          "✖\uFE0E test:unit, require-all failed · ci.ts · built 1 · cached 1 · failed 2 · skipped 1 · wall 3.0s",
           "failed: test:unit, require-all",
           "skipped, dependency failed: deploy",
-          "reproduce: npx --no dag run ci.ts --only test:unit",
+          "reproduce: npx --no dag run ci.ts --only test:unit,require-all",
         ],
       },
     );

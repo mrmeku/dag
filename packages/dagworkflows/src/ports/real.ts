@@ -32,7 +32,7 @@ const groupAlive = (pid: number) => {
  * it. Once a cancelled command exits, what is left of its group, such as a background job, which
  * ignores SIGINT, gets SIGTERM and, if it is still there `sigtermGraceMs` later, SIGKILL, as
  * systemd stops a unit; the command settles when the group is gone. A command killed by a signal
- * resolves with code -1 and the signal's name on stderr and at the end of `output`.
+ * resolves `signalled`, with code -1 and the signal's name on stderr and at the end of `output`.
  * A process the command left behind holding its output (a server started with `&`) is cut off
  * `streamDrainGraceMs` after the command exits, so neither it nor a killed command's orphan keeps
  * the node running.
@@ -51,7 +51,14 @@ export function createExec(
         if (signal?.aborted) {
           const message = "cancelled before start";
           onOutput(message);
-          resolve({ code: -1, stdout: "", stderr: message, output: message, ok: false });
+          resolve({
+            ended: "not-started",
+            code: -1,
+            stdout: "",
+            stderr: message,
+            output: message,
+            ok: false,
+          });
           return;
         }
         const [bin, ...args] = cmd;
@@ -94,11 +101,19 @@ export function createExec(
         };
         proc.stdout.setEncoding("utf8").on("data", recordChunk(out));
         proc.stderr.setEncoding("utf8").on("data", recordChunk(err));
+        // Only the spawn can fail here: nothing kills or messages `proc` through Node.
         proc.on("error", (e: NodeJS.ErrnoException) => {
           // Node's wording, `spawn bash ENOENT`, under Bun too.
           const message = e.code ? `spawn ${bin} ${e.code}` : e.message;
           onOutput(message);
-          void settle({ code: -1, stdout: "", stderr: message, output: message, ok: false });
+          void settle({
+            ended: "not-started",
+            code: -1,
+            stdout: "",
+            stderr: message,
+            output: message,
+            ok: false,
+          });
         });
         proc.on("exit", () => {
           timers.push(
@@ -118,6 +133,7 @@ export function createExec(
           const output = withKill(outputSoFar);
           if (output !== outputSoFar) onOutput(output.slice(outputSoFar.length));
           void settle({
+            ended: killedBy ? "signalled" : "exited",
             code: c,
             stdout: out.join(""),
             stderr: withKill(err.join("")),

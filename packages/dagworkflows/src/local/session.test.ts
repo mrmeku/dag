@@ -113,7 +113,7 @@ const scriptedExec = (output: Record<string, { chunks: string[]; code: number }>
     const { chunks, code } = output[cmd[0] ?? ""] ?? { chunks: [], code: 0 };
     for (const chunk of chunks) opts?.onOutput?.(chunk);
     const all = chunks.join("");
-    return { code, stdout: all, stderr: "", output: all, ok: code === 0 };
+    return { ended: "exited", code, stdout: all, stderr: "", output: all, ok: code === 0 };
   },
 });
 
@@ -228,9 +228,9 @@ describe("local session, grouped style", () => {
           "[error] require-all: failed: lint",
           "summary: .dag/summary.md",
           "",
-          "✖︎ lint failed · ci flows.ts · built 4 · cached 0 · failed 2 · skipped 0 · wall 1ms",
+          "✖︎ lint, require-all failed · ci flows.ts · built 4 · cached 0 · failed 2 · skipped 0 · wall 1ms",
           "failed: lint, require-all",
-          "reproduce: npx --no dag run 'ci flows.ts' --only lint",
+          "reproduce: npx --no dag run 'ci flows.ts' --only lint,require-all",
           "",
         ],
         logs: {
@@ -248,7 +248,7 @@ describe("local session, grouped style", () => {
 });
 
 describe("local session, failures style", () => {
-  test("own failures as blocks, what they brought down in the recap, the logs and the report", async () => {
+  test("failures as blocks, what they brought down in the recap, the logs and the report", async () => {
     const { ports } = createTestPorts({
       exec: scriptedExec({
         install: { chunks: ["installed\n"], code: 0 },
@@ -320,18 +320,19 @@ describe("local session, failures style", () => {
           "├ cmd    upload   (cwd .)",
           "├ deps   lint also failed",
           "└ rerun  npx --no dag run ci.ts --only upload",
+          "✖︎ require-all   0.0s   .dag/logs/require-all.log",
           "summary: .dag/summary.md",
           "",
-          "✖︎ lint, upload, pack failed · ci.ts · wall 0.0s",
+          "✖︎ lint, require-all, upload and 1 more failed · ci.ts · wall 0.0s",
           "built 2 · cached 0 · failed 4 · skipped 1",
           "",
-          "✖︎ lint     exit 1 · 0.0s · 72 lines   .dag/logs/lint.log",
-          "  ✖︎ require-all failed because of it",
+          "✖︎ lint          exit 1 · 0.0s · 72 lines   .dag/logs/lint.log",
+          "✖︎ require-all   0.0s   .dag/logs/require-all.log",
           "  ⏭︎ deploy:site skipped because of it",
-          "✖︎ upload   exit 3 · 0.0s · 1 line   .dag/logs/upload.log",
-          "✖︎ pack     0.0s · 2 lines   .dag/logs/pack.log",
+          "✖︎ upload        exit 3 · 0.0s · 1 line   .dag/logs/upload.log",
+          "✖︎ 1 more, in the report",
           "",
-          "rerun    npx --no dag run ci.ts --only lint,upload,pack",
+          "rerun    npx --no dag run ci.ts --only lint,require-all,upload,pack",
           "report   .dag/failures.md",
           "logs     .dag/logs/",
           "style: failures · every node's log inline: --output-style=grouped",
@@ -341,20 +342,26 @@ describe("local session, failures style", () => {
           "# Failures · ci.ts",
           "",
           "status: finished · started 1970-01-01T00:00:00.000Z · wall 0.0s",
-          "✖︎ lint, upload, pack failed · built 2 · cached 0 · failed 4 · skipped 1",
+          "✖︎ lint, require-all, upload and 1 more failed · built 2 · cached 0 · failed 4 · skipped 1",
           "",
           "## ✖︎ lint · exit 1 · 0.0s · 72 lines",
           "",
           "- command: `lint` (cwd `.`)",
           "- log: `.dag/logs/lint.log` (72 lines)",
-          "- failed because of it: `require-all` (failed: lint)",
-          "- skipped because of it: `deploy:site`",
           "- rerun: `npx --no dag run ci.ts --only lint`",
           "",
           "```text",
           ...errors(12, 70),
           "70 problems",
           "```",
+          "",
+          "## ✖︎ require-all · 0.0s",
+          "",
+          "- error: failed: lint",
+          "- log: `.dag/logs/require-all.log` (0 lines)",
+          "- dependencies that also failed: `lint`",
+          "- skipped because of it: `deploy:site`",
+          "- rerun: `npx --no dag run ci.ts --only require-all`",
           "",
           "## ✖︎ upload · exit 3 · 0.0s · 1 line",
           "",
@@ -405,7 +412,7 @@ describe("local session, failures style", () => {
               : "";
           opts?.onOutput?.(output);
           const code = cmd[0] === "test" ? 1 : 0;
-          return { code, stdout: output, stderr: "", output, ok: code === 0 };
+          return { ended: "exited", code, stdout: output, stderr: "", output, ok: code === 0 };
         },
       },
       clock: clockAt(),
@@ -504,9 +511,7 @@ describe("local session, failures style", () => {
     const controller = new AbortController();
     const job = session.job(controller.signal);
     await buildStarted;
-    await waitUntil(t, () =>
-      session.report().includes("- failed because of it: `require-all` (failed: lint)"),
-    );
+    await waitUntil(t, () => session.report().some((line) => line.startsWith("## ✖︎ require-all")));
     publish();
     await waitUntil(t, () => session.report().includes("- skipped because of it: `deploy`"));
     const headMidRun = session.report().slice(0, 4);
@@ -514,7 +519,7 @@ describe("local session, failures style", () => {
     controller.abort();
     session.processEvents.emit("exit");
     const atExit = { stdout: session.stdout(), report: session.report(), logs: session.logs() };
-    exit({ code: 130, stdout: "", stderr: "", output: "", ok: false });
+    exit({ ended: "exited", code: 130, stdout: "", stderr: "", output: "", ok: false });
     await job;
     assert.deepEqual(
       { headMidRun, ...atExit },
@@ -533,6 +538,11 @@ describe("local session, failures style", () => {
           "├ log    .dag/logs/lint docs.log",
           "├ cmd    awk '/``/ { print; bad = 1 } END { exit bad }' docs/a.md   (cwd .)",
           "└ rerun  npx --no dag run ci.ts --only 'lint docs'",
+          "✖︎ require-all  0.0s",
+          "│ failed: lint",
+          "├ log    .dag/logs/require-all.log",
+          "├ deps   lint docs also failed",
+          "└ rerun  npx --no dag run ci.ts --only require-all",
           "",
           "◼︎ forced exit while build ran · report .dag/failures.md",
           "",
@@ -541,7 +551,7 @@ describe("local session, failures style", () => {
           "# Failures · ci.ts",
           "",
           "status: interrupted · started 1970-01-01T00:00:00.000Z",
-          "✖︎ lint docs failed · built 1 · cached 0 · failed 2 · skipped 1",
+          "✖︎ lint docs, require-all failed · built 1 · cached 0 · failed 2 · skipped 1",
           "",
           "A forced exit stopped the run while `build` ran.",
           "",
@@ -549,14 +559,20 @@ describe("local session, failures style", () => {
           "",
           "- command: ``` awk '/``/ { print; bad = 1 } END { exit bad }' docs/a.md ``` (cwd `.`)",
           "- log: `.dag/logs/lint docs.log` (2 lines)",
-          "- failed because of it: `require-all` (failed: lint)",
-          "- skipped because of it: `deploy`",
           "- rerun: `npx --no dag run ci.ts --only 'lint docs'`",
           "",
           "````text",
           "```",
           "Run ``bun test`` first",
           "````",
+          "",
+          "## ✖︎ require-all · 0.0s",
+          "",
+          "- error: failed: lint",
+          "- log: `.dag/logs/require-all.log` (0 lines)",
+          "- dependencies that also failed: `lint docs`",
+          "- skipped because of it: `deploy`",
+          "- rerun: `npx --no dag run ci.ts --only require-all`",
           "",
           "Logs: .dag/logs/ · summary: .dag/summary.md",
           "",
@@ -713,7 +729,14 @@ describe("local session, failures style, at the edges", () => {
           const code = cmd[0] === "hang" ? 0 : 130;
           return new Promise((resolve) =>
             signalOf(opts).addEventListener("abort", () =>
-              resolve({ code, stdout: output, stderr: "", output, ok: code === 0 }),
+              resolve({
+                ended: "exited",
+                code,
+                stdout: output,
+                stderr: "",
+                output,
+                ok: code === 0,
+              }),
             ),
           );
         },
@@ -780,6 +803,56 @@ describe("local session, failures style, at the edges", () => {
       "style: failures · every node's log inline: --output-style=grouped",
       "",
     ]);
+  });
+
+  test("a program that cannot start: its block and failures.md say why, with no exit code", async () => {
+    const { ports } = createTestPorts({
+      exec: {
+        run: async (_cmd, opts) => {
+          const message = "spawn lint ENOENT";
+          opts?.onOutput?.(message);
+          return {
+            ended: "not-started",
+            code: -1,
+            stdout: "",
+            stderr: message,
+            output: message,
+            ok: false,
+          };
+        },
+      },
+      clock: clockAt(),
+    });
+    const session = localRun("failures", ports, {
+      implementation: async (graph) =>
+        void addCommand(graph, { name: "lint", cmd: ["lint"], cacheable: false }),
+    });
+    await session.job();
+    const why =
+      "could not start lint. Check that it is on the command's PATH and that its cwd exists.";
+    assert.deepEqual(
+      {
+        block: session.stdout().slice(1, 7),
+        report: session.report().slice(5, 10),
+      },
+      {
+        block: [
+          "✖︎ lint  0.0s · 1 line",
+          "│ spawn lint ENOENT",
+          `│ ${why}`,
+          "├ log    .dag/logs/lint.log",
+          "├ cmd    lint   (cwd .)",
+          "└ rerun  npx --no dag run ci.ts --only lint",
+        ],
+        report: [
+          "## ✖︎ lint · 0.0s · 1 line",
+          "",
+          "- command: `lint` (cwd `.`)",
+          `- error: ${why}`,
+          "- log: `.dag/logs/lint.log` (1 line)",
+        ],
+      },
+    );
   });
 
   test("a forced exit before the graph is built, and with a report it cannot write", async () => {
@@ -879,7 +952,14 @@ describe("local session, failures style, at the edges", () => {
             return new Promise((resolve) =>
               signalOf(opts).addEventListener("abort", () => {
                 const output = "compiling\n";
-                resolve({ code: -1, stdout: output, stderr: "", output, ok: false });
+                resolve({
+                  ended: "signalled",
+                  code: -1,
+                  stdout: output,
+                  stderr: "",
+                  output,
+                  ok: false,
+                });
               }),
             );
           }
@@ -913,7 +993,7 @@ describe("local session, failures style, at the edges", () => {
     await releasing;
     session.processEvents.emit("exit");
     const atExit = { stdout: session.stdout(), report: session.report(), logs: session.logs() };
-    exit({ code: 130, stdout: "", stderr: "", output: "", ok: false });
+    exit({ ended: "exited", code: 130, stdout: "", stderr: "", output: "", ok: false });
     await job;
     assert.deepEqual(atExit, {
       stdout: [
@@ -953,7 +1033,14 @@ describe("local session, failures style, at the edges", () => {
           opts?.onOutput?.("compiling\n");
           return new Promise((resolve) =>
             signalOf(opts).addEventListener("abort", () =>
-              resolve({ code: -1, stdout: "", stderr: "", output: "", ok: false }),
+              resolve({
+                ended: "signalled",
+                code: -1,
+                stdout: "",
+                stderr: "",
+                output: "",
+                ok: false,
+              }),
             ),
           );
         },
@@ -1211,7 +1298,12 @@ describe("local session, live style", () => {
       // The terminal echoes a ^C at the cursor, the end of the status row.
       session.writes.push("^C");
       await emitAt(900, [
-        failureOf(lint, "k1", "eslint . exited 1", { argv: ["eslint", "."], cwd: ".", code: 1 }),
+        failureOf(lint, "k1", "eslint . exited 1", {
+          argv: ["eslint", "."],
+          cwd: ".",
+          ended: "exited",
+          code: 1,
+        }),
         dispatchOf(requireAll),
         startOf(requireAll),
         failureOf(requireAll, "", "failed: lint"),
@@ -1267,27 +1359,33 @@ describe("local session, live style", () => {
             "├ cmd    eslint .   (cwd .)",
             "└ rerun  npx --no dag run ci.ts --only l",
             "int",
-            "✖︎ require-all              failed (becau",
-            "se lint failed)",
+            "✖︎ require-all  0.0s",
+            "│ failed: lint",
+            "├ log    .dag/logs/require-all.log",
+            "├ deps   lint also failed",
+            "└ rerun  npx --no dag run ci.ts --only r",
+            "equire-all",
             "⏭︎ deploy                   skipped (beca",
-            "use lint failed)",
+            "use require-all failed)",
             "✔︎ test:a                   1.5s",
             "✔︎ test:b                   0.0s",
             "✔︎ integration:packages-dagworkflows-e2e ",
             "1.5s",
             "✔︎ cached: build, docs",
             "",
-            "✖︎ lint failed · ci.ts · wall 1.5s",
+            "✖︎ lint, require-all failed · ci.ts · wal",
+            "l 1.5s",
             "built 3 · cached 3 · failed 2 · skipped ",
             "1",
             "",
-            "✖︎ lint   exit 1 · 0.9s · 2 lines   .dag/",
-            "logs/lint.log",
-            "  ✖︎ require-all failed because of it",
+            "✖︎ lint          exit 1 · 0.9s · 2 lines ",
+            "  .dag/logs/lint.log",
+            "✖︎ require-all   0.0s   .dag/logs/require",
+            "-all.log",
             "  ⏭︎ deploy skipped because of it",
             "",
             "rerun    npx --no dag run ci.ts --only l",
-            "int",
+            "int,require-all",
             "report   .dag/failures.md   (hand this t",
             "o an agent)",
             "logs     .dag/logs/",
@@ -1314,7 +1412,14 @@ describe("local session, live style", () => {
         run: async (cmd, opts) => {
           if (cmd[0] !== "slow") {
             opts?.onOutput?.(`${cmd[0]} ok\n`);
-            return { code: 0, stdout: "", stderr: "", output: `${cmd[0]} ok\n`, ok: true };
+            return {
+              ended: "exited",
+              code: 0,
+              stdout: "",
+              stderr: "",
+              output: `${cmd[0]} ok\n`,
+              ok: true,
+            };
           }
           opts?.onOutput?.("compiling");
           started();
@@ -1322,7 +1427,7 @@ describe("local session, live style", () => {
             signalOf(opts).addEventListener("abort", () => {
               opts?.onOutput?.("\nkilled by SIGINT\n");
               const output = "compiling\nkilled by SIGINT\n";
-              resolve({ code: -1, stdout: "", stderr: "", output, ok: false });
+              resolve({ ended: "signalled", code: -1, stdout: "", stderr: "", output, ok: false });
             }),
           );
         },
@@ -1509,6 +1614,7 @@ describe("local session, live style", () => {
         {
           argv: ["eslint", "."],
           cwd: ".",
+          ended: "exited",
           code: 0,
         },
       ),
@@ -1542,7 +1648,8 @@ describe("local session, live style", () => {
         outputHashes: {},
       }),
       cancelled(x, "kx"),
-      cancelled(y),
+      // y looked its key up before the scheduler held it back, yet never ran: no line.
+      cancelled(y, "ky"),
       cancelled(w),
     ]);
     // As the runner begins a post pass that owes nothing.
@@ -1592,7 +1699,11 @@ describe("local session, live style", () => {
           "├ cmd    eslint .   (cwd .)",
           "└ rerun  npx --no dag run ci.ts --only a",
           "1",
-          "✖︎ g  failed (because a1 failed)",
+          "✖︎ g  0.0s",
+          "│ failed: a1",
+          "├ log    .dag/logs/g.log",
+          "├ deps   a1 also failed",
+          "└ rerun  npx --no dag run ci.ts --only g",
           ...skipped.map((node) => `⏭︎ ${node.name} skipped (because a1 failed)`),
           ...["a2", "a3", "a4", "a5"].map((node) => `✔︎ ${node} 0.9s`),
           "linking",
@@ -1618,7 +1729,11 @@ describe("local session, live style", () => {
           `${dim("├ log    ")}${link(".dag/logs/a1.log")}`,
           `${dim("├ cmd    ")}eslint .   ${dim("(cwd .)")}`,
           `${dim("└ rerun  ")}npx --no dag run ci.ts --only a1`,
-          `${red("✖︎")} g  ${dim("failed (because a1 failed)")}`,
+          `${red("✖︎")} ${bold("g")}  ${dim("0.0s")}`,
+          `${dim("│")} ${red("failed: a1")}`,
+          `${dim("├ log    ")}${link(".dag/logs/g.log")}`,
+          `${dim("├ deps   ")}a1 also failed`,
+          `${dim("└ rerun  ")}npx --no dag run ci.ts --only g`,
           ...skipped.map(
             (node) => `${yellow("⏭︎")} ${node.name} ${dim("skipped (because a1 failed)")}`,
           ),
@@ -1630,14 +1745,14 @@ describe("local session, live style", () => {
           `${green("✔︎")} ${dim("cached:")} c`,
           `${gray("◼︎")} x  ${dim("cancelled after 0.2s")}`,
           "",
-          `${bold("✖︎ a1 failed")} · ci.ts · wall 1.5s`,
+          `${bold("✖︎ a1, g failed")} · ci.ts · wall 1.5s`,
           dim("built 6 · cached 1 · failed 2 · skipped 6 · cancelled 3"),
           "",
           `${red("✖︎")} a1   0.8s · 2 lines   ${link(".dag/logs/a1.log")}`,
-          `  ${red("✖︎")} g failed because of it`,
           `  ${yellow("⏭︎")} s1, s2, s3, s4, s5 +1 skipped because of it`,
+          `${red("✖︎")} g    0.0s   ${link(".dag/logs/g.log")}`,
           "",
-          `${dim("rerun    ")}npx --no dag run ci.ts --only a1`,
+          `${dim("rerun    ")}npx --no dag run ci.ts --only a1,g`,
           `${dim("report   ")}${link(".dag/failures.md")}${dim("   (hand this to an agent)")}`,
           `${dim("logs     ")}${link(".dag/logs")}/`,
           "",

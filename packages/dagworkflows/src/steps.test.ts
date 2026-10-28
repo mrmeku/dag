@@ -33,8 +33,8 @@ describe("uploadArtifact", () => {
           if (program === "pack" && path) await fs.writeText(path, "bytes");
           if (program === "bundle" && path) await fs.writeText(path, "js");
           return program === "bad"
-            ? { code: 1, stdout: "", stderr: "", output: "", ok: false }
-            : { code: 0, stdout: "", stderr: "", output: "", ok: true };
+            ? { ended: "exited", code: 1, stdout: "", stderr: "", output: "", ok: false }
+            : { ended: "exited", code: 0, stdout: "", stderr: "", output: "", ok: true };
         },
       },
     });

@@ -9,6 +9,7 @@ import {
 } from "./config.ts";
 import { countsLine, errorMessage, formatDuration, reportHeadline } from "./kernel/format.ts";
 import { namesOf, wallTimeOf, type NodeReport } from "./kernel/report.ts";
+import * as selectors from "./kernel/selectors.ts";
 
 type Status = Result["status"];
 
@@ -56,7 +57,6 @@ function formatDelta(now: number, before: number): string {
 }
 
 const byName = (nodes: NodeReport[]) => [...nodes].sort((a, b) => a.name.localeCompare(b.name));
-const ran = (n: NodeReport) => n.status === "done" || n.status === "failed";
 const sum = (ns: number[]) => ns.reduce((s, n) => s + n, 0);
 /**
  * The DAG as a mermaid flowchart colored by status: `@mrmeku/dagraph/mermaid`'s `mermaidBody`,
@@ -143,7 +143,7 @@ function longestChain(nodes: NodeReport[]): { names: string[]; total: number } |
  */
 export function renderStatus({ nodes }: RunReport): string[] {
   const wall = wallTimeOf(nodes);
-  const busy = sum(nodes.filter(ran).map((n) => n.duration ?? 0));
+  const busy = sum(nodes.filter(selectors.ran).map((n) => n.duration ?? 0));
   const saved = sum(nodes.filter((n) => n.status === "cached").map((n) => n.previous ?? 0));
   const hits = namesOf(nodes, "cached").length;
   const lookups = hits + namesOf(nodes, "done").length;
@@ -164,7 +164,7 @@ export function renderStatus({ nodes }: RunReport): string[] {
 /** A mermaid gantt of the nodes that ran: what happened when, and what overlapped. */
 export function renderTimeline({ nodes }: RunReport): string[] {
   const bars = byName(nodes)
-    .filter(ran)
+    .filter(selectors.ran)
     .flatMap((n) =>
       n.start === undefined
         ? []

@@ -45,7 +45,7 @@ const started = (n: Node): ExecEvent[] => [
   { type: "start", node: n.name },
 ];
 const printed = (n: Node, chunk: string): ExecEvent => ({ type: "output", node: n.name, chunk });
-const command = { argv: ["make", "b"], cwd: ".", code: 2 };
+const command = { argv: ["make", "b"], cwd: ".", ended: "exited", code: 2 };
 const files = {
   "/cas/last-run.json": JSON.stringify({ durations: { a: 500, f: 1500 } }),
   "/cas.logs/ka.log": "a out\npart",
@@ -442,23 +442,41 @@ describe("run store", () => {
     );
   });
 
-  test("in the terminal's rule a failed post is its own failure, though it ran no command after failed nodes, and requireAll is not", () => {
+  test("a skipped node goes back through the skipped nodes between to the failures that caused it", () => {
     const db = node("up:db");
     const check = node("test", ["up:db"]);
-    const requireAll = node("require-all", ["test"]);
-    // An `action` post, which waits for every node downstream of its main.
-    const down = { ...node("down:db", ["up:db", "test", "require-all"]), post: true as const };
+    const e2e = node("e2e", ["test"]);
+    const deploy = node("deploy", ["e2e"]);
+    // After a failed `settled` dep: a failure of its own, whose block lists the dep.
+    const upload = node("upload", ["up:db", "test"]);
     const { store, events } = storeOf([]);
-    store.begin({ title: "main", nodes: [db, check, requireAll, down] });
+    store.begin({ title: "main", nodes: [db, check, e2e, deploy, upload] });
     events(
       built(db, "kdb"),
       failed(check, "kt", "make b exited 2", command),
-      failed(requireAll, "kr", "failed: test"),
-      failed(down, "kd", "connect ECONNREFUSED"),
+      settled(e2e, { actionKey: "", status: "dep-failed", dep: "test" }),
+      settled(deploy, { actionKey: "", status: "dep-failed", dep: "e2e" }),
+      failed(upload, "ku", "upload exited 3", { ...command, argv: ["upload"], code: 3 }),
     );
+    const run = store.getState();
+    const stateOf = (name: string) => {
+      const nodeState = run.nodes.get(name);
+      assert.ok(nodeState, name);
+      return nodeState;
+    };
     assert.deepEqual(
-      selectors.ownFailures(store.getState()).map((failure) => failure.node.name),
-      ["test", "down:db"],
+      {
+        causesOfDeploy: selectors.causesOf(run, stateOf("deploy")),
+        skippedBecauseOfTest: selectors.skippedBecauseOf(run, "test"),
+        dependencyFailuresOfUpload: selectors
+          .getDependencyFailures(run, stateOf("upload"))
+          .map((depState) => depState.node.name),
+      },
+      {
+        causesOfDeploy: ["test"],
+        skippedBecauseOfTest: ["e2e", "deploy"],
+        dependencyFailuresOfUpload: ["test"],
+      },
     );
   });
 });

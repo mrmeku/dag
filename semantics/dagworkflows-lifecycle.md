@@ -190,9 +190,9 @@ When every try failed, the post is `failed`, the run fails (exit code 1), the po
 and the run's history stays on disk. The next run of the workflow that finds that history pays it
 before any task. On a GitHub-hosted runner none finds it (see "When a debt outlives the job").
 
-A post's failure is always counted as its own failure, never as a consequence of something
-upstream, even though it ran after failed nodes. So it is named in the recap's `failed:` line and
-in the `reproduce:` line.
+A post that fails is named as a failure, as every failed node is, even though it ran after failed
+nodes ([dagworkflows-output](dagworkflows-output.md), "Which failure is the cause"). So it is
+named in the recap's `failed:` line and in the `reproduce:` line.
 
 ### Paying a post
 
@@ -716,10 +716,10 @@ Once the interrupted command itself exits, whatever is left of its group (for ex
 background job that ignores SIGINT) gets SIGTERM, and SIGKILL if still there 1000 ms later. The
 command settles only when its group is gone.
 
-A command killed by a signal resolves with code -1, and `killed by <SIGNAL>` is appended to its
-stderr and output (this is the `killed by SIGINT` line in the cancelled node's log). A command
-asked to run after the signal already fired does not start, and resolves with code -1 and
-`cancelled before start`. `createExec({ sigintGraceMs, sigtermGraceMs, streamDrainGraceMs })` is the only
+A command killed by a signal resolves `ended: "signalled"` with code -1, and `killed by <SIGNAL>`
+is appended to its stderr and output (this is the `killed by SIGINT` line in the cancelled node's
+log). A command asked to run after the signal already fired does not start, and resolves
+`ended: "not-started"` with code -1 and `cancelled before start`. `createExec({ sigintGraceMs, sigtermGraceMs, streamDrainGraceMs })` is the only
 way to change these delays and the stream drain's.
 
 ### Signals in the CLI and the action
@@ -887,15 +887,18 @@ Every node of a pass is in one of these states (types exported as `NodeState` an
   - `failed` (`FailedNodeState`): with `actionKey`, `startedAt`, `endedAt`, `error` (the message,
     a timeout in the runner's words), `timedOut`, and, when a command's failure caused it,
     `command` (a `CommandCause`, see below), plus the log once read.
-  - `dep-failed` (`SkippedNodeState`): never dispatched; `endedAt` and `error`, which reads
-    `dependency <name> failed`.
-  - `cancelled` (`CancelledNodeState`): dispatched or not; `actionKey` is `""` for one cancelled
-    before it had a key. It has `startedAt` if it was dispatched: the start time when its action
-    was running, the dispatch time when it was cancelled before its action started. Only a node
-    cancelled while still `pending` has none, so a present `startedAt` does not mean the action
-    started.
+  - `dep-failed` (`DepFailedNodeState`): never dispatched; `endedAt` and `error`, which reads
+    `dependency <name> failed`. The UI calls it skipped.
+  - `cancelled` (`CancelledNodeState`): with `actionKey`, `endedAt` and `cancelledWhile`, which
+    the reducer sets from the state the node left. `cancelledWhile: "running"`: it had received
+    `start`, so its action ran, and it has the start time as `startedAt`.
+    `cancelledWhile: "waiting"`: its action never started, from `pending` or `dispatched`. It has
+    no `startedAt`, even when it was dispatched, so its check run has no start time and it counts
+    toward no duration or wall time. It may still carry a real `actionKey`, since dagraph looks the
+    key up before the scheduler holds a miss back; `actionKey` is `""` for one cancelled before it
+    had a key. So `actionKey` does not say whether the action started: `cancelledWhile` does.
 
-Every state also carries the node itself (`node`, marked `post: true` for a post), the line its
+Every state also carries the node itself (`node`, the graph's `Node`), the line its
 command is printing now (`unfinishedLine`), the last line with text it ended (`lastLine`) and
 whether it printed anything (`printed`). Settled states get `lineCount` once their log is read.
 
@@ -1059,15 +1062,15 @@ or cached).
 ### Reading the state
 
 `selectors` (exported as a namespace) are pure functions over the state: `isSettled`,
-`startedAtOf`, `actionKeyOf`, `durationOf`, `nodesInFlight` (dispatched or running, earliest
-first), `runStartedAt`, `nodeReports`, `ownFailures`, `isOwnFailure`, `failedDepsOf`, `causesOf`,
-`consequencesOf`.
+`startedAtOf`, `logKeyOf` (the key whose CAS log holds what the node printed: none for a node that
+never started its action), `ran` (built or failed, never a cache hit), `durationOf`,
+`nodesInFlight` (dispatched or running, earliest first), `runStartedAt`, `nodeReports`,
+`failedNodes`, `getDependencyFailures` (the deps that failed or were `dep-failed`), `causesOf`,
+`skippedBecauseOf`.
 
-The "own failure" rule (the terminal's and the failures report's): a failed node is its own
-failure unless it failed only because a dependency did, which means it is `dep-failed`, or it
-failed without a command of its own failing while a dependency had failed (as `requireAll` does).
-A failed post is always its own failure. `causesOf` walks from a consequence back to the own
-failures behind it; `consequencesOf` the other way, split into `failed` and `skipped`.
+Every output names every failed node as a failure. A `dep-failed` node is shown only under its
+causes: `causesOf` walks from it back to the failed nodes behind it, through other `dep-failed`
+nodes, and `skippedBecauseOf` goes the other way.
 
 Where it lives: `kernel/store.ts`, `kernel/run-slice.ts`, `kernel/selectors.ts`,
 `kernel/report.ts`; test `kernel/store.test.ts`.
@@ -1079,11 +1082,13 @@ Where it lives: `kernel/store.ts`, `kernel/run-slice.ts`, `kernel/selectors.ts`,
 Everything a run touches outside itself goes through `Ports`:
 
 - `exec` (`Exec`): `run(argv, { cwd?, env?, signal?, onOutput? })` resolves to an `ExecResult`,
-  `{ code, stdout, stderr, output, ok }` (`output` is both streams in arrival order), and never
+  `{ ended, code, stdout, stderr, output, ok }` (`output` is both streams in arrival order), and never
   throws on a nonzero exit. No shell unless the argv starts one.
-  `env` is merged over the inherited environment; an `undefined` value removes a variable. A
-  program that cannot start resolves with code -1 and `spawn <program> <code>` (e.g.
-  `spawn bash ENOENT`).
+  `env` is merged over the inherited environment; an `undefined` value removes a variable. `ended`
+  says how it ended: `exited` with `code`; `signalled`, killed by a signal, with code -1; or
+  `not-started`, with code -1, when its program could not be spawned, with
+  `spawn <program> <code>` as `stderr` and `output` (e.g. `spawn bash ENOENT`), or when the signal
+  had already fired. A custom `Exec` must set it.
 - `fs`: dagraph's `DagFs`.
 - `clock` (`Clock`): `now()` and `sleep(ms, signal?)`, which ends early when the signal fires.
 - `host` (`Host`): `context()`, `group`, `info`, `annotate`, `summary`, `check` (GitHub or local
@@ -1115,7 +1120,8 @@ log is written whole when the node's action ends, to a file beside it that is th
 place. So a store, or a concurrent run of the same key, never reads half a log, and a node that is
 still running has no log there yet.
 
-`CommandCause` (`{ argv, cwd, code }`, where `cwd` is `"."` when the command named none) is the
+`CommandCause` (`{ argv, cwd, ended, code }`, where `cwd` is `"."` when the command named none,
+and `ended` and `code` are the command's `ExecResult`'s) is the
 `cause` of a node's error when a command it ran failed, and the `command` of `FailedNodeState`.
 
 `formatDuration(ms)` is the short duration the timeout message and the outputs use: `<ms>ms`

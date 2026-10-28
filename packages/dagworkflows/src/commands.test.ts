@@ -22,6 +22,7 @@ const executeUnder = (
   casBaseDir = CAS,
 ) => execute(graph, { ports, cache, fs: ports.fs, casBaseDir });
 const exited = (code: number, output = ""): ExecResult => ({
+  ended: "exited",
   code,
   stdout: output,
   stderr: "",

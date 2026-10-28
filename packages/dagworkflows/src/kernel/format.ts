@@ -1,8 +1,9 @@
 import type { Result } from "@mrmeku/dagraph";
 import { stripVTControlCharacters } from "node:util";
+import { quote } from "shlex";
 import { STATUS_ICON } from "../config.ts";
 import type { AnnotationLevel } from "../ports.ts";
-import { namesOf, rootFailures, type NodeReport } from "./report.ts";
+import { namesOf, type NodeReport } from "./report.ts";
 import type { NodeState } from "./run-slice.ts";
 
 const CONTROL_CHARACTERS = /[\x00-\x08\x0b-\x1f\x7f-\x9f]/g;
@@ -80,17 +81,18 @@ export function plainLine(line: string, maxLength = Infinity): string {
 export const cancelledHeadline = (notRunCount: number): string =>
   `${STATUS_ICON.cancelled} cancelled, ${plural(notRunCount, "node")} not run`;
 
-/** What the run came to, in a few words, naming `rootFailureNames` as what failed. */
-export function reportHeadline(
-  nodes: NodeReport[],
-  rootFailureNames = rootFailures(nodes),
-): string {
+/** The command that reruns `nodeNames`, shell-quoted: `npx --no dag run ci.ts --only 'lint docs'`. */
+export const rerunLine = (rerunCommand: string, nodeNames: string[]): string =>
+  `${rerunCommand} --only ${quote(nodeNames.join(","))}`;
+
+/** What the run came to, in a few words. */
+export function reportHeadline(nodes: NodeReport[]): string {
+  const failureNames = namesOf(nodes, "failed");
   const skippedCount = namesOf(nodes, "dep-failed").length;
   const cancelledCount = namesOf(nodes, "cancelled").length;
-  if (rootFailureNames.length > 3)
-    return `${STATUS_ICON.failed} ${rootFailureNames.slice(0, 3).join(", ")} and ${rootFailureNames.length - 3} more failed`;
-  if (rootFailureNames.length > 0)
-    return `${STATUS_ICON.failed} ${rootFailureNames.join(", ")} failed`;
+  if (failureNames.length > 3)
+    return `${STATUS_ICON.failed} ${failureNames.slice(0, 3).join(", ")} and ${failureNames.length - 3} more failed`;
+  if (failureNames.length > 0) return `${STATUS_ICON.failed} ${failureNames.join(", ")} failed`;
   if (skippedCount > 0)
     return `${STATUS_ICON["dep-failed"]} ${plural(skippedCount, "node")} skipped, a dependency failed`;
   if (cancelledCount > 0) return cancelledHeadline(cancelledCount);

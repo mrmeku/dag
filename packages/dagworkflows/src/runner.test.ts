@@ -58,10 +58,12 @@ describe("cancel, then post", () => {
         if (program === "db" && verb === "start" && path) await fs.writeText(path, "7");
         const pidFile = opts?.env?.PID;
         if (program === "db" && verb === "stop" && pidFile) stoppedPid = await fs.readText(pidFile);
-        if (program !== "slow") return { code: 0, stdout: "", stderr: "", output: "", ok: true };
+        if (program !== "slow")
+          return { ended: "exited", code: 0, stdout: "", stderr: "", output: "", ok: true };
         return new Promise((resolve) =>
           signalOf(opts).addEventListener("abort", () =>
             resolve({
+              ended: "signalled",
               code: -1,
               stdout: "",
               stderr: "killed by SIGINT\n",
@@ -211,10 +213,18 @@ describe("runJob", () => {
     });
     ports.exec = {
       run: async (cmd, opts) => {
-        if (cmd[0] !== "slow") return { code: 0, stdout: "", stderr: "", output: "", ok: true };
+        if (cmd[0] !== "slow")
+          return { ended: "exited", code: 0, stdout: "", stderr: "", output: "", ok: true };
         return new Promise((resolve) =>
           signalOf(opts).addEventListener("abort", () =>
-            resolve({ code: -1, stdout: "", stderr: "", output: "", ok: false }),
+            resolve({
+              ended: "signalled",
+              code: -1,
+              stdout: "",
+              stderr: "",
+              output: "",
+              ok: false,
+            }),
           ),
         );
       },
@@ -297,7 +307,7 @@ describe("a run killed before its post pass", () => {
           if (verb === "start" && path) await fs.writeText(path, String(++pid));
           if (program === "slow" && killed) controller.abort();
           const ok = verb !== "stop" || !stopFails;
-          return { code: ok ? 0 : 1, stdout: "", stderr: "", output: "", ok };
+          return { ended: "exited", code: ok ? 0 : 1, stdout: "", stderr: "", output: "", ok };
         },
       };
       const implementation = defineWorkflow({
@@ -437,7 +447,7 @@ describe("--only", () => {
         if (cmd[0] === "test") await new Promise((r) => setTimeout(r, 50));
         events.push(`end ${cmd.join(" ")}`);
         const ok = cmd[0] !== "test";
-        return { code: ok ? 0 : 1, stdout: "", stderr: "", output: "", ok };
+        return { ended: "exited", code: ok ? 0 : 1, stdout: "", stderr: "", output: "", ok };
       },
     };
     const implementation = defineWorkflow({
@@ -496,7 +506,7 @@ describe("--only", () => {
         events.push(`start ${cmd[0]}`);
         await new Promise((r) => setTimeout(r, 50));
         events.push(`end ${cmd[0]}`);
-        return { code: 0, stdout: "", stderr: "", output: "", ok: true };
+        return { ended: "exited", code: 0, stdout: "", stderr: "", output: "", ok: true };
       },
     };
     const save = service.save;
@@ -534,7 +544,7 @@ describe("--only", () => {
       run: async (cmd) => {
         calls.push(cmd.join(" "));
         if (cmd[0] === "e2e" && cancelAtE2e) controller.abort();
-        return { code: 0, stdout: "", stderr: "", output: "", ok: true };
+        return { ended: "exited", code: 0, stdout: "", stderr: "", output: "", ok: true };
       },
     };
     const implementation = defineWorkflow({
@@ -598,7 +608,7 @@ describe("two runs at once", () => {
           e2eRunning.resolve();
           await new Promise((r) => signalOf(opts).addEventListener("abort", r));
         }
-        return { code: 0, stdout: "", stderr: "", output: "", ok: true };
+        return { ended: "exited", code: 0, stdout: "", stderr: "", output: "", ok: true };
       },
     };
     const implementation = defineWorkflow({
@@ -635,7 +645,7 @@ describe("a history's lock", () => {
       run: async (cmd) => {
         calls.push(cmd.join(" "));
         if (cmd[0] === "e2e") controller.abort();
-        return { code: 0, stdout: "", stderr: "", output: "", ok: true };
+        return { ended: "exited", code: 0, stdout: "", stderr: "", output: "", ok: true };
       },
     };
     const implementation = defineWorkflow({
@@ -680,7 +690,7 @@ describe("a history of another workflow", () => {
       run: async (cmd) => {
         calls.push(cmd.join(" "));
         if (cmd[0] === "check" && killed) controller.abort();
-        return { code: 0, stdout: "", stderr: "", output: "", ok: true };
+        return { ended: "exited", code: 0, stdout: "", stderr: "", output: "", ok: true };
       },
     };
     const a = defineWorkflow({
@@ -738,7 +748,7 @@ describe("a killed --only run", () => {
         const pidFile = opts?.env?.PID;
         if (verb === "stop" && pidFile) stopped.push(await fs.readText(pidFile));
         if (program === "e2e" && killed) controller.abort();
-        return { code: 0, stdout: "", stderr: "", output: "", ok: true };
+        return { ended: "exited", code: 0, stdout: "", stderr: "", output: "", ok: true };
       },
     };
     const implementation = defineWorkflow({
@@ -775,7 +785,14 @@ describe("logs", () => {
       run: async () => {
         const run = ++execs === 1 ? "A" : "B";
         if (run === "B") await aWrote.promise;
-        return { code: 0, stdout: "", stderr: "", output: `${run} output\n`, ok: true };
+        return {
+          ended: "exited",
+          code: 0,
+          stdout: "",
+          stderr: "",
+          output: `${run} output\n`,
+          ok: true,
+        };
       },
     };
     ports.fs = {
@@ -821,7 +838,7 @@ describe("progress", () => {
     ports.exec = {
       run: async (cmd) => {
         if (cmd[0] === "slow") await fastSettled;
-        return { code: 0, stdout: "", stderr: "", output: "", ok: true };
+        return { ended: "exited", code: 0, stdout: "", stderr: "", output: "", ok: true };
       },
     };
     const def = defineWorkflow({
@@ -861,7 +878,7 @@ describe("a step's time", () => {
     ports.exec = {
       run: async () => {
         now += 1000;
-        return { code: 0, stdout: "", stderr: "", output: "", ok: true };
+        return { ended: "exited", code: 0, stdout: "", stderr: "", output: "", ok: true };
       },
     };
     const def = defineWorkflow({
@@ -973,6 +990,7 @@ describe("timeoutMs", () => {
           ? new Promise((resolve) =>
               signalOf(opts).addEventListener("abort", () =>
                 resolve({
+                  ended: "exited",
                   code: 0,
                   stdout: "partial\n",
                   stderr: "",
@@ -1041,7 +1059,7 @@ describe("secrets", () => {
       run: async (_cmd, opts) => {
         seen.push(opts?.env);
         const output = "token npm-s3cret\n";
-        return { code: 0, stdout: output, stderr: "", output, ok: true };
+        return { ended: "exited", code: 0, stdout: output, stderr: "", output, ok: true };
       },
     };
     const implementation = defineWorkflow({

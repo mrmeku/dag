@@ -27,6 +27,7 @@ export { formatDuration } from "./kernel/format.ts";
 export type { NodeReport } from "./kernel/report.ts";
 export type {
   CancelledNodeState,
+  DepFailedNodeState,
   FailedNodeState,
   InFlightNodeState,
   NodeAction,
@@ -37,7 +38,6 @@ export type {
   RunLifecycle,
   RunState,
   SettledNodeState,
-  SkippedNodeState,
   SucceededNodeState,
 } from "./kernel/run-slice.ts";
 export * as selectors from "./kernel/selectors.ts";

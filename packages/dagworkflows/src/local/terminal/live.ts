@@ -64,34 +64,39 @@ const STATUS_COLOR = {
   cancelled: "gray",
 } as const;
 
-const withCauses = (run: RunState, nodeState: NodeState, description: string): string => {
-  const causes = selectors.causesOf(run, nodeState);
-  return causes.length > 0 ? `${description} (because ${causes.join(", ")} failed)` : description;
-};
-
-/** A settled node as the scrollback keeps it: a line, an own failure's block, or nothing. */
+/** A settled node as the scrollback keeps it: a line, a failure's block, or nothing. */
 function settledNodeLines(
   nodeState: SettledNodeState,
   run: RunState,
   localContext: LocalContext,
 ): string[] {
-  if (nodeState.status === "cached" || (nodeState.status === "cancelled" && !nodeState.actionKey))
-    return [];
-  if (selectors.isOwnFailure(run, nodeState))
-    return failureBlockLines(nodeState, run, localContext);
-  const detail = {
-    done: () => detailOf(nodeState),
-    failed: () => withCauses(run, nodeState, "failed"),
-    "dep-failed": () => withCauses(run, nodeState, "skipped"),
-    cancelled: () => {
-      const duration = selectors.durationOf(nodeState);
-      return duration === undefined ? "cancelled" : `cancelled after ${clockOf(duration)}`;
-    },
-  }[nodeState.status]();
+  const { paint } = localContext;
   const paddedName = padName(nodeState.node.name, nameWidth(run.nodes.keys()));
-  return [
-    `${localContext.paint(STATUS_COLOR[nodeState.status], STATUS_ICON[nodeState.status])} ${paddedName} ${localContext.paint("dim", detail)}`,
+  const line = (status: keyof typeof STATUS_COLOR, detail: string) => [
+    `${paint(STATUS_COLOR[status], STATUS_ICON[status])} ${paddedName} ${paint("dim", detail)}`,
   ];
+  switch (nodeState.status) {
+    case "cached":
+      return [];
+    case "failed":
+      return failureBlockLines(nodeState, run, localContext);
+    case "done":
+      return line("done", detailOf(nodeState));
+    case "dep-failed": {
+      const causes = selectors.causesOf(run, nodeState);
+      return line(
+        "dep-failed",
+        causes.length > 0 ? `skipped (because ${causes.join(", ")} failed)` : "skipped",
+      );
+    }
+    case "cancelled":
+      switch (nodeState.cancelledWhile) {
+        case "waiting":
+          return [];
+        case "running":
+          return line("cancelled", `cancelled after ${clockOf(selectors.durationOf(nodeState))}`);
+      }
+  }
 }
 
 /** Why a pending node waits: on its deps, or, once they have settled, for the scheduler. */

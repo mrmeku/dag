@@ -12,6 +12,7 @@ import { defineWorkflow } from "./workflow.ts";
 const CAS = "/cas";
 const HISTORY_DIR = "/state/history";
 const exited = (code: number): ExecResult => ({
+  ended: "exited",
   code,
   stdout: "",
   stderr: "",

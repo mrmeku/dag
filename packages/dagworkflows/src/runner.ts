@@ -20,7 +20,7 @@ import {
   type RunHistoryFile,
 } from "./history.ts";
 import { errorMessage, titleOf } from "./kernel/format.ts";
-import type { Pass, PassNode } from "./kernel/run-slice.ts";
+import type { Pass } from "./kernel/run-slice.ts";
 import type { RunStore } from "./kernel/store.ts";
 import type { CiContext, Ports } from "./ports.ts";
 import { finishPass } from "./reporter.ts";
@@ -81,12 +81,6 @@ async function buildGraph(opts: { implementation: Implementation; ports: Ports }
   const full = new Graph<Ports>();
   await opts.implementation(full, opts.ports, ctx);
   return { ctx, full };
-}
-
-/** The graph's nodes as a pass holds them, each post marked so: no failed dep explains its failure. */
-function passNodes(graph: Graph<Ports>): PassNode[] {
-  const posts = postNodes(graph);
-  return graph.describe().map((node) => (posts.has(node.name) ? { ...node, post: true } : node));
 }
 
 /**
@@ -201,7 +195,7 @@ export async function runWorkflow(opts: RunOptions): Promise<RunOutcome> {
     });
   }
   const total = full.describe().length;
-  const nodes = passNodes(graph);
+  const nodes = graph.describe();
   const names = nodes.map((node) => node.name);
   const count = `${total} node${total === 1 ? "" : "s"}`;
   const scope = opts.only?.length
@@ -311,7 +305,8 @@ async function postPass(
     },
     title: `${titleOf(opts.workflowFile)} · post`,
     // The summary draws the owed post steps alone, so their edges to the rest of the graph go.
-    nodes: passNodes(graph)
+    nodes: graph
+      .describe()
       .filter((node) => owed.has(node.name))
       .map((node) => ({ ...node, deps: node.deps.filter((dep) => owed.has(dep)) })),
   };

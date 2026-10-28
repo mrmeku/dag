@@ -9,14 +9,13 @@ import {
   SCROLLBACK_LINE_MAX_CHARS,
   STATUS_ICON,
 } from "../../config.ts";
-import { logLines, plainLine, plural, titleOf } from "../../kernel/format.ts";
+import { logLines, plainLine, plural, rerunLine, titleOf } from "../../kernel/format.ts";
 import type { FailedNodeState, Pass, RunState } from "../../kernel/run-slice.ts";
 import * as selectors from "../../kernel/selectors.ts";
 import {
   clockOf,
   detailOf,
   errorSaysOnlyExitCode,
-  rerunLine,
   runHeadline,
   tallyOf,
   withoutWarnings,
@@ -56,7 +55,7 @@ export function tailLines(log: string[], maxCharacters = Infinity): string[] {
 export const blockLog = (nodeState: FailedNodeState): string[] =>
   withoutWarnings(nodeState.log ?? []);
 
-/** An own failure: how it ended, its log's tail and error, then what to read, run and rerun. */
+/** A failure: how it ended, its log's tail and error, then what to read, run and rerun. */
 export function failureBlockLines(
   nodeState: FailedNodeState,
   run: RunState,
@@ -66,7 +65,9 @@ export function failureBlockLines(
   const { paint } = localContext;
   const name = nodeState.node.name;
   const logFile = localContext.logFile(name);
-  const alsoFailedDeps = selectors.failedDepsOf(run, nodeState);
+  const alsoFailedDeps = selectors
+    .getDependencyFailures(run, nodeState)
+    .map((depState) => depState.node.name);
   const labelledRows: Array<[label: string, value: string]> = [];
   if (logFile) labelledRows.push(["log", localContext.link(logFile)]);
   if (nodeState.command)
@@ -105,7 +106,7 @@ export function failureLine(
 }
 
 /**
- * The run's last lines: what it came to, the first `failuresShown` own failures and what each brought
+ * The run's last lines: what it came to, the first `failuresShown` failures and what each brought
  * down, then what to rerun and read, the report with `hint` after it.
  */
 export function recapLines(
@@ -115,9 +116,9 @@ export function recapLines(
 ): string[] {
   const { paint } = localContext;
   const tally = tallyOf(run);
-  const ownFailures = selectors.ownFailures(run);
-  const ownFailureNames = ownFailures.map((failure) => failure.node.name);
-  const nameColumns = nameWidth(ownFailureNames.slice(0, failuresShown));
+  const failures = selectors.failedNodes(run);
+  const failedNames = failures.map((failure) => failure.node.name);
+  const nameColumns = nameWidth(failedNames.slice(0, failuresShown));
   const abbreviatedNames = (names: string[]) =>
     names.length > RECAP_NAMES_SHOWN
       ? `${names.slice(0, RECAP_NAMES_SHOWN).join(", ")} +${names.length - RECAP_NAMES_SHOWN}`
@@ -126,30 +127,24 @@ export function recapLines(
     "",
     `${paint("bold", runHeadline(run))} · ${titleOf(localContext.workflowFile)}${tally ? ` · wall ${clockOf(tally.wallTime)}` : ""}`,
     ...(tally ? [paint("dim", tally.countsLine)] : []),
-    ...(ownFailureNames.length > 0 ? [""] : []),
+    ...(failedNames.length > 0 ? [""] : []),
   ];
-  for (const failure of ownFailures.slice(0, failuresShown)) {
-    const { failed, skipped } = selectors.consequencesOf(run, failure.node.name);
+  for (const failure of failures.slice(0, failuresShown)) {
+    const skipped = selectors.skippedBecauseOf(run, failure.node.name);
     lines.push(failureLine(failure, nameColumns, localContext));
-    if (failed.length > 0)
-      lines.push(
-        `  ${paint("red", STATUS_ICON.failed)} ${abbreviatedNames(failed)} failed because of it`,
-      );
     if (skipped.length > 0)
       lines.push(
         `  ${paint("yellow", STATUS_ICON["dep-failed"])} ${abbreviatedNames(skipped)} skipped because of it`,
       );
   }
-  if (ownFailureNames.length > failuresShown)
+  if (failedNames.length > failuresShown)
     lines.push(
-      `${paint("red", STATUS_ICON.failed)} ${ownFailureNames.length - failuresShown} more, in the report`,
+      `${paint("red", STATUS_ICON.failed)} ${failedNames.length - failuresShown} more, in the report`,
     );
   lines.push("");
-  if (ownFailureNames.length > 0)
-    lines.push(
-      labelLine("rerun", rerunLine(localContext.rerunCommand, ownFailureNames), localContext),
-    );
-  if (ownFailureNames.length > 0 || run.lifecycle.status === "errored")
+  if (failedNames.length > 0)
+    lines.push(labelLine("rerun", rerunLine(localContext.rerunCommand, failedNames), localContext));
+  if (failedNames.length > 0 || run.lifecycle.status === "errored")
     lines.push(
       labelLine(
         "report",

@@ -1,12 +1,13 @@
+import type { Node } from "@mrmeku/dagraph";
 import type { NodeReport } from "./report.ts";
 import type {
+  CancelledNodeState,
+  DepFailedNodeState,
   FailedNodeState,
   InFlightNodeState,
   NodeState,
-  PassNode,
   RunState,
   SettledNodeState,
-  SkippedNodeState,
   SucceededNodeState,
 } from "./run-slice.ts";
 
@@ -21,12 +22,37 @@ const isInFlight = (nodeState: NodeState): nodeState is InFlightNodeState =>
 export const startedAtOf = (nodeState: NodeState): number | undefined =>
   "startedAt" in nodeState ? nodeState.startedAt : undefined;
 
-/** "" for a node cancelled before it had one, none for a skipped or unsettled one. */
-export const actionKeyOf = (nodeState: NodeState): string | undefined =>
-  "actionKey" in nodeState ? nodeState.actionKey : undefined;
+/**
+ * The key whose CAS log holds what a node printed: the one it ran or found cached. None for a node
+ * that never started its action, though a cancelled one may have looked its key up.
+ */
+export function logKeyOf(nodeState: NodeState): string | undefined {
+  switch (nodeState.status) {
+    case "done":
+    case "cached":
+    case "failed":
+      return nodeState.actionKey;
+    case "cancelled":
+      return nodeState.cancelledWhile === "running" ? nodeState.actionKey : undefined;
+    case "pending":
+    case "dispatched":
+    case "running":
+    case "dep-failed":
+      return undefined;
+  }
+}
+
+/** Whether a node ran its action here: built or failed, never a cache hit. */
+export const ran = (node: { readonly status: NodeState["status"] }): boolean =>
+  node.status === "done" || node.status === "failed";
 
 /** From its action's start (a cache hit's dispatch) to its settle, at least 1 ms: always, for a node that ran to its end. */
-export function durationOf(nodeState: SucceededNodeState | FailedNodeState): number;
+export function durationOf(
+  nodeState:
+    | SucceededNodeState
+    | FailedNodeState
+    | Extract<CancelledNodeState, { cancelledWhile: "running" }>,
+): number;
 export function durationOf(nodeState: NodeState): number | undefined;
 export function durationOf(nodeState: NodeState): number | undefined {
   const startedAt = startedAtOf(nodeState);
@@ -49,7 +75,7 @@ export function runStartedAt(run: RunState): number | undefined {
 /** `nodes` as the run left them, in their order; the ones it never settled left out. */
 export function nodeReports(
   run: RunState,
-  nodes: PassNode[] = [...run.nodes.values()].map((nodeState) => nodeState.node),
+  nodes: Node[] = [...run.nodes.values()].map((nodeState) => nodeState.node),
 ): NodeReport[] {
   return nodes.flatMap((node): NodeReport[] => {
     const nodeState = run.nodes.get(node.name);
@@ -69,69 +95,44 @@ export function nodeReports(
   });
 }
 
-/*
- * The terminal's and failures.md's rule for which failures to fix: a node that ran its command
- * failed for its own reason, even after a failed settled dep, and so did a post. GitHub's log
- * names the failures no failure upstream explains instead (`rootFailures` in report.ts).
- */
-
-const isFailed = (
+const isFailure = (
   nodeState: NodeState | undefined,
-): nodeState is FailedNodeState | SkippedNodeState =>
+): nodeState is FailedNodeState | DepFailedNodeState =>
   nodeState?.status === "failed" || nodeState?.status === "dep-failed";
 
-const failedDepStatesOf = (run: RunState, nodeState: NodeState): NodeState[] =>
+/** The deps of a node that failed, or were skipped because one of theirs did. */
+export const getDependencyFailures = (
+  run: RunState,
+  nodeState: NodeState,
+): Array<FailedNodeState | DepFailedNodeState> =>
   nodeState.node.deps.flatMap((dep) => {
     const depState = run.nodes.get(dep);
-    return isFailed(depState) ? [depState] : [];
+    return isFailure(depState) ? [depState] : [];
   });
 
-export const failedDepsOf = (run: RunState, nodeState: NodeState): string[] =>
-  failedDepStatesOf(run, nodeState).map((depState) => depState.node.name);
-
-/**
- * Failed because a dep did: skipped, or failed running no command of its own, as a
- * `workflow.requireAll` node does. A post that failed did so after all it waits for.
- */
-const isConsequence = (run: RunState, nodeState: NodeState): boolean =>
-  nodeState.status === "dep-failed" ||
-  (nodeState.status === "failed" &&
-    !nodeState.command &&
-    nodeState.node.post !== true &&
-    failedDepsOf(run, nodeState).length > 0);
-
-export const isOwnFailure = (run: RunState, nodeState: NodeState): nodeState is FailedNodeState =>
-  nodeState.status === "failed" && !isConsequence(run, nodeState);
-
-export const ownFailures = (run: RunState): FailedNodeState[] =>
-  [...run.nodes.values()].filter((nodeState) => isOwnFailure(run, nodeState));
-
-/** The own failures a consequence goes back to, through the failed nodes between. */
+/** The failed nodes a skipped one goes back to, through the skipped nodes between. */
 export function causesOf(run: RunState, nodeState: NodeState): string[] {
   const causes = new Set<string>();
   const seen = new Set<string>();
-  const visit = (dep: NodeState) => {
+  const visit = (dep: FailedNodeState | DepFailedNodeState) => {
     const name = dep.node.name;
     if (seen.has(name)) return;
     seen.add(name);
-    if (isConsequence(run, dep)) failedDepStatesOf(run, dep).forEach(visit);
+    if (dep.status === "dep-failed") getDependencyFailures(run, dep).forEach(visit);
     else causes.add(name);
   };
-  failedDepStatesOf(run, nodeState).forEach(visit);
+  getDependencyFailures(run, nodeState).forEach(visit);
   return [...causes];
 }
 
-export function consequencesOf(
-  run: RunState,
-  ownFailureName: string,
-): { failed: string[]; skipped: string[] } {
-  const consequences = [...run.nodes.values()].filter(
-    (nodeState) =>
-      isConsequence(run, nodeState) && causesOf(run, nodeState).includes(ownFailureName),
-  );
-  const namesWithStatus = (status: NodeState["status"]) =>
-    consequences
-      .filter((nodeState) => nodeState.status === status)
-      .map((nodeState) => nodeState.node.name);
-  return { failed: namesWithStatus("failed"), skipped: namesWithStatus("dep-failed") };
-}
+/** The nodes skipped because `failedName` failed. */
+export const skippedBecauseOf = (run: RunState, failedName: string): string[] =>
+  [...run.nodes.values()]
+    .filter(
+      (nodeState) =>
+        nodeState.status === "dep-failed" && causesOf(run, nodeState).includes(failedName),
+    )
+    .map((nodeState) => nodeState.node.name);
+
+export const failedNodes = (run: RunState): FailedNodeState[] =>
+  [...run.nodes.values()].filter((nodeState) => nodeState.status === "failed");

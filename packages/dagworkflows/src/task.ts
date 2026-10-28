@@ -155,18 +155,25 @@ async function runTask<D extends DepRecord, O extends string, I extends InputRec
   const exec = async (argv: string[], options: CommandOptions = {}) => {
     const result = await ports.exec.run(argv, { ...options, signal, onOutput: output });
     log += result.output;
-    lastCommand = { argv, cwd: options.cwd || ".", code: result.code };
+    lastCommand = { argv, cwd: options.cwd || ".", ended: result.ended, code: result.code };
     return result;
   };
   const stdoutOf = (shown: string, program: string, result: ExecResult) => {
-    if (result.code === -1 && result.stderr === `spawn ${program} ENOENT`)
-      throw failure(
-        `could not start ${program}. Check that it is on the command's PATH and that its cwd exists.`,
-      );
-    if (!result.ok) throw failure(`${shown} exited ${result.code}`);
-    // A command that traps the stop signal and exits 0 was still stopped.
-    if (signal.aborted) throw failure(`${shown} was stopped`);
-    return result.stdout;
+    switch (result.ended) {
+      case "not-started":
+        throw failure(
+          signal.aborted
+            ? `${shown} was stopped before it started`
+            : `could not start ${program}. Check that it is on the command's PATH and that its cwd exists.`,
+        );
+      case "signalled":
+        throw failure(signal.aborted ? `${shown} was stopped` : `${shown} was killed by a signal`);
+      case "exited":
+        if (!result.ok) throw failure(`${shown} exited ${result.code}`);
+        // A command that traps the stop signal and exits 0 was still stopped.
+        if (signal.aborted) throw failure(`${shown} was stopped`);
+        return result.stdout;
+    }
   };
   const out = byRole(spec.outputs, (file) => outputPath(outputDir, file));
   const delays = spec.retryDelaysMs ?? [];

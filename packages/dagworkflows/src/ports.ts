@@ -3,6 +3,11 @@ import type { DagFs } from "@mrmeku/dagraph";
 import type * as properLockfile from "proper-lockfile";
 
 export interface ExecResult {
+  /**
+   * How the command ended: it exited with `code`; a signal killed it (`code` is -1); or it never
+   * started (`code` is -1), its program not spawned or the signal already fired.
+   */
+  ended: "exited" | "signalled" | "not-started";
   code: number;
   stdout: string;
   stderr: string;
@@ -17,7 +22,7 @@ export interface ExecResult {
  * `env` is merged over the inherited environment, and an `undefined` value removes a variable.
  * When `signal` fires the command is interrupted (SIGINT, then SIGTERM, then SIGKILL after the
  * grace periods in config.ts) and resolves with its exit status as usual. `onOutput` receives
- * `output` as it arrives, chunk by chunk. A program that cannot start resolves with code -1 and
+ * `output` as it arrives, chunk by chunk. A program that cannot start resolves `not-started`, with
  * `spawn <program> <error code>` as both `stderr` and `output`: `spawn bash ENOENT`.
  */
 export interface Exec {

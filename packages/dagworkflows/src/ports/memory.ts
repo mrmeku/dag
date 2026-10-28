@@ -66,7 +66,7 @@ export function steppingClock(start = 0, step = 1000): Clock {
 
 /** An Exec where every command succeeds silently. */
 export const okExec: Exec = {
-  run: async () => ({ code: 0, stdout: "", stderr: "", output: "", ok: true }),
+  run: async () => ({ ended: "exited", code: 0, stdout: "", stderr: "", output: "", ok: true }),
 };
 
 export type MemoryLockfile = Lockfile & { held: Set<string> };

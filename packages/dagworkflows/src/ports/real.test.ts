@@ -47,14 +47,15 @@ describe("createExec with a signal", () => {
       });
       assert.deepEqual(
         {
-          polite: [a.ok, a.code, a.stderr, streamed],
-          stubborn: [b.ok, b.code, b.stderr],
+          polite: [a.ended, a.ok, a.code, a.stderr, streamed],
+          stubborn: [b.ended, b.ok, b.code, b.stderr],
           late: { ...late, streamed: lateStreamed },
         },
         {
-          polite: [false, -1, "killed by SIGINT\n", ["killed by SIGINT\n"]],
-          stubborn: [false, -1, "killed by SIGTERM\n"],
+          polite: ["signalled", false, -1, "killed by SIGINT\n", ["killed by SIGINT\n"]],
+          stubborn: ["signalled", false, -1, "killed by SIGTERM\n"],
           late: {
+            ended: "not-started",
             code: -1,
             stdout: "",
             stderr: "cancelled before start",
@@ -154,12 +155,13 @@ describe("createExec with a process left behind", () => {
     process.kill(Number(r.stdout.trim()));
     assert.deepEqual(
       {
+        ended: r.ended,
         ok: r.ok,
         code: r.code,
         printedPid: /^\d+\n$/.test(r.stdout),
         settledEarly: elapsed < 5000,
       },
-      { ok: true, code: 0, printedPid: true, settledEarly: true },
+      { ended: "exited", ok: true, code: 0, printedPid: true, settledEarly: true },
     );
   });
 });
@@ -180,7 +182,7 @@ describe("createExec env", () => {
 });
 
 describe("createExec spawn failure", () => {
-  test("a program that cannot be started resolves with code -1 and the spawn error's code, in Node's words under Bun too", async () => {
+  test("a program that cannot be started resolves not started, with code -1 and the spawn error's code, in Node's words under Bun too", async () => {
     const streamed: string[] = [];
     const missing = await createExec().run(["bash", "-c", "true"], {
       env: { PATH: "/nonexistent" },
@@ -188,9 +190,10 @@ describe("createExec spawn failure", () => {
     });
     const badCwd = await createExec().run(["bash", "-c", "true"], { cwd: "/nonexistent-dir" });
     assert.deepEqual(
-      { missing: { ...missing, streamed }, badCwd: badCwd.stderr },
+      { missing: { ...missing, streamed }, badCwd: [badCwd.ended, badCwd.stderr] },
       {
         missing: {
+          ended: "not-started",
           code: -1,
           stdout: "",
           stderr: "spawn bash ENOENT",
@@ -198,7 +201,7 @@ describe("createExec spawn failure", () => {
           ok: false,
           streamed: ["spawn bash ENOENT"],
         },
-        badCwd: "spawn bash ENOENT",
+        badCwd: ["not-started", "spawn bash ENOENT"],
       },
     );
   });

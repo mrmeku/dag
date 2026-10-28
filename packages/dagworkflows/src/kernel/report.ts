@@ -1,12 +1,11 @@
-import type { Outputs, Result } from "@mrmeku/dagraph";
-import type { PassNode } from "./run-slice.ts";
+import type { Node, Outputs, Result } from "@mrmeku/dagraph";
 
 type Status = Result["status"];
 
 /** One node as the run left it: the pass's node, plus how and when it settled. */
-export interface NodeReport extends PassNode {
+export interface NodeReport extends Node {
   status: Status;
-  /** Epoch ms its action started, and from then to its settle; a cache hit's is its cache check, from dispatch. Absent for a node never dispatched. */
+  /** Epoch ms its action started, and from then to its settle; a cache hit's is its cache check, from dispatch. Absent for a skipped node and one cancelled before its action started. */
   start?: number;
   duration?: number;
   /** Its duration the last time it was built or failed, from last-run.json. */
@@ -19,25 +18,6 @@ export interface NodeReport extends PassNode {
 
 export const namesOf = (nodes: NodeReport[], status: Status): string[] =>
   nodes.filter((node) => node.status === status).map((node) => node.name);
-
-/**
- * The failures no failure upstream explains: GitHub's rule for what failed and what to rerun. A
- * post's failure is always its own, since it runs its work after all it waits for.
- */
-export function rootFailures(nodes: NodeReport[]): string[] {
-  const failed = new Set(
-    nodes
-      .filter((node) => node.status === "failed" || node.status === "dep-failed")
-      .map((node) => node.name),
-  );
-  return nodes
-    .filter(
-      (node) =>
-        node.status === "failed" &&
-        (node.post === true || !node.deps.some((dep) => failed.has(dep))),
-    )
-    .map((node) => node.name);
-}
 
 export function wallTimeOf(nodes: NodeReport[]): number {
   const starts = nodes.flatMap((node) => node.start ?? []);

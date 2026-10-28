@@ -121,9 +121,9 @@ export function createRunStore(
         runImmediately(() => listener.immediate?.output?.(nodeState, lines));
   };
   const settleNode = async (nodeState: SettledNodeState) => {
-    const log = await casLogLines(selectors.actionKeyOf(nodeState));
+    const log = await casLogLines(selectors.logKeyOf(nodeState));
     const duration = selectors.durationOf(nodeState);
-    if ((nodeState.status === "done" || nodeState.status === "failed") && duration !== undefined) {
+    if (selectors.ran(nodeState) && duration !== undefined) {
       durations[nodeState.node.name] = duration;
       await writeLastRun();
     }
@@ -196,7 +196,7 @@ export function createRunStore(
         ? groupLines(
             nodeState,
             (nodeState.status === "failed" ? nodeState.log : undefined) ??
-              (await casLogLines(selectors.actionKeyOf(nodeState))),
+              (await casLogLines(selectors.logKeyOf(nodeState))),
           )
         : [];
     },

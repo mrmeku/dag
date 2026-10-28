@@ -1,7 +1,13 @@
 import type { Result } from "@mrmeku/dagraph";
 import { STATUS_ICON } from "../config.ts";
-import { countsLine, formatDuration, groupLines, reportHeadline } from "../kernel/format.ts";
-import { namesOf, rootFailures, wallTimeOf, type NodeReport } from "../kernel/report.ts";
+import {
+  countsLine,
+  formatDuration,
+  groupLines,
+  reportHeadline,
+  rerunLine,
+} from "../kernel/format.ts";
+import { namesOf, wallTimeOf, type NodeReport } from "../kernel/report.ts";
 import type { FailedNodeState, SettledNodeState, SucceededNodeState } from "../kernel/run-slice.ts";
 import * as selectors from "../kernel/selectors.ts";
 import { createRunStore, type RunListener } from "../kernel/store.ts";
@@ -35,10 +41,10 @@ function checkRunSummary(nodeState: SettledNodeState): string {
 
 /**
  * The run's last lines in the log, outside any group: what it came to, what failed or did not
- * run, and the command that reruns the failures' causes (given `rerunCommand`, the command that ran it).
+ * run, and the command that reruns the failures (given `rerunCommand`, the command that ran it).
  */
 export function recapLines(title: string, nodes: NodeReport[], rerunCommand?: string): string[] {
-  const rootFailureNames = rootFailures(nodes);
+  const failedNames = namesOf(nodes, "failed");
   const namesLine = (label: string, status: Result["status"]) => {
     const names = namesOf(nodes, status);
     return names.length > 0 ? [`${label}: ${names.join(", ")}`] : [];
@@ -48,8 +54,8 @@ export function recapLines(title: string, nodes: NodeReport[], rerunCommand?: st
     ...namesLine("failed", "failed"),
     ...namesLine("skipped, dependency failed", "dep-failed"),
     ...namesLine("cancelled", "cancelled"),
-    ...(rerunCommand && rootFailureNames.length > 0
-      ? [`reproduce: ${rerunCommand} --only ${rootFailureNames.join(",")}`]
+    ...(rerunCommand && failedNames.length > 0
+      ? [`reproduce: ${rerunLine(rerunCommand, failedNames)}`]
       : []),
   ];
 }
@@ -85,9 +91,13 @@ export function createGithubRenderer(host: Host): RunListener {
         host.info(`${STATUS_ICON["dep-failed"]} ${name}: skipped, ${nodeState.error}`);
         break;
       case "cancelled":
-        // A node the cancel interrupted shows what it printed before it stopped.
-        if (nodeState.actionKey) host.group(`${STATUS_ICON.cancelled} ${name} (cancelled)`, log);
-        else host.info(`${STATUS_ICON.cancelled} ${name}: cancelled`);
+        switch (nodeState.cancelledWhile) {
+          case "running":
+            host.group(`${STATUS_ICON.cancelled} ${name} (cancelled)`, log);
+            break;
+          case "waiting":
+            host.info(`${STATUS_ICON.cancelled} ${name}: cancelled`);
+        }
     }
   };
 

@@ -136,7 +136,7 @@ describe("two of every node the facade adds", () => {
       exec: {
         run: async (argv) => {
           const output = `${argv.at(-1) ?? ""}\n`;
-          return { code: 0, stdout: output, stderr: "", output, ok: true };
+          return { ended: "exited", code: 0, stdout: output, stderr: "", output, ok: true };
         },
       },
     });

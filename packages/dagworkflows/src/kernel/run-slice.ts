@@ -10,14 +10,9 @@ import {
 } from "./format.ts";
 import { isSettled, startedAtOf } from "./selectors.ts";
 
-/** A node of a pass: the graph's node, marked `post` when it is a post, whose failure no dep explains. */
-export interface PassNode extends Node {
-  readonly post?: true;
-}
-
 /** What every node has: the pass's node and what its command printed. */
 interface NodeLines {
-  readonly node: PassNode;
+  readonly node: Node;
   /** The line not yet ended, from its last carriage return: what a terminal still shows. */
   readonly unfinishedLine: string;
   /** The last line with text the node ended in this pass, plain, a warning command aside. */
@@ -60,27 +55,32 @@ export type FailedNodeState = NodeLines &
   };
 
 /** Skipped because a dependency failed: never dispatched. */
-export type SkippedNodeState = NodeLines &
+export type DepFailedNodeState = NodeLines &
   LogRead & { readonly status: "dep-failed"; readonly endedAt: number; readonly error: string };
 
-/** Dispatched or not; `actionKey` is "" for one cancelled before it had one. */
+/**
+ * Cancelled while its action ran, from `startedAt`; or while it waited, its action never started,
+ * though it may have looked its key up: `actionKey` is "" for one cancelled before it had one.
+ */
 export type CancelledNodeState = NodeLines &
   LogRead &
   Readonly<Pick<Extract<Result, { status: "cancelled" }>, "status" | "actionKey">> & {
-    readonly startedAt?: number;
     readonly endedAt: number;
-  };
+  } & (
+    | { readonly cancelledWhile: "waiting" }
+    | { readonly cancelledWhile: "running"; readonly startedAt: number }
+  );
 
 export type SettledNodeState =
   | SucceededNodeState
   | FailedNodeState
-  | SkippedNodeState
+  | DepFailedNodeState
   | CancelledNodeState;
 
 /**
  * One node as far as the run has got with it. Every duration is `endedAt - startedAt`: from when
- * its action started, or for a node that settled without starting, such as a cache hit, from its
- * dispatch. A miss the scheduler holds back pends between the two, which is not its time.
+ * its action started, or for a cache hit, from its dispatch. A miss the scheduler holds back pends
+ * between the two, which is not its time; a node cancelled before its action started has none.
  */
 export type NodeState = PendingNodeState | InFlightNodeState | SettledNodeState;
 
@@ -103,7 +103,7 @@ export interface RunState {
 export interface Pass {
   banner?: { title: string; lines: string[] };
   title: string;
-  nodes: PassNode[];
+  nodes: Node[];
   rerunCommand?: string;
 }
 
@@ -127,7 +127,7 @@ export type RunAction =
 
 export const initialRunState: RunState = { nodes: new Map(), lifecycle: { status: "running" } };
 
-export const initialNodeState = (node: PassNode): PendingNodeState => ({
+export const initialNodeState = (node: Node): PendingNodeState => ({
   node,
   status: "pending",
   unfinishedLine: "",
@@ -242,13 +242,10 @@ export function nodeReducer(state: NodeState, action: NodeAction): NodeState {
     case "dep-failed":
       return { ...ended, status: "dep-failed", error: depFailedMessage(result.dep) };
     case "cancelled": {
-      const startedAt = startedAtOf(state);
-      return {
-        ...ended,
-        status: "cancelled",
-        actionKey: result.actionKey,
-        ...(startedAt !== undefined && { startedAt }),
-      };
+      const cancelled = { ...ended, status: "cancelled", actionKey: result.actionKey } as const;
+      return state.status === "running"
+        ? { ...cancelled, cancelledWhile: "running", startedAt: state.startedAt }
+        : { ...cancelled, cancelledWhile: "waiting" };
     }
   }
 }

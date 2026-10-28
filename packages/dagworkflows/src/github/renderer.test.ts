@@ -7,7 +7,7 @@ import { runWorkflow } from "../runner.ts";
 import { defineWorkflow } from "../workflow.ts";
 
 const exited = (code: number, output: string): ExecResult => {
-  return { code, stdout: output, stderr: "", output, ok: code === 0 };
+  return { ended: "exited", code, stdout: output, stderr: "", output, ok: code === 0 };
 };
 
 describe("GitHub renderer", () => {
@@ -91,11 +91,81 @@ describe("GitHub renderer", () => {
     );
   });
 
-  test("a failed post beside a failed check: both in the headline, the summary and the reproduce line, and requireAll and the cache save under their deps", async () => {
+  test("a node the cancel caught queued is a line, not a group, and its check run never started: it looked its key up but never ran", async () => {
+    let started = () => {};
+    const slowStarted = new Promise<void>((resolve) => (started = resolve));
+    const { ports, rec } = createTestPorts({
+      exec: {
+        run: async (_cmd, opts) => {
+          started();
+          const signal = opts?.signal;
+          if (!signal) throw new Error("slow ran without a signal");
+          return new Promise((resolve) =>
+            signal.addEventListener("abort", () => resolve(exited(130, "compiling\n"))),
+          );
+        },
+      },
+    });
+    const schedulerOptions = { concurrencyLimits: { one: 1 } };
+    const { implementation } = defineWorkflow({
+      schedulerOptions,
+      implementation: (workflow) => {
+        for (const name of ["slow", "queued"])
+          workflow.task({ name, cmd: [name], concurrencyGroup: "one", cacheable: false });
+      },
+    });
+    const controller = new AbortController();
+    const running = runWorkflow({
+      implementation,
+      schedulerOptions,
+      workflowFile: "ci.ts",
+      ports,
+      casBaseDir: "/cas",
+      historyDir: "/history",
+      signal: controller.signal,
+    });
+    await slowStarted;
+    controller.abort();
+    await running;
+    assert.deepEqual(
+      {
+        log: rec.log.slice(1, 4),
+        startedChecks: rec.checks.flatMap((check) => (check.startedAt ? [check.name] : [])),
+      },
+      {
+        log: [
+          "▷ slow",
+          "◼︎ queued: cancelled",
+          { title: "◼︎ slow (cancelled)", lines: ["compiling"] },
+        ],
+        startedChecks: ["slow", "slow"],
+      },
+    );
+  });
+
+  test("the reproduce line quotes a name the shell would split", async () => {
+    const { ports, rec } = createTestPorts({
+      exec: { run: async (cmd) => exited(1, `${cmd[0]}\n`) },
+    });
+    const { implementation } = defineWorkflow({
+      implementation: (workflow) =>
+        void workflow.task({ name: "lint docs", cmd: ["lint"], cacheable: false }),
+    });
+    await runWorkflow({
+      implementation,
+      workflowFile: "ci.ts",
+      ports,
+      casBaseDir: "/cas",
+      historyDir: "/history",
+    });
+    assert.equal(rec.log.at(-1), "reproduce: npx --no dag run ci.ts --only 'lint docs'");
+  });
+
+  test("a failed post, a failed save and requireAll beside a failed check: each in the headline, the summary and the reproduce line", async () => {
     const { ports, rec, cacheStore } = createTestPorts({
       exec: { run: async (cmd) => exited(cmd[0] === "up" ? 0 : 1, `${cmd[0]}\n`) },
     });
-    // The save, an ordinary task now, fails after the check it waits for.
+    // The save, an ordinary task now, fails for its own reason after the check it waits for.
     cacheStore.save = async () => {
       throw Object.assign(new Error("Key Validation Error: k cannot contain commas."), {
         name: "ValidationError",
@@ -130,11 +200,11 @@ describe("GitHub renderer", () => {
       },
       {
         recap: [
-          "✖︎ test, down:db failed · ci.ts · built 2 · cached 0 · failed 4 · skipped 0 · wall 15.0s",
+          "✖︎ test, require-all, down:db and 1 more failed · ci.ts · built 2 · cached 0 · failed 4 · skipped 0 · wall 15.0s",
           "failed: test, require-all, down:db, save:cas",
-          "reproduce: npx --no dag run ci.ts --only test,down:db",
+          "reproduce: npx --no dag run ci.ts --only test,require-all,down:db,save:cas",
         ],
-        summary: "### ✖︎ test, down:db failed",
+        summary: "### ✖︎ test, require-all, down:db and 1 more failed",
       },
     );
   });

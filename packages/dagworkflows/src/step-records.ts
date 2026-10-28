@@ -5,6 +5,7 @@
  */
 import type { DagFs } from "@mrmeku/dagraph";
 import { basename, dirname } from "node:path";
+import type { ExecResult } from "./ports.ts";
 
 /**
  * Where a step stores its log, stdout and stderr as they arrived, for the reporter: beside the
@@ -38,12 +39,17 @@ const escapeProperty = (s: string) => escapeData(s).replace(/:/g, "%3A").replace
 export const warningLine = (title: string, message: string): string =>
   `::warning title=${escapeProperty(title)}::${escapeData(message)}`;
 
-/** What a node's error carries as its `cause` when a command it ran failed: the command, where, and how it exited. */
-export interface CommandCause {
+/** What a node's error carries as its `cause` when a command it ran failed: the command, where, and how it ended. */
+export interface CommandCause extends Pick<ExecResult, "ended" | "code"> {
   argv: string[];
   cwd: string;
-  code: number;
 }
+
+const ENDINGS: readonly unknown[] = [
+  "exited",
+  "signalled",
+  "not-started",
+] satisfies ExecResult["ended"][];
 
 const isCommandCause = (cause: unknown): cause is CommandCause =>
   typeof cause === "object" &&
@@ -54,7 +60,9 @@ const isCommandCause = (cause: unknown): cause is CommandCause =>
   "cwd" in cause &&
   typeof cause.cwd === "string" &&
   "code" in cause &&
-  typeof cause.code === "number";
+  typeof cause.code === "number" &&
+  "ended" in cause &&
+  ENDINGS.includes(cause.ended);
 
 /** The command whose failure failed the node; a node that failed otherwise may carry any cause, or none. */
 export function commandOf(error: { cause?: unknown }): CommandCause | undefined {
