@@ -884,9 +884,18 @@ Every node of a pass is in one of these states (types exported as `NodeState` an
   Both carry `startedAt`.
 - Settled (`SettledNodeState`):
   - `done` or `cached` (`SucceededNodeState`): with `actionKey`, `outputs`, `startedAt`, `endedAt`.
-  - `failed` (`FailedNodeState`): with `actionKey`, `startedAt`, `endedAt`, `error` (the message,
-    a timeout in the runner's words), `timedOut`, and, when a command's failure caused it,
-    `command` (a `CommandCause`, see below), plus the log once read.
+  - `failed` (`FailedNodeState`): with `actionKey`, `endedAt`, `error` (the message, a timeout in
+    the runner's words), `timedOut`, `failedWhile`, and, when a command's failure caused it,
+    `command` (a `CommandCause`, see below), plus the log once read. The reducer sets
+    `failedWhile` from the state the node left, as it sets a cancelled node's `cancelledWhile`.
+    `failedWhile: "running"`: it had received `start`, and it has the start time as `startedAt`.
+    `failedWhile: "waiting"`: its action never started, from `pending` or `dispatched`: dagraph
+    could not compute its key, as for a `file()` input that does not exist (`actionKey` `""`),
+    could not make its attempt's directory (a real `actionKey`), or its `RunNode` rejected. It
+    has no `startedAt`, so its check run has no start time, it counts toward no duration or wall
+    time, and it has no CAS log and no entry in `last-run.json`. What the store heard decides, as for a cancel: a node whose
+    `start` the run history could not record failed `running`, since the store hears the start
+    before the history writes it, though its action never ran.
   - `dep-failed` (`DepFailedNodeState`): never dispatched; `endedAt` and `error`, which reads
     `dependency <name> failed`. The UI calls it skipped.
   - `cancelled` (`CancelledNodeState`): with `actionKey`, `endedAt` and `cancelledWhile`, which
@@ -904,12 +913,12 @@ whether it printed anything (`printed`). Settled states get `lineCount` once the
 
 The usual paths: `pending → dispatched → running → done|failed|cancelled`, or
 `pending → dispatched → pending → running → …` for a miss the scheduler holds back; a cache hit goes
-`pending → dispatched → cached`; a skipped node goes `pending → dep-failed`; a node cancelled
-before it ran goes from `pending` or `dispatched` to `cancelled`.
+`pending → dispatched → cached`; a skipped node goes `pending → dep-failed`; a node that failed or
+was cancelled before it ran goes from `pending` or `dispatched` to `failed` or `cancelled`.
 
 A node's duration is from its action's start to its settle, never counting the wait for its
-concurrency group's slot. For a node that settled without starting, such as a cache hit, it is
-from its dispatch. It is at least 1 ms.
+concurrency group's slot. For a cache hit it is from its dispatch. It is at least 1 ms. A node that
+failed or was cancelled before its action started has none.
 
 A post pass begins its owed nodes afresh: they go back to `pending` in the store, replacing what
 the run recorded for them.
@@ -959,11 +968,11 @@ listeners told of each change.
 - `listeners`: an array of `RunListener`s, in order.
 - `lastRunAtBegin`: read `last-run.json` when the store's first pass begins, so even the first
   start line can show the last run's time; later passes reuse that read. Without it the file is
-  read once, just before the store first writes it (when the first node that built or failed
-  settles), because a node may restore the CAS that holds it, or at the first `report` if no such
-  node settled. So a pass of cache hits learns its `previous` durations only at the report. Only
-  the local `dag run` session sets the option; `dag post` and the GitHub store do not, which is
-  why `dag post`'s start line shows no last-run time.
+  read once, just before the store first writes it (when the first node that built, or failed once
+  its action started, settles), because a node may restore the CAS that holds it, or at the first
+  `report` if no such node settled. So a pass of cache hits learns its `previous` durations only at
+  the report. Only the local `dag run` session sets the option; `dag post` and the GitHub store do
+  not, which is why `dag post`'s start line shows no last-run time.
 
 What a store offers:
 
@@ -1050,23 +1059,26 @@ an unhandled rejection: under Node's default unhandled-rejections mode the proce
 ### The last run's durations
 
 `<casBaseDir>/last-run.json` holds `{ "durations": { "<node>": <ms> } }`. As each node that
-**built or failed** settles, its duration is merged over the previous file's and the file is
-rewritten; cached and cancelled nodes do not change it. Because it sits in the CAS directory, a
-cache of the CAS carries it from run to run. A file the store cannot read counts as no last run.
-The durations show as `(last run 1.0s)` on start lines and as `previous` in node reports.
+**built, or failed once its action started**, settles, its duration is merged over the previous
+file's and the file is rewritten; cached and cancelled nodes, and a node that failed before its
+action started, do not change it. Because it sits in the CAS directory, a cache of the CAS carries
+it from run to run. A file the store cannot read counts as no last run. The durations show as
+`(last run 1.0s)` on start lines and as `previous` in node reports.
 
 `NodeReport` (one per settled node): the pass's node fields plus `status`, `start` and `duration`
-(absent for a node never dispatched), `previous`, `error` (failed or dep-failed), `outputs` (done
-or cached).
+(absent for a skipped node and one that failed or was cancelled before its action started),
+`failedWhile` (on every failed node, as its state's; a failed report without it counts as one that
+ran), `previous`, `error` (failed or dep-failed), `outputs` (done or cached).
 
 ### Reading the state
 
 `selectors` (exported as a namespace) are pure functions over the state: `isSettled`,
 `startedAtOf`, `logKeyOf` (the key whose CAS log holds what the node printed: none for a node that
-never started its action), `ran` (built or failed, never a cache hit), `durationOf`,
-`nodesInFlight` (dispatched or running, earliest first), `runStartedAt`, `nodeReports`,
-`failedNodes`, `getDependencyFailures` (the deps that failed or were `dep-failed`), `causesOf`,
-`skippedBecauseOf`.
+never started its action), `ran` (built, or failed once its action started; never a cache hit;
+it takes a node state or a `NodeReport`, and a failed report without `failedWhile` counts as
+ran), `durationOf`, `nodesInFlight` (dispatched or running, earliest first), `runStartedAt`,
+`nodeReports`, `failedNodes`, `getDependencyFailures` (the deps that failed or were `dep-failed`),
+`causesOf`, `skippedBecauseOf`.
 
 Every output names every failed node as a failure. A `dep-failed` node is shown only under its
 causes: `causesOf` walks from it back to the failed nodes behind it, through other `dep-failed`

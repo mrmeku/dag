@@ -1,6 +1,18 @@
-import type { ExecEvent, JsonValue, Node, Result } from "@mrmeku/dagraph";
+import {
+  execute,
+  file,
+  Graph,
+  MemCache,
+  settled as settledDep,
+  type ExecEvent,
+  type JsonValue,
+  type Node,
+  type Result,
+} from "@mrmeku/dagraph";
 import assert from "node:assert/strict";
 import { describe, test } from "node:test";
+import { addCommand } from "../commands.ts";
+import type { Ports } from "../ports.ts";
 import { createTestPorts, steppingClock } from "../ports/memory.ts";
 import { errorMessage, formatDuration, reportHeadline, warningMessages } from "./format.ts";
 import type { NodeReport } from "./report.ts";
@@ -228,7 +240,14 @@ describe("run store", () => {
     const { reports } = await failedRun();
     assert.deepEqual(reports, [
       { ...a, status: "done", start: 1000, duration: 1000, previous: 500, outputs: { out: "ka" } },
-      { ...b, status: "failed", start: 4000, duration: 1000, error: "make b exited 2" },
+      {
+        ...b,
+        status: "failed",
+        start: 4000,
+        duration: 1000,
+        failedWhile: "running",
+        error: "make b exited 2",
+      },
       { ...c, status: "cancelled", start: 8000, duration: 1000 },
       { ...d, status: "dep-failed", error: "dependency b failed" },
     ]);
@@ -241,6 +260,130 @@ describe("run store", () => {
     assert.deepEqual(JSON.parse(await fs.readText("/cas/last-run.json")), {
       durations: { a: 1000, b: 1000, f: 1500 },
     });
+  });
+
+  test("a node that failed before its action started has no start, duration or last run; one whose start the store heard has them, though recording the start failed", async () => {
+    const { ports, fs } = createTestPorts();
+    const graph = new Graph<Ports>();
+    const hash = addCommand(graph, {
+      name: "hash",
+      cmd: ["hash"],
+      inputs: { "src/a.ts": file("src/a.ts") },
+    });
+    addCommand(graph, { name: "journal", cmd: ["journal"], deps: { hash: settledDep(hash) } });
+    const store = createRunStore({ fs, clock: steppingClock(), casBaseDir: "/cas", listeners: [] });
+    const pass = { title: "main", nodes: graph.describe() };
+    const [hashNode, journalNode] = pass.nodes;
+    store.begin(pass);
+    await execute(
+      graph,
+      { ports, cache: new MemCache(), fs, casBaseDir: "/cas" },
+      {
+        // As the runner's history records a start, after the store has heard it.
+        onEvent: (event) => {
+          store.onEvent(event);
+          return event.type === "start" ? Promise.reject(new Error("disk full")) : undefined;
+        },
+      },
+    );
+    assert.deepEqual(
+      {
+        hash: store.getState().nodes.get("hash"),
+        reports: await store.report(pass),
+        lastRun: await parsed(fs.readText("/cas/last-run.json")),
+      },
+      {
+        hash: {
+          node: hashNode,
+          status: "failed",
+          failedWhile: "waiting",
+          actionKey: "",
+          endedAt: 1000,
+          error: "ENOENT: src/a.ts",
+          timedOut: false,
+          unfinishedLine: "",
+          lastLine: "",
+          printed: false,
+          lineCount: 0,
+          log: [],
+        },
+        reports: [
+          { ...hashNode, status: "failed", failedWhile: "waiting", error: "ENOENT: src/a.ts" },
+          {
+            ...journalNode,
+            status: "failed",
+            start: 3000,
+            duration: 1000,
+            failedWhile: "running",
+            error: "disk full",
+          },
+        ],
+        lastRun: { durations: { journal: 1000 } },
+      },
+    );
+  });
+
+  test("a node whose attempt could not be set up shows no log, though an earlier attempt left one under its key", async () => {
+    const output = "an earlier attempt\n";
+    const { ports, fs } = createTestPorts({
+      files: { "src/a.ts": "a" },
+      exec: {
+        run: async () => ({
+          ended: "exited",
+          code: 0,
+          stdout: output,
+          stderr: "",
+          output,
+          ok: true,
+        }),
+      },
+    });
+    const graph = new Graph<Ports>();
+    addCommand(graph, { name: "stage", cmd: ["stage"], inputs: { "src/a.ts": file("src/a.ts") } });
+    const [earlier] = await execute(graph, {
+      ports,
+      cache: new MemCache(),
+      fs,
+      casBaseDir: "/cas",
+    });
+    const noAttemptDirectory = {
+      ...fs,
+      ensureDir: (path: string) =>
+        path.includes("/tmp-") ? Promise.reject(new Error("EACCES: mkdir")) : fs.ensureDir(path),
+    };
+    const store = createRunStore({ fs, clock: steppingClock(), casBaseDir: "/cas", listeners: [] });
+    const pass = { title: "main", nodes: graph.describe() };
+    store.begin(pass);
+    await execute(
+      graph,
+      { ports, cache: new MemCache(), fs: noAttemptDirectory, casBaseDir: "/cas" },
+      { onEvent: (event) => store.onEvent(event) },
+    );
+    await store.report(pass);
+    const actionKey = earlier?.actionKey ?? "";
+    assert.deepEqual(
+      {
+        earlierLog: await fs.readText(`/cas.logs/${actionKey}.log`),
+        stage: store.getState().nodes.get("stage"),
+      },
+      {
+        earlierLog: output,
+        stage: {
+          node: pass.nodes[0],
+          status: "failed",
+          failedWhile: "waiting",
+          actionKey,
+          endedAt: 1000,
+          error: "EACCES: mkdir",
+          timedOut: false,
+          unfinishedLine: "",
+          lastLine: "",
+          printed: false,
+          lineCount: 0,
+          log: [],
+        },
+      },
+    );
   });
 
   test("a last-run.json it cannot read is no last run", async () => {

@@ -52,7 +52,7 @@ All of these are exported from the package index, `@mrmeku/dagraph`:
 | `Scheduler`, `SchedulerContext<Meta = unknown>`, `Ready<Meta>`     | types          | For writing a scheduler of your own.                                                               |
 | `Result`, `SucceededResult`, `FailedError`, `JsonValue`            | types          | A node's result and its parts.                                                                     |
 | `isResult(value)`, `isSucceeded(result)`                           | functions      | Type guards.                                                                                       |
-| `tally(results)`, `Tally`                                          | function, type | Counts results by status.                                                                          |
+| `tally(results)`, `Tally`                                          | function, type | Counts results, or anything with a `status`, by status.                                            |
 | `ExecEvent<Meta = unknown>`, `ExecListener<Meta = unknown>`        | types          | The event stream and its listener.                                                                 |
 
 The file system implementations live on subpaths so that the index reaches no I/O module: `@mrmeku/dagraph/fs` exports `createBunDagFs()` (Bun) and `@mrmeku/dagraph/fs/node` exports `createNodeDagFs()` (Node). `createMemoryDagFs()`, an in-memory file system for tests, is exported from the index.
@@ -269,7 +269,7 @@ A cached result, as JSON:
 - `isResult(value)` tells whether a value read back from a file or another process is a `Result`. It checks the fields each status needs: `done` needs `elapsed` and an entry, `cached` an entry, `failed` an `elapsed` and an `error` whose `name` and `message` are strings and whose `cause`, if any, is JSON, `dep-failed` a `dep`. Every result needs `name` and `actionKey` as strings. An unknown status is refused.
 - `isSucceeded(result)` is true for `done` and `cached`, and narrows the result to `SucceededResult`, which carries `outputs`, `contentHash` and `outputHashes`.
 - `FailedError` is the type of a failed result's `error`.
-- `tally(results)` counts results by status. It returns a `Tally`, a record with all five statuses as keys, zero when none: `{ done, cached, failed, "dep-failed", cancelled }`.
+- `tally(results)` counts results by status. It reads only `status`, so it takes any iterable of `Pick<Result, "status">`, such as dagworkflows' node reports. It returns a `Tally`, a record with all five statuses as keys, zero when none: `{ done, cached, failed, "dep-failed", cancelled }`.
 
 Where it lives: `packages/dagraph/src/types.ts`, `utils.ts`.
 

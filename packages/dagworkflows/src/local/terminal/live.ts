@@ -167,8 +167,13 @@ function footerRows(
       footerWidth,
     );
     const latestLineColumns = footerWidth - stringWidth(rowHead) - LIVE_LATEST_LINE_GAP;
+    // Before an action starts, dagraph checks the cache for a cacheable node alone.
     const latestLine =
-      nodeState.status === "dispatched" ? "checking cache" : latestLineOf(nodeState);
+      nodeState.status === "running"
+        ? latestLineOf(nodeState)
+        : nodeState.node.cacheable === false
+          ? "starting"
+          : "checking cache";
     const latestLineCell =
       latestLineColumns >= LIVE_LATEST_LINE_MIN_COLUMNS && latestLine
         ? `${" ".repeat(LIVE_LATEST_LINE_GAP)}${paint("dim", truncate(latestLine, latestLineColumns))}`

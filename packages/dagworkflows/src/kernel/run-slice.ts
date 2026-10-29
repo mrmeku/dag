@@ -41,10 +41,13 @@ export type SucceededNodeState = NodeLines &
     readonly endedAt: number;
   };
 
+/**
+ * Failed while its action ran, from `startedAt`; or while it waited, its action never started:
+ * its key could not be computed (`actionKey` ""), or its attempt could not be set up.
+ */
 export type FailedNodeState = NodeLines &
   LogRead &
   Readonly<Pick<Extract<Result, { status: "failed" }>, "status" | "actionKey">> & {
-    readonly startedAt: number;
     readonly endedAt: number;
     readonly error: string;
     readonly timedOut: boolean;
@@ -52,7 +55,10 @@ export type FailedNodeState = NodeLines &
     readonly command?: CommandCause;
     /** The CAS log, kept for the failure's block and report. */
     readonly log?: string[];
-  };
+  } & (
+    | { readonly failedWhile: "waiting" }
+    | { readonly failedWhile: "running"; readonly startedAt: number }
+  );
 
 /** Skipped because a dependency failed: never dispatched. */
 export type DepFailedNodeState = NodeLines &
@@ -80,7 +86,8 @@ export type SettledNodeState =
 /**
  * One node as far as the run has got with it. Every duration is `endedAt - startedAt`: from when
  * its action started, or for a cache hit, from its dispatch. A miss the scheduler holds back pends
- * between the two, which is not its time; a node cancelled before its action started has none.
+ * between the two, which is not its time; a node that failed or was cancelled before its action
+ * started has none.
  */
 export type NodeState = PendingNodeState | InFlightNodeState | SettledNodeState;
 
@@ -229,15 +236,17 @@ export function nodeReducer(state: NodeState, action: NodeAction): NodeState {
       };
     case "failed": {
       const command = commandOf(result.error);
-      return {
+      const failed = {
         ...ended,
         status: "failed",
-        startedAt: startedAtOf(state) ?? occurredAt,
         actionKey: result.actionKey,
         error: failureMessage(state.node, result.error),
         timedOut: isTimeout(result.error),
         ...(command && { command }),
-      };
+      } as const;
+      return state.status === "running"
+        ? { ...failed, failedWhile: "running", startedAt: state.startedAt }
+        : { ...failed, failedWhile: "waiting" };
     }
     case "dep-failed":
       return { ...ended, status: "dep-failed", error: depFailedMessage(result.dep) };

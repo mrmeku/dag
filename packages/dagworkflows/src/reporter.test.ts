@@ -110,8 +110,10 @@ describe("reporter", () => {
       return { name, actionKey, status: "failed", error, elapsed: 1 };
     };
     const results = [timedOut("slow", "k2"), timedOut("half", "")];
+    // A node times out only once its action started.
     const events: ExecEvent[] = results.flatMap((result) => [
       { type: "dispatch", node: result.name },
+      { type: "start", node: result.name },
       settled(result),
     ]);
     for (const ev of events) reporter.onEvent(ev);

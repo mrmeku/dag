@@ -73,8 +73,8 @@ export function isSucceeded(result: Result): result is SucceededResult {
 
 export type Tally = Record<Result["status"], number>;
 
-/** Count results by status. */
-export function tally(results: Iterable<Result>): Tally {
+/** Count results, or anything else with a status, by status. */
+export function tally(results: Iterable<Pick<Result, "status">>): Tally {
   const t: Tally = { done: 0, cached: 0, failed: 0, "dep-failed": 0, cancelled: 0 };
   for (const r of results) t[r.status]++;
   return t;

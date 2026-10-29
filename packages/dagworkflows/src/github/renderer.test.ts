@@ -1,9 +1,10 @@
-import { settled } from "@mrmeku/dagraph";
+import { file, settled } from "@mrmeku/dagraph";
 import assert from "node:assert/strict";
 import { describe, test } from "node:test";
 import type { ExecResult } from "../ports.ts";
 import { createTestPorts } from "../ports/memory.ts";
 import { runWorkflow } from "../runner.ts";
+import { renderFailures, renderStatus, renderTimeline } from "../summary.ts";
 import { defineWorkflow } from "../workflow.ts";
 
 const exited = (code: number, output: string): ExecResult => {
@@ -139,6 +140,69 @@ describe("GitHub renderer", () => {
           { title: "◼︎ slow (cancelled)", lines: ["compiling"] },
         ],
         startedChecks: ["slow", "slow"],
+      },
+    );
+  });
+
+  test("a task whose key needs a missing file fails before it starts: no start line, start time or duration, and the summary counts it as no run", async () => {
+    const { ports, rec } = createTestPorts();
+    const workflowDef = defineWorkflow({
+      summary: [renderStatus, renderTimeline, renderFailures],
+      implementation: (workflow) =>
+        void workflow.task({
+          name: "lint",
+          cmd: ["lint"],
+          inputs: { "src/a.ts": file("src/a.ts") },
+        }),
+    });
+    await runWorkflow({
+      ...workflowDef,
+      workflowFile: "ci.ts",
+      ports,
+      casBaseDir: "/cas",
+      historyDir: "/history",
+    });
+    const error = "ENOENT: src/a.ts";
+    assert.deepEqual(
+      { log: rec.log, checks: rec.checks, summary: rec.summaries.join("").split("\n") },
+      {
+        log: [
+          { title: "ci.ts · 1 node", lines: ["lint"] },
+          { title: "✖︎ lint (not started)", lines: ["── error ──", error] },
+          "",
+          "✖︎ lint failed · ci.ts · built 0 · cached 0 · failed 1 · skipped 0 · wall 0ms",
+          "failed: lint",
+          "reproduce: npx --no dag run ci.ts --only lint",
+        ],
+        checks: [
+          {
+            name: "lint",
+            status: "completed",
+            conclusion: "failure",
+            completedAt: "1970-01-01T00:00:01.000Z",
+            summary: error,
+          },
+        ],
+        // No timeline and no parallelism: nothing ran.
+        summary: [
+          "## ci.ts",
+          "",
+          "### ✖︎ lint failed",
+          "",
+          "built **0** · cached **0** · failed **1** · skipped **0** · wall 0ms",
+          "",
+          "### failures",
+          "",
+          "<details><summary>✖︎ lint (not started)</summary>",
+          "",
+          "```text",
+          "── error ──",
+          error,
+          "```",
+          "",
+          "</details>",
+          "",
+        ],
       },
     );
   });

@@ -1,4 +1,11 @@
-import { settled, type ExecEvent, type JsonValue, type Node, type Result } from "@mrmeku/dagraph";
+import {
+  file,
+  settled,
+  type ExecEvent,
+  type JsonValue,
+  type Node,
+  type Result,
+} from "@mrmeku/dagraph";
 import xterm from "@xterm/headless";
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
@@ -851,6 +858,57 @@ describe("local session, failures style, at the edges", () => {
           `- error: ${why}`,
           "- log: `.dag/logs/lint.log` (1 line)",
         ],
+      },
+    );
+  });
+
+  test("a task whose key needs a missing file: its block, recap and failures.md say it never started, and it has no log file", async () => {
+    const session = localRun("failures", createTestPorts({ clock: clockAt() }).ports, {
+      implementation: async (graph) =>
+        void addCommand(graph, {
+          name: "lint",
+          cmd: ["lint"],
+          inputs: { "src/a.ts": file("src/a.ts") },
+        }),
+    });
+    await session.job();
+    // No node started, so failures.md has no start time either.
+    assert.deepEqual(
+      { stdout: session.stdout(), report: session.report(), logs: session.logs() },
+      {
+        stdout: [
+          "ci.ts · 1 node · report .dag/failures.md",
+          "✖︎ lint  not started",
+          "│ ENOENT: src/a.ts",
+          "└ rerun  npx --no dag run ci.ts --only lint",
+          "summary: .dag/summary.md",
+          "",
+          "✖︎ lint failed · ci.ts · wall 0.0s",
+          "built 0 · cached 0 · failed 1 · skipped 0",
+          "",
+          "✖︎ lint   not started",
+          "",
+          "rerun    npx --no dag run ci.ts --only lint",
+          "report   .dag/failures.md",
+          "logs     .dag/logs/",
+          "style: failures · every node's log inline: --output-style=grouped",
+          "",
+        ],
+        report: [
+          "# Failures · ci.ts",
+          "",
+          "status: finished · wall 0.0s",
+          "✖︎ lint failed · built 0 · cached 0 · failed 1 · skipped 0",
+          "",
+          "## ✖︎ lint · not started",
+          "",
+          "- error: ENOENT: src/a.ts",
+          "- rerun: `npx --no dag run ci.ts --only lint`",
+          "",
+          "Logs: .dag/logs/ · summary: .dag/summary.md",
+          "",
+        ],
+        logs: {},
       },
     );
   });
@@ -1824,6 +1882,28 @@ describe("local session, live style", () => {
       );
     },
   );
+  test("the footer before a node's action starts: checking cache, or starting for a node with no cache", async () => {
+    let now = 0;
+    const { ports } = createTestPorts({ clock: clockAt(() => now) });
+    const session = localRun("live", ports);
+    const { store } = session.runOptions;
+    const build: Node = { name: "build", kind: "build", deps: [] };
+    const deploy: Node = { name: "deploy", kind: "deploy", deps: [], cacheable: false };
+    store.begin({ title: "ci.ts", nodes: [build, deploy] });
+    await new Promise(setImmediate);
+    store.onEvent(dispatchOf(build));
+    store.onEvent(dispatchOf(deploy));
+    now = 600;
+    session.tick();
+    const footer = session.footer();
+    await store.close();
+    assert.deepEqual(footer, [
+      "⠦ build  0.6s  checking cache",
+      "⠦ deploy 0.6s  starting",
+      "[0/2] 2 running · ctrl-c cancels",
+    ]);
+  });
+
   test("the footer in other windows", async () => {
     let now = 0;
     const { ports } = createTestPorts({ clock: clockAt(() => now) });

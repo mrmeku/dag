@@ -209,9 +209,14 @@ export async function renderFailures({ nodes, log }: RunReport): Promise<string[
       lines.push(`- ${STATUS_ICON["dep-failed"]} ${n.name}: skipped, dependency failed`);
     if (n.status === "cancelled") lines.push(`- ${STATUS_ICON.cancelled} ${n.name}: cancelled`);
     if (n.status !== "failed") continue;
-    const dur = n.duration !== undefined ? ` (${formatDuration(n.duration)})` : "";
+    const detail =
+      n.failedWhile === "waiting"
+        ? " (not started)"
+        : n.duration !== undefined
+          ? ` (${formatDuration(n.duration)})`
+          : "";
     lines.push(
-      `<details><summary>${STATUS_ICON.failed} ${n.name}${dur}</summary>`,
+      `<details><summary>${STATUS_ICON.failed} ${n.name}${detail}</summary>`,
       "",
       "```text",
       ...(await log(n.name)).slice(-FAILURES_REPORT_LOG_LINES),

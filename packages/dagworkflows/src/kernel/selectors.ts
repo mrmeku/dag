@@ -24,14 +24,15 @@ export const startedAtOf = (nodeState: NodeState): number | undefined =>
 
 /**
  * The key whose CAS log holds what a node printed: the one it ran or found cached. None for a node
- * that never started its action, though a cancelled one may have looked its key up.
+ * that never started its action, though one that failed or was cancelled may have looked its key up.
  */
 export function logKeyOf(nodeState: NodeState): string | undefined {
   switch (nodeState.status) {
     case "done":
     case "cached":
-    case "failed":
       return nodeState.actionKey;
+    case "failed":
+      return nodeState.failedWhile === "running" ? nodeState.actionKey : undefined;
     case "cancelled":
       return nodeState.cancelledWhile === "running" ? nodeState.actionKey : undefined;
     case "pending":
@@ -42,15 +43,21 @@ export function logKeyOf(nodeState: NodeState): string | undefined {
   }
 }
 
-/** Whether a node ran its action here: built or failed, never a cache hit. */
-export const ran = (node: { readonly status: NodeState["status"] }): boolean =>
-  node.status === "done" || node.status === "failed";
+/**
+ * Whether a node ran its action here: built, or failed once its action started; never a cache hit.
+ * A failed report that does not say `failedWhile` ran.
+ */
+export const ran = (node: {
+  readonly status: NodeState["status"];
+  readonly failedWhile?: FailedNodeState["failedWhile"];
+}): boolean =>
+  node.status === "done" || (node.status === "failed" && node.failedWhile !== "waiting");
 
 /** From its action's start (a cache hit's dispatch) to its settle, at least 1 ms: always, for a node that ran to its end. */
 export function durationOf(
   nodeState:
     | SucceededNodeState
-    | FailedNodeState
+    | Extract<FailedNodeState, { failedWhile: "running" }>
     | Extract<CancelledNodeState, { cancelledWhile: "running" }>,
 ): number;
 export function durationOf(nodeState: NodeState): number | undefined;
@@ -87,6 +94,7 @@ export function nodeReports(
         ...node,
         status: nodeState.status,
         ...(start !== undefined && { start, duration: Math.max(1, nodeState.endedAt - start) }),
+        ...("failedWhile" in nodeState && { failedWhile: nodeState.failedWhile }),
         ...(previous !== undefined && { previous }),
         ...("error" in nodeState && { error: nodeState.error }),
         ...("outputs" in nodeState && { outputs: nodeState.outputs }),

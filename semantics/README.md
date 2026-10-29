@@ -42,7 +42,7 @@ How a workflow file is written: it default-exports `defineWorkflow({ implementat
 
 The life of one run, from building the graph to its outcome. Post steps are obligations: owed once their task starts, recorded before any effect, and paid by a later run before any task if left unpaid. The page also covers services, run history and its lock, cancellation and signals, timeouts, exit codes, and the run store and its kernel.
 
-- Concepts: main and post, owed, pass and post pass, run history, services kept up across runs, cancel, node states (`DepFailedNodeState`; a cancelled node's `cancelledWhile`) and the run's lifecycle, the run store and its listeners, ports (`ExecResult.ended`) and step records (`CommandCause.ended`).
+- Concepts: main and post, owed, pass and post pass, run history, services kept up across runs, cancel, node states (`DepFailedNodeState`; a failed node's `failedWhile` and a cancelled node's `cancelledWhile`) and the run's lifecycle, the run store and its listeners, ports (`ExecResult.ended`) and step records (`CommandCause.ended`).
 - Public names: `runWorkflow`, `runJob`, `runPost`, `RunOptions`, `RunOutcome`, `createRunHistory`, `readRunHistory`, `runHistoryLive`, `RunHistory`, `DEFAULT_HISTORY_DIR`, `RunState`, `RunLifecycle`, `RunAction`, `NodeAction`, `Pass`, `NodeState` and its cases, `selectors`, `createRunStore`, `RunStore`, `RunListener`.
 - Read it when touching post steps, cancellation, history, exit codes, the run store or the kernel's reducers and state types.
 

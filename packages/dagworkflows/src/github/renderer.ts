@@ -23,8 +23,9 @@ const CHECK_RUN_CONCLUSION_BY_STATUS: Record<Result["status"], CheckConclusion> 
 
 const isoTimestamp = (epochMs: number) => new Date(epochMs).toISOString();
 
-const durationText = (nodeState: SucceededNodeState | FailedNodeState) =>
-  formatDuration(selectors.durationOf(nodeState));
+const durationText = (
+  nodeState: SucceededNodeState | Extract<FailedNodeState, { failedWhile: "running" }>,
+) => formatDuration(selectors.durationOf(nodeState));
 
 function checkRunSummary(nodeState: SettledNodeState): string {
   switch (nodeState.status) {
@@ -80,13 +81,13 @@ export function createGithubRenderer(host: Host): RunListener {
       case "cached":
         host.group(`${STATUS_ICON.cached} ${name} (cached)`, log);
         break;
-      case "failed":
-        host.group(
-          `${STATUS_ICON.failed} ${name} (${durationText(nodeState)})`,
-          groupLines(nodeState, log),
-        );
+      case "failed": {
+        const detail =
+          nodeState.failedWhile === "running" ? durationText(nodeState) : "not started";
+        host.group(`${STATUS_ICON.failed} ${name} (${detail})`, groupLines(nodeState, log));
         host.annotate("error", name, nodeState.error);
         break;
+      }
       case "dep-failed":
         host.info(`${STATUS_ICON["dep-failed"]} ${name}: skipped, ${nodeState.error}`);
         break;

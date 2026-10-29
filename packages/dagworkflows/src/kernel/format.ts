@@ -1,4 +1,4 @@
-import type { Result } from "@mrmeku/dagraph";
+import { tally } from "@mrmeku/dagraph";
 import { stripVTControlCharacters } from "node:util";
 import { quote } from "shlex";
 import { STATUS_ICON } from "../config.ts";
@@ -100,8 +100,8 @@ export function reportHeadline(nodes: NodeReport[]): string {
 }
 
 export function countsLine(nodes: NodeReport[], formatCount: (count: number) => string): string {
-  const countOf = (status: Result["status"]) => namesOf(nodes, status).length;
-  return `built ${formatCount(countOf("done"))} · cached ${formatCount(countOf("cached"))} · failed ${formatCount(countOf("failed"))} · skipped ${formatCount(countOf("dep-failed"))}${countOf("cancelled") > 0 ? ` · cancelled ${formatCount(countOf("cancelled"))}` : ""}`;
+  const counts = tally(nodes);
+  return `built ${formatCount(counts.done)} · cached ${formatCount(counts.cached)} · failed ${formatCount(counts.failed)} · skipped ${formatCount(counts["dep-failed"])}${counts.cancelled > 0 ? ` · cancelled ${formatCount(counts.cancelled)}` : ""}`;
 }
 
 /** A node's log as its group prints it: the log, then a failure's error; a skipped node's message. */

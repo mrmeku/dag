@@ -1,14 +1,17 @@
 import type { Node, Outputs, Result } from "@mrmeku/dagraph";
+import type { FailedNodeState } from "./run-slice.ts";
 
 type Status = Result["status"];
 
 /** One node as the run left it: the pass's node, plus how and when it settled. */
 export interface NodeReport extends Node {
   status: Status;
-  /** Epoch ms its action started, and from then to its settle; a cache hit's is its cache check, from dispatch. Absent for a skipped node and one cancelled before its action started. */
+  /** Epoch ms its action started, and from then to its settle; a cache hit's is its cache check, from dispatch. Absent for a skipped node and one that failed or was cancelled before its action started. */
   start?: number;
   duration?: number;
-  /** Its duration the last time it was built or failed, from last-run.json. */
+  /** A failed node's: `running` once its action started, else `waiting`. */
+  failedWhile?: FailedNodeState["failedWhile"];
+  /** Its duration the last time it was built, or failed once its action started, from last-run.json. */
   previous?: number;
   /** The message of a failed or dep-failed node. */
   error?: string;
