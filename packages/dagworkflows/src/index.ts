@@ -23,12 +23,13 @@ export {
   type RunHistory,
   type RunHistoryFile,
 } from "./history.ts";
-export { formatDuration } from "./kernel/format.ts";
+export { failureMessage, formatDuration } from "./kernel/format.ts";
 export type { NodeReport } from "./kernel/report.ts";
 export type {
   CancelledNodeState,
   DepFailedNodeState,
   FailedNodeState,
+  FailureNodeState,
   InFlightNodeState,
   NodeAction,
   NodeState,
@@ -51,6 +52,7 @@ export type {
   CiContext,
   Clock,
   Exec,
+  ExecOptions,
   ExecResult,
   Host,
   Lockfile,

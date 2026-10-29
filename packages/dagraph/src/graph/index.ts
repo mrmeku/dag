@@ -17,6 +17,8 @@ export {
 } from "./types.ts";
 export type {
   ActionContext,
+  AnyNodeRef,
+  AnyOutputRef,
   Dep,
   DepRecord,
   DepRefs,
@@ -35,6 +37,7 @@ export type {
   NotAString,
   OutputRef,
   Outputs,
+  Resolved,
   SettledDep,
   SettledOutputRef,
   SettledRef,

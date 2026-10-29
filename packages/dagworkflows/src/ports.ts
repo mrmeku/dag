@@ -1,5 +1,5 @@
 import type { context } from "@actions/github";
-import type { DagFs } from "@mrmeku/dagraph";
+import type * as dagraph from "@mrmeku/dagraph";
 import type * as properLockfile from "proper-lockfile";
 
 export interface ExecResult {
@@ -26,19 +26,18 @@ export interface ExecResult {
  * `spawn <program> <error code>` as both `stderr` and `output`: `spawn bash ENOENT`.
  */
 export interface Exec {
-  run: (
-    cmd: string[],
-    opts?: {
-      cwd?: string;
-      env?: Record<string, string | undefined>;
-      signal?: AbortSignal;
-      onOutput?: (chunk: string) => void;
-    },
-  ) => Promise<ExecResult>;
+  run: (cmd: string[], opts?: ExecOptions) => Promise<ExecResult>;
 }
 
-export interface Clock {
-  now: () => number;
+export interface ExecOptions {
+  cwd?: string;
+  env?: Record<string, string | undefined>;
+  signal?: AbortSignal;
+  onOutput?: (chunk: string) => void;
+}
+
+/** dagraph's clock, which stamps a run's events and times its actions, and a timer. */
+export interface Clock extends dagraph.Clock {
   /** Resolves after `ms`, or at once when `signal` aborts. */
   sleep: (ms: number, signal?: AbortSignal) => Promise<void>;
 }
@@ -138,7 +137,7 @@ export type Lockfile = Pick<typeof properLockfile, "lock" | "check">;
 /** The context every step is bound to. */
 export interface Ports {
   exec: Exec;
-  fs: DagFs;
+  fs: dagraph.DagFs;
   clock: Clock;
   host: Host;
   cacheStore: CacheStore;

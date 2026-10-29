@@ -1,15 +1,15 @@
-import type { Node } from "@mrmeku/dagraph";
+import type { Node, Result } from "@mrmeku/dagraph";
 import type { NodeReport } from "./report.ts";
 import type {
-  CancelledNodeState,
-  DepFailedNodeState,
   FailedNodeState,
+  FailureNodeState,
   InFlightNodeState,
   NodeState,
   RunState,
   SettledNodeState,
-  SucceededNodeState,
 } from "./run-slice.ts";
+
+export { commandOf } from "../step-records.ts";
 
 export const isSettled = (nodeState: NodeState): nodeState is SettledNodeState =>
   nodeState.status !== "pending" &&
@@ -23,18 +23,33 @@ export const startedAtOf = (nodeState: NodeState): number | undefined =>
   "startedAt" in nodeState ? nodeState.startedAt : undefined;
 
 /**
+ * Whether the engine ran a node's action: its result has `elapsed`, as a build's always does, and
+ * one that failed or was cancelled once its action ran. Never a cache hit or a skipped node.
+ */
+export const actionRan = <R extends Result>(
+  result: R,
+): result is R & { readonly elapsed: number } => "elapsed" in result;
+
+/**
+ * Whether a node's action ran to its end: built, or failed once its action ran; never a cache hit,
+ * nor a node a cancel stopped while its action ran. Its duration is what last-run.json keeps, and
+ * what the summary counts as busy and draws on its timeline.
+ */
+export const ranToItsEnd = (result: Result): boolean =>
+  result.status !== "cancelled" && actionRan(result);
+
+/**
  * The key whose CAS log holds what a node printed: the one it ran or found cached. None for a node
- * that never started its action, though one that failed or was cancelled may have looked its key up.
+ * whose action did not run, though one that failed or was cancelled may have looked its key up.
  */
 export function logKeyOf(nodeState: NodeState): string | undefined {
   switch (nodeState.status) {
     case "done":
     case "cached":
-      return nodeState.actionKey;
+      return nodeState.result.actionKey;
     case "failed":
-      return nodeState.failedWhile === "running" ? nodeState.actionKey : undefined;
     case "cancelled":
-      return nodeState.cancelledWhile === "running" ? nodeState.actionKey : undefined;
+      return actionRan(nodeState.result) ? nodeState.result.actionKey : undefined;
     case "pending":
     case "dispatched":
     case "running":
@@ -44,28 +59,20 @@ export function logKeyOf(nodeState: NodeState): string | undefined {
 }
 
 /**
- * Whether a node ran its action here: built, or failed once its action started; never a cache hit.
- * A failed report that does not say `failedWhile` ran.
+ * How long a node took, at least 1 ms: the engine's `elapsed` for a node whose action ran, and a
+ * cache hit's from its dispatch to its result. None for any other.
  */
-export const ran = (node: {
-  readonly status: NodeState["status"];
-  readonly failedWhile?: FailedNodeState["failedWhile"];
-}): boolean =>
-  node.status === "done" || (node.status === "failed" && node.failedWhile !== "waiting");
-
-/** From its action's start (a cache hit's dispatch) to its settle, at least 1 ms: always, for a node that ran to its end. */
-export function durationOf(
-  nodeState:
-    | SucceededNodeState
-    | Extract<FailedNodeState, { failedWhile: "running" }>
-    | Extract<CancelledNodeState, { cancelledWhile: "running" }>,
-): number;
-export function durationOf(nodeState: NodeState): number | undefined;
-export function durationOf(nodeState: NodeState): number | undefined {
-  const startedAt = startedAtOf(nodeState);
-  return startedAt === undefined || !isSettled(nodeState)
-    ? undefined
-    : Math.max(1, nodeState.endedAt - startedAt);
+export function durationOf(nodeState: SettledNodeState): number | undefined {
+  switch (nodeState.status) {
+    case "cached":
+      return Math.max(1, nodeState.endedAt - nodeState.startedAt);
+    case "dep-failed":
+      return undefined;
+    case "done":
+    case "failed":
+    case "cancelled":
+      return actionRan(nodeState.result) ? Math.max(1, nodeState.result.elapsed) : undefined;
+  }
 }
 
 /** The nodes dispatched and not settled, the earliest first. */
@@ -87,59 +94,42 @@ export function nodeReports(
   return nodes.flatMap((node): NodeReport[] => {
     const nodeState = run.nodes.get(node.name);
     if (!nodeState || !isSettled(nodeState)) return [];
-    const previous = run.lastRunDurations?.[node.name];
     const start = startedAtOf(nodeState);
+    const duration = durationOf(nodeState);
+    const previous = run.lastRunDurations?.[node.name];
     return [
       {
-        ...node,
-        status: nodeState.status,
-        ...(start !== undefined && { start, duration: Math.max(1, nodeState.endedAt - start) }),
-        ...("failedWhile" in nodeState && { failedWhile: nodeState.failedWhile }),
+        node,
+        result: nodeState.result,
+        ...(start !== undefined && { start }),
+        ...(duration !== undefined && { duration }),
         ...(previous !== undefined && { previous }),
-        ...("error" in nodeState && { error: nodeState.error }),
-        ...("outputs" in nodeState && { outputs: nodeState.outputs }),
       },
     ];
   });
 }
 
-const isFailure = (
-  nodeState: NodeState | undefined,
-): nodeState is FailedNodeState | DepFailedNodeState =>
+const isFailure = (nodeState: NodeState | undefined): nodeState is FailureNodeState =>
   nodeState?.status === "failed" || nodeState?.status === "dep-failed";
 
 /** The deps of a node that failed, or were skipped because one of theirs did. */
-export const getDependencyFailures = (
-  run: RunState,
-  nodeState: NodeState,
-): Array<FailedNodeState | DepFailedNodeState> =>
+export const getDependencyFailures = (run: RunState, nodeState: NodeState): FailureNodeState[] =>
   nodeState.node.deps.flatMap((dep) => {
     const depState = run.nodes.get(dep);
     return isFailure(depState) ? [depState] : [];
   });
 
-/** The failed nodes a skipped one goes back to, through the skipped nodes between. */
-export function causesOf(run: RunState, nodeState: NodeState): string[] {
-  const causes = new Set<string>();
-  const seen = new Set<string>();
-  const visit = (dep: FailedNodeState | DepFailedNodeState) => {
-    const name = dep.node.name;
-    if (seen.has(name)) return;
-    seen.add(name);
-    if (dep.status === "dep-failed") getDependencyFailures(run, dep).forEach(visit);
-    else causes.add(name);
-  };
-  getDependencyFailures(run, nodeState).forEach(visit);
-  return [...causes];
-}
+/**
+ * What a skipped node goes back to, as dagraph's `rootCauses`: the nodes along its required deps
+ * that did not succeed and were not skipped themselves. None for any other node.
+ */
+export const causesOf = (nodeState: NodeState): string[] =>
+  nodeState.status === "dep-failed" ? (nodeState.result.rootCauses ?? []) : [];
 
 /** The nodes skipped because `failedName` failed. */
 export const skippedBecauseOf = (run: RunState, failedName: string): string[] =>
   [...run.nodes.values()]
-    .filter(
-      (nodeState) =>
-        nodeState.status === "dep-failed" && causesOf(run, nodeState).includes(failedName),
-    )
+    .filter((nodeState) => causesOf(nodeState).includes(failedName))
     .map((nodeState) => nodeState.node.name);
 
 export const failedNodes = (run: RunState): FailedNodeState[] =>

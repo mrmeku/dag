@@ -104,7 +104,6 @@ export function createLocalSession(
   const host = createLocalHost({ exec, fs, summaryPath: summaryFile, write: writeLine });
   const store = createRunStore({
     fs,
-    clock,
     casBaseDir: runOptions.casBaseDir,
     lastRunAtBegin: true,
     listeners: [

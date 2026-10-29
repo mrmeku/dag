@@ -1,31 +1,24 @@
-import type { Node, Outputs, Result } from "@mrmeku/dagraph";
-import type { FailedNodeState } from "./run-slice.ts";
+import type { Node, Result } from "@mrmeku/dagraph";
 
-type Status = Result["status"];
-
-/** One node as the run left it: the pass's node, plus how and when it settled. */
-export interface NodeReport extends Node {
-  status: Status;
-  /** Epoch ms its action started, and from then to its settle; a cache hit's is its cache check, from dispatch. Absent for a skipped node and one that failed or was cancelled before its action started. */
+/** One node as the run left it: the pass's node, dagraph's result, and the run store's timing. */
+export interface NodeReport {
+  node: Node;
+  result: Result;
+  /** Epoch ms its `start` came, for a node whose action ran, or a cache hit's dispatch; absent for any other node. */
   start?: number;
+  /** At least 1 ms: the engine's `elapsed` once its action ran, or a cache hit's from dispatch to result. */
   duration?: number;
-  /** A failed node's: `running` once its action started, else `waiting`. */
-  failedWhile?: FailedNodeState["failedWhile"];
-  /** Its duration the last time it was built, or failed once its action started, from last-run.json. */
+  /** Its duration the last time it was built, or failed once its action ran, from last-run.json. */
   previous?: number;
-  /** The message of a failed or dep-failed node. */
-  error?: string;
-  /** A done or cached node's outputs: paths into the CAS. */
-  outputs?: Outputs;
 }
 
-export const namesOf = (nodes: NodeReport[], status: Status): string[] =>
-  nodes.filter((node) => node.status === status).map((node) => node.name);
+export const namesOf = (nodes: NodeReport[], status: Result["status"]): string[] =>
+  nodes.filter(({ result }) => result.status === status).map(({ node }) => node.name);
 
 export function wallTimeOf(nodes: NodeReport[]): number {
-  const starts = nodes.flatMap((node) => node.start ?? []);
-  const ends = nodes.flatMap((node) =>
-    node.start === undefined ? [] : node.start + (node.duration ?? 0),
+  const starts = nodes.flatMap((report) => report.start ?? []);
+  const ends = nodes.flatMap((report) =>
+    report.start === undefined ? [] : report.start + (report.duration ?? 0),
   );
   return starts.length > 0 ? Math.max(...ends) - Math.min(...starts) : 0;
 }

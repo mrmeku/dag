@@ -35,7 +35,7 @@ export function execute<Ports, Meta>(
     ...(signal && { signal }),
     ...(onEvent && { onEvent }),
   });
-  return orchestrate(graph.describe(), run, scheduler, onEvent, signal);
+  return orchestrate(graph.describe(), run, scheduler, executionContext.clock, onEvent, signal);
 }
 
 /**

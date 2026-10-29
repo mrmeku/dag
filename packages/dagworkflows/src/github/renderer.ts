@@ -2,13 +2,14 @@ import type { Result } from "@mrmeku/dagraph";
 import { STATUS_ICON } from "../config.ts";
 import {
   countsLine,
+  failureMessage,
   formatDuration,
   groupLines,
   reportHeadline,
   rerunLine,
 } from "../kernel/format.ts";
 import { namesOf, wallTimeOf, type NodeReport } from "../kernel/report.ts";
-import type { FailedNodeState, SettledNodeState, SucceededNodeState } from "../kernel/run-slice.ts";
+import type { SettledNodeState } from "../kernel/run-slice.ts";
 import * as selectors from "../kernel/selectors.ts";
 import { createRunStore, type RunListener } from "../kernel/store.ts";
 import type { CheckConclusion, CheckUpdate, Host, Ports } from "../ports.ts";
@@ -23,9 +24,11 @@ const CHECK_RUN_CONCLUSION_BY_STATUS: Record<Result["status"], CheckConclusion> 
 
 const isoTimestamp = (epochMs: number) => new Date(epochMs).toISOString();
 
-const durationText = (
-  nodeState: SucceededNodeState | Extract<FailedNodeState, { failedWhile: "running" }>,
-) => formatDuration(selectors.durationOf(nodeState));
+/** How long a node took, or `not started` for one whose action did not run. */
+function durationText(nodeState: SettledNodeState): string {
+  const duration = selectors.durationOf(nodeState);
+  return duration === undefined ? "not started" : formatDuration(duration);
+}
 
 function checkRunSummary(nodeState: SettledNodeState): string {
   switch (nodeState.status) {
@@ -36,7 +39,7 @@ function checkRunSummary(nodeState: SettledNodeState): string {
       return nodeState.status;
     case "failed":
     case "dep-failed":
-      return nodeState.error;
+      return failureMessage(nodeState);
   }
 }
 
@@ -81,24 +84,20 @@ export function createGithubRenderer(host: Host): RunListener {
       case "cached":
         host.group(`${STATUS_ICON.cached} ${name} (cached)`, log);
         break;
-      case "failed": {
-        const detail =
-          nodeState.failedWhile === "running" ? durationText(nodeState) : "not started";
-        host.group(`${STATUS_ICON.failed} ${name} (${detail})`, groupLines(nodeState, log));
-        host.annotate("error", name, nodeState.error);
+      case "failed":
+        host.group(
+          `${STATUS_ICON.failed} ${name} (${durationText(nodeState)})`,
+          groupLines(nodeState, log),
+        );
+        host.annotate("error", name, failureMessage(nodeState));
         break;
-      }
       case "dep-failed":
-        host.info(`${STATUS_ICON["dep-failed"]} ${name}: skipped, ${nodeState.error}`);
+        host.info(`${STATUS_ICON["dep-failed"]} ${name}: skipped, ${failureMessage(nodeState)}`);
         break;
       case "cancelled":
-        switch (nodeState.cancelledWhile) {
-          case "running":
-            host.group(`${STATUS_ICON.cancelled} ${name} (cancelled)`, log);
-            break;
-          case "waiting":
-            host.info(`${STATUS_ICON.cancelled} ${name}: cancelled`);
-        }
+        if (selectors.actionRan(nodeState.result))
+          host.group(`${STATUS_ICON.cancelled} ${name} (cancelled)`, log);
+        else host.info(`${STATUS_ICON.cancelled} ${name}: cancelled`);
     }
   };
 
@@ -127,7 +126,7 @@ export function createGithubRenderer(host: Host): RunListener {
         name: nodeState.node.name,
         status: "completed",
         conclusion:
-          nodeState.status === "failed" && nodeState.timedOut
+          nodeState.status === "failed" && nodeState.result.timedOut
             ? "timed_out"
             : CHECK_RUN_CONCLUSION_BY_STATUS[nodeState.status],
         ...(startedAt !== undefined && { startedAt: isoTimestamp(startedAt) }),
@@ -142,13 +141,5 @@ export function createGithubRenderer(host: Host): RunListener {
   };
 }
 
-export const createGithubStore = (
-  ports: Pick<Ports, "host" | "fs" | "clock">,
-  casBaseDir: string,
-) =>
-  createRunStore({
-    fs: ports.fs,
-    clock: ports.clock,
-    casBaseDir,
-    listeners: [createGithubRenderer(ports.host)],
-  });
+export const createGithubStore = (ports: Pick<Ports, "host" | "fs">, casBaseDir: string) =>
+  createRunStore({ fs: ports.fs, casBaseDir, listeners: [createGithubRenderer(ports.host)] });

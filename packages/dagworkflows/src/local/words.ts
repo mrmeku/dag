@@ -37,14 +37,17 @@ export function clockOf(durationMs: number): string {
 }
 
 /** The error says no more than the exit status does: `<cmd> exited <code>`. */
-export const errorSaysOnlyExitCode = (nodeState: FailedNodeState): boolean =>
-  nodeState.command?.ended === "exited" && nodeState.command.code !== 0 && !nodeState.timedOut;
+export function errorSaysOnlyExitCode({ result }: FailedNodeState): boolean {
+  const command = selectors.commandOf(result.error);
+  return command?.ended === "exited" && command.code !== 0 && !result.timedOut;
+}
 
 /** How a failure ended, when its error does not say it: `not started`, `timed out` or `exit 1`. */
 function endingOf(nodeState: FailedNodeState): string {
-  if (nodeState.failedWhile === "waiting") return "not started";
-  if (nodeState.timedOut) return "timed out";
-  return errorSaysOnlyExitCode(nodeState) ? `exit ${nodeState.command?.code}` : "";
+  const { result } = nodeState;
+  if (!selectors.actionRan(result)) return "not started";
+  if (result.timedOut) return "timed out";
+  return errorSaysOnlyExitCode(nodeState) ? `exit ${selectors.commandOf(result.error)?.code}` : "";
 }
 
 /** How a node ended, how long it took and how much it printed: `exit 1 · 2.9s · 8 lines`. */

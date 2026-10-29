@@ -35,8 +35,15 @@ import {
 import { createBunDagFs } from "./ports/fs.ts";
 import { createMemoryDagFs, type MemoryDagFs } from "./ports/memory-fs.ts";
 import { createNodeDagFs } from "./ports/node-fs.ts";
+import { processNode, type RunActionOptions } from "./process-node.ts";
 import { throttledScheduler } from "./schedulers.ts";
-import { isResult, isSucceeded, tally, type ExecEvent, type Result } from "./types.ts";
+import {
+  countResultsByStatus,
+  isResult,
+  isSucceeded,
+  type ExecEvent,
+  type Result,
+} from "./types.ts";
 import { errorMessage } from "./utils.ts";
 
 interface Ports {
@@ -93,11 +100,18 @@ function task<Meta, D extends DepRecord = Record<never, never>>(
 function setup(cacheOf: (fs: MemoryDagFs) => Cache = () => new MemCache()) {
   const fs = createMemoryDagFs();
   const cache = cacheOf(fs);
-  return { fs, cache, ctx: { ports: { fs }, cache, fs, casBaseDir: "/cas" } };
+  return { fs, cache, ctx: { ports: { fs }, cache, fs, casBaseDir: "/cas", clock: Date } };
 }
 
+const matching = (re: RegExp): unknown => expect.stringMatching(re);
+const anyHash = matching(/^[0-9a-f]{64}$/);
+const anyNumber: unknown = expect.any(Number);
+
 const statuses = (rs: Result[]) => Object.fromEntries(rs.map((r) => [r.name, r.status]));
-const counts = (rs: Result[]) => ({ ran: tally(rs).done, hit: tally(rs).cached });
+const counts = (rs: Result[]) => ({
+  ran: countResultsByStatus(rs).done,
+  hit: countResultsByStatus(rs).cached,
+});
 const outputsOf = (r: Result | undefined) =>
   r && isSucceeded(r) ? namedOutput(r.outputs, "out") : "";
 /** A result that succeeded; refused when it did not. */
@@ -246,6 +260,28 @@ describe("execute", () => {
       left: ["failed", true, ""],
       right: ["done", true, ""],
       bottom: ["dep-failed", false, "left"],
+    });
+  });
+
+  test("a held back node names its root causes: through held back required deps to those that did not succeed, each once, in dep order, never a settled dep", async () => {
+    const { ctx } = setup();
+    const g = new Graph<Ports>();
+    const boom = () => {
+      throw new Error("boom");
+    };
+    const bad = task(g, "bad", { run: boom });
+    const worse = task(g, "worse", { run: boom });
+    const mid = task(g, "mid", { deps: { bad } });
+    task(g, "leaf", { deps: { mid, worse, bad } });
+    task(g, "tolerant", { deps: { worse: settled(worse), mid } });
+    const results = await execute(g, ctx);
+    const held = { actionKey: "", status: "dep-failed" } as const;
+    expect(
+      Object.fromEntries(results.filter((r) => r.status === "dep-failed").map((r) => [r.name, r])),
+    ).toEqual({
+      mid: { name: "mid", ...held, dep: "bad", rootCauses: ["bad"] },
+      leaf: { name: "leaf", ...held, dep: "mid", rootCauses: ["bad", "worse"] },
+      tolerant: { name: "tolerant", ...held, dep: "mid", rootCauses: ["bad"] },
     });
   });
 
@@ -1014,7 +1050,7 @@ describe("the CAS", () => {
     const tmp = await realpath(await mkdtemp(join(tmpdir(), "dagraph-")));
     const home = process.cwd();
     const casBaseDir = "cas";
-    const c = { ports: { fs }, cache: new FsCache(casBaseDir, fs), fs, casBaseDir };
+    const c = { ports: { fs }, cache: new FsCache(casBaseDir, fs), fs, casBaseDir, clock: Date };
     type Written = { joined: string; relative: string };
     const seen: { outputDir?: string; handle?: string } = {};
     const build = () => {
@@ -1091,7 +1127,7 @@ describe("the CAS", () => {
     test(`${label} fs: a concurrent run that rewrites its output while another run's dependent reads it never poisons that dependent's entry`, async () => {
       const fs = createFs();
       const casBaseDir = `${await mkdtemp(join(tmpdir(), "dagraph-"))}/cas`;
-      const c = { ports: { fs }, cache: new FsCache(casBaseDir, fs), fs, casBaseDir };
+      const c = { ports: { fs }, cache: new FsCache(casBaseDir, fs), fs, casBaseDir, clock: Date };
       const aInDouble = Promise.withResolvers<void>();
       const bTruncated = Promise.withResolvers<void>();
       const bMayFinish = Promise.withResolvers<void>();
@@ -1142,7 +1178,7 @@ describe("the CAS", () => {
     test(`${label} fs: a returned path with no file fails its node, naming the output and its file, and the failure is never cached`, async () => {
       const fs = createFs();
       const casBaseDir = `${await mkdtemp(join(tmpdir(), "dagraph-"))}/cas`;
-      const c = { ports: { fs }, cache: new FsCache(casBaseDir, fs), fs, casBaseDir };
+      const c = { ports: { fs }, cache: new FsCache(casBaseDir, fs), fs, casBaseDir, clock: Date };
       const build = () => {
         const g = new Graph<Ports>();
         defineActionWithPorts({
@@ -1181,7 +1217,7 @@ describe("the CAS", () => {
     test(`${label} fs: a returned path that cannot be read for another reason keeps its own error`, async () => {
       const fs = createFs();
       const casBaseDir = `${await mkdtemp(join(tmpdir(), "dagraph-"))}/cas`;
-      const c = { ports: { fs }, cache: new FsCache(casBaseDir, fs), fs, casBaseDir };
+      const c = { ports: { fs }, cache: new FsCache(casBaseDir, fs), fs, casBaseDir, clock: Date };
       const g = new Graph<Ports>();
       defineActionWithPorts({
         kind: "frames",
@@ -1259,6 +1295,53 @@ describe("events", () => {
     });
   });
 
+  test("each event is stamped occurredAt by the context's clock as it happens, and elapsed runs from just before the action to the result", async () => {
+    const { ctx } = setup();
+    let time = 1000;
+    const g = new Graph<Ports>();
+    task(g, "grouped", {
+      concurrencyGroup: "heavy",
+      run: (c) => {
+        time = 1100;
+        c.output("half");
+        time = 1250;
+        return "grouped";
+      },
+    });
+    const events: ExecEvent[] = [];
+    await execute(
+      g,
+      { ...ctx, clock: { now: () => time } },
+      {
+        scheduler: throttledScheduler({ concurrencyLimits: { heavy: 1 } }),
+        onEvent: (e) => {
+          events.push(e);
+          time += 1;
+        },
+      },
+    );
+    expect(events).toEqual<unknown>([
+      { type: "dispatch", node: "grouped", occurredAt: 1000 },
+      { type: "pending", node: "grouped", occurredAt: 1001 },
+      { type: "start", node: "grouped", occurredAt: 1002 },
+      { type: "output", node: "grouped", chunk: "half", occurredAt: 1100 },
+      {
+        type: "result",
+        node: "grouped",
+        occurredAt: 1250,
+        result: {
+          name: "grouped",
+          actionKey: anyHash,
+          status: "done",
+          outputs: { out: matching(/^\/cas\/[0-9a-f]{64}\/out-[0-9a-f]{64}\/out$/) },
+          contentHash: anyHash,
+          outputHashes: { out: anyHash },
+          elapsed: 247,
+        },
+      },
+    ]);
+  });
+
   test("a node's dispatch, start, output and result come in that order, each named by node with its meta; start is live while other nodes run, a cached node never starts, and what prints after the result is dropped", async () => {
     const { ctx } = setup();
     const releaseSlow = Promise.withResolvers<void>();
@@ -1324,7 +1407,7 @@ describe("events", () => {
     });
   });
 
-  test("a failure keeps the thrown error's name, message and cause; a timeout is a TimeoutError that keeps the cause", async () => {
+  test("a failure keeps the thrown error's name, message and cause; the node's own timeout is a TimeoutError that keeps the cause and is timedOut, and an action's own TimeoutError is not", async () => {
     const { ctx } = setup();
     const g = new Graph<Ports>();
     for (const [name, timeoutMs] of [["bad"], ["slow", 5]] as const)
@@ -1335,20 +1418,39 @@ describe("events", () => {
           throw new RangeError(`${name} exited 1`, { cause: { argv: [name], code: 1 } });
         },
       });
+    // As a fetch given `AbortSignal.timeout` throws.
+    task(g, "fetch", {
+      run: () => {
+        throw new DOMException("The operation timed out.", "TimeoutError");
+      },
+    });
     const results = await execute(g, ctx);
-    expect(
-      results.map((r) => (r.status === "failed" ? [r.name, r.error] : [r.name, r.status])),
-    ).toEqual([
-      ["bad", { name: "RangeError", message: "bad exited 1", cause: { argv: ["bad"], code: 1 } }],
-      [
-        "slow",
-        {
+    const failed = { actionKey: anyHash, status: "failed" };
+    expect(Object.fromEntries(results.map((r) => [r.name, r]))).toStrictEqual<unknown>({
+      bad: {
+        name: "bad",
+        ...failed,
+        error: { name: "RangeError", message: "bad exited 1", cause: { argv: ["bad"], code: 1 } },
+        elapsed: anyNumber,
+      },
+      slow: {
+        name: "slow",
+        ...failed,
+        error: {
           name: "TimeoutError",
           message: "timed out after 5 ms",
           cause: { argv: ["slow"], code: 1 },
         },
-      ],
-    ]);
+        elapsed: anyNumber,
+        timedOut: true,
+      },
+      fetch: {
+        name: "fetch",
+        ...failed,
+        error: { name: "TimeoutError", message: "The operation timed out." },
+        elapsed: anyNumber,
+      },
+    });
   });
 });
 
@@ -1406,7 +1508,7 @@ describe("a result is plain data", () => {
       errors: Object.fromEntries(
         first.flatMap((r) => (r.status === "failed" ? [[r.name, r.error]] : [])),
       ),
-      tally: tally(results),
+      counts: countResultsByStatus(results),
       received,
       everyIsResult: Array.isArray(received) && received.every(isResult),
     }).toStrictEqual({
@@ -1439,13 +1541,13 @@ describe("a result is plain data", () => {
         mutated: { name: "Error", message: "mutated failed", cause: { code: 1 } },
         normalized: { name: "Error", message: "normalized failed", cause: { code: 0 } },
       },
-      tally: { done: 1, cached: 1, failed: 20, "dep-failed": 2, cancelled: 12 },
+      counts: { done: 1, cached: 1, failed: 20, "dep-failed": 2, cancelled: 12 },
       received: results,
       everyIsResult: true,
     });
   });
 
-  test("isResult refuses a record that lacks a field its status needs, or whose status no result has", () => {
+  test("isResult accepts a failure with no elapsed, one timedOut, a cancel with elapsed, and a failure an earlier version wrote with elapsed 0, and refuses a record that lacks a field its status needs, whose optional field is malformed, or whose status no result has", () => {
     const outputs = { out: "/o" };
     const cached = {
       name: "a",
@@ -1476,7 +1578,45 @@ describe("a result is plain data", () => {
         error: { name: "Error", message: "m", cause: 1n },
         elapsed: 1,
       },
+      failedBeforeStart: {
+        name: "a",
+        actionKey: "",
+        status: "failed",
+        error: { name: "Error", message: "m" },
+      },
+      failedWithElapsedZero: {
+        name: "a",
+        actionKey: "",
+        status: "failed",
+        error: { name: "Error", message: "m" },
+        elapsed: 0,
+      },
+      timedOut: {
+        name: "a",
+        actionKey: "k",
+        status: "failed",
+        error: { name: "TimeoutError", message: "m" },
+        elapsed: 1,
+        timedOut: true,
+      },
+      timedOutNotTrue: {
+        name: "a",
+        actionKey: "k",
+        status: "failed",
+        error: { name: "TimeoutError", message: "m" },
+        elapsed: 1,
+        timedOut: false,
+      },
       depFailedWithoutDep: { name: "a", actionKey: "", status: "dep-failed" },
+      rootCausesNotNames: {
+        name: "a",
+        actionKey: "",
+        status: "dep-failed",
+        dep: "b",
+        rootCauses: [1],
+      },
+      cancelledWhileRunning: { name: "a", actionKey: "k", status: "cancelled", elapsed: 1 },
+      cancelledElapsedNotNumber: { name: "a", actionKey: "k", status: "cancelled", elapsed: "1" },
       withoutActionKey: { name: "a", status: "cancelled" },
       unknownStatus: { name: "a", actionKey: "", status: "skipped" },
     };
@@ -1488,7 +1628,14 @@ describe("a result is plain data", () => {
       outputsNotRecord: false,
       failedWithoutMessage: false,
       causeNotJson: false,
+      failedBeforeStart: true,
+      failedWithElapsedZero: true,
+      timedOut: true,
+      timedOutNotTrue: false,
       depFailedWithoutDep: false,
+      rootCausesNotNames: false,
+      cancelledWhileRunning: true,
+      cancelledElapsedNotNumber: false,
       withoutActionKey: false,
       unknownStatus: false,
     });
@@ -1576,6 +1723,68 @@ test("a listener's promise for a start holds the action back until it resolves, 
     ran: ["recorded"],
     results: { recorded: "done", unrecorded: "the journal is full" },
   });
+});
+
+test("a failed or cancelled node has an elapsed exactly when its action ran", async () => {
+  const { ctx } = setup();
+  let time = 0;
+  const context = { ...ctx, clock: { now: () => time } };
+  const caught = new AbortController();
+  const held = new AbortController();
+  const g = new Graph<Ports>();
+  const made = task(g, "made");
+  task(g, "unkeyable", { inputs: { src: file("/missing.ts") } });
+  task(g, "unresolvable", { deps: { made }, inputs: ({ made }) => ({ src: made.out }) });
+  task(g, "unrecorded");
+  task(g, "held");
+  task(g, "broke", {
+    run: () => {
+      time += 40;
+      throw new Error("broke");
+    },
+  });
+  task(g, "caught", {
+    run: () => {
+      time += 25;
+      caught.abort();
+      return "caught";
+    },
+  });
+  const process = (name: string, options: RunActionOptions<undefined> = {}) =>
+    processNode(g, name, {}, context, options);
+  const results = [
+    await process("unkeyable"),
+    // Its dep's entry lacks the output it reads.
+    await processNode(
+      g,
+      "unresolvable",
+      { made: { outputs: {}, contentHash: "h", outputHashes: {} } },
+      context,
+    ),
+    await process("unrecorded", {
+      onEvent: (e) => (e.type === "start" ? Promise.reject(new Error("journal full")) : undefined),
+    }),
+    await process("held", {
+      signal: held.signal,
+      onEvent: (e) => e.type === "start" && held.abort(),
+    }),
+    await process("broke"),
+    await process("caught", { signal: caught.signal }),
+  ];
+  const failed = (name: string, message: string) => ({
+    name,
+    actionKey: anyHash,
+    status: "failed",
+    error: { name: "Error", message },
+  });
+  expect(results).toStrictEqual<unknown>([
+    { ...failed("unkeyable", "ENOENT: /missing.ts"), actionKey: "" },
+    failed("unresolvable", '"made" has no output "out"'),
+    failed("unrecorded", "journal full"),
+    { name: "held", actionKey: anyHash, status: "cancelled" },
+    { ...failed("broke", "broke"), elapsed: 40 },
+    { name: "caught", actionKey: anyHash, status: "cancelled", elapsed: 25 },
+  ]);
 });
 
 test("an interrupted execution resumes from where it left off", async () => {
@@ -1773,7 +1982,7 @@ describe("cancellation and timeouts", () => {
       statuses: statuses(results),
       keyed: results.filter((r) => r.actionKey !== "").map((r) => r.name),
       events,
-      tally: tally(results),
+      counts: countResultsByStatus(results),
       rerun: statuses(rerun),
     }).toEqual({
       ran: ["slow", "quick", "slow", "after", "never"],
@@ -1787,7 +1996,7 @@ describe("cancellation and timeouts", () => {
         "cancelled:slow",
         "cancelled:never",
       ],
-      tally: { done: 1, cached: 0, failed: 0, "dep-failed": 0, cancelled: 3 },
+      counts: { done: 1, cached: 0, failed: 0, "dep-failed": 0, cancelled: 3 },
       rerun: { quick: "cached", slow: "done", after: "done", never: "done" },
     });
   });

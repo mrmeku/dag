@@ -20,7 +20,7 @@ const executeUnder = (
   ports: Ports,
   cache = new MemCache(),
   casBaseDir = CAS,
-) => execute(graph, { ports, cache, fs: ports.fs, casBaseDir });
+) => execute(graph, { ports, cache, fs: ports.fs, clock: Date, casBaseDir });
 const exited = (code: number, output = ""): ExecResult => ({
   ended: "exited",
   code,

@@ -43,7 +43,13 @@ export async function processEach(
     const depEntries = Object.fromEntries(
       node.deps.flatMap((dep) => (entries[dep] ? [[dep, entries[dep]]] : [])),
     );
-    const context = { ports: { ...ports, fs, exec }, cache: new MemCache(), fs, casBaseDir: CAS };
+    const context = {
+      ports: { ...ports, fs, exec },
+      cache: new MemCache(),
+      fs,
+      casBaseDir: CAS,
+      clock: Date,
+    };
     const result = await processNode(graph, node.name, depEntries, context);
     if (isSucceeded(result))
       entries[node.name] = {

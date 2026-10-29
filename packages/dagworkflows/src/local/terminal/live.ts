@@ -83,19 +83,18 @@ function settledNodeLines(
     case "done":
       return line("done", detailOf(nodeState));
     case "dep-failed": {
-      const causes = selectors.causesOf(run, nodeState);
+      const causes = selectors.causesOf(nodeState);
       return line(
         "dep-failed",
         causes.length > 0 ? `skipped (because ${causes.join(", ")} failed)` : "skipped",
       );
     }
-    case "cancelled":
-      switch (nodeState.cancelledWhile) {
-        case "waiting":
-          return [];
-        case "running":
-          return line("cancelled", `cancelled after ${clockOf(selectors.durationOf(nodeState))}`);
-      }
+    case "cancelled": {
+      const duration = selectors.durationOf(nodeState);
+      return duration === undefined
+        ? []
+        : line("cancelled", `cancelled after ${clockOf(duration)}`);
+    }
   }
 }
 

@@ -12,7 +12,7 @@ const CAS = "/cas";
 
 /** Executes `graph` under `ports`, on a cache of its own unless given one. */
 const executeUnder = (graph: Graph<Ports>, ports: Ports, store = new MemCache()) =>
-  execute(graph, { ports, cache: store, fs: ports.fs, casBaseDir: CAS });
+  execute(graph, { ports, cache: store, fs: ports.fs, clock: Date, casBaseDir: CAS });
 
 /**
  * A cache service as `@actions/cache` reaches it: a restore matches the primary key, then each

@@ -19,7 +19,7 @@ const executeUnder = (
   ports: Ports,
   casBaseDir = CAS,
   cache = new MemCache(),
-) => execute(graph, { ports, cache, fs: ports.fs, casBaseDir });
+) => execute(graph, { ports, cache, fs: ports.fs, clock: Date, casBaseDir });
 
 describe("uploadArtifact", () => {
   test("dep outputs upload from the CAS rooted at their common directory; a taken name needs overwrite; a failed settled dep is undefined and left out; no service uploads nothing; the client's response is the output", async () => {

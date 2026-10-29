@@ -120,4 +120,14 @@ export class ExecState<Meta = unknown> {
   failedDep(node: Node): string | undefined {
     return requiredDeps(node).find((d) => !this.entries.has(d));
   }
+
+  /** The failures behind a held back node, along its required deps, each once. */
+  rootCauses(node: Node): string[] {
+    const causes = requiredDeps(node).flatMap((d) => {
+      const result = this.results.get(d);
+      if (!result || isSucceeded(result)) return [];
+      return result.status === "dep-failed" ? (result.rootCauses ?? [d]) : [d];
+    });
+    return [...new Set(causes)];
+  }
 }

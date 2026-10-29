@@ -84,9 +84,9 @@ async function buildGraph(opts: { implementation: Implementation; ports: Ports }
 }
 
 /**
- * The posts a run's history shows it owes: each whose main started, whatever came of it, and that
- * has not succeeded. A main that never started, `dep-failed` or cancelled while queued, owes
- * nothing. A post that failed every try is still owed.
+ * The posts a run's history shows it owes: each whose main's start it recorded, whatever came of
+ * it, and that has not succeeded. A main whose start it never recorded, `dep-failed` or cancelled
+ * while queued, owes nothing. A post that failed every try is still owed.
  */
 function owedPosts(
   graph: Graph<Ports>,
@@ -238,6 +238,7 @@ export async function runWorkflow(opts: RunOptions): Promise<RunOutcome> {
         cache: opts.force ? forcedCache(stored) : stored,
         fs: ports.fs,
         casBaseDir: opts.casBaseDir,
+        clock: ports.clock,
       },
       {
         scheduler: throttledScheduler(opts.schedulerOptions),
@@ -317,6 +318,7 @@ async function postPass(
     cache: new FsCache(opts.casBaseDir, ports.fs),
     fs: ports.fs,
     casBaseDir: opts.casBaseDir,
+    clock: ports.clock,
   };
   const runOwed = runNode(replayed, executionContext, {
     onEvent: (event) => {
@@ -331,6 +333,7 @@ async function postPass(
         ? runOwed(node, depEntries, waitForScheduler)
         : Promise.resolve(replay(node.name, before[node.name])),
     throttledScheduler(opts.schedulerOptions),
+    ports.clock,
     (event) => {
       if (!owed.has(event.node)) return;
       store.onEvent(event);

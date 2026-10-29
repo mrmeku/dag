@@ -91,7 +91,7 @@ function channel(videoIds: string[]) {
 
 function setup() {
   const fs = createMemoryDagFs();
-  return { fs, ctx: { ports: { fs }, cache: new MemCache(), fs, casBaseDir: "/cas" } };
+  return { fs, ctx: { ports: { fs }, cache: new MemCache(), fs, casBaseDir: "/cas", clock: Date } };
 }
 
 const refusal = (declare: () => unknown) => {
@@ -672,7 +672,12 @@ export function wrongDeclarationsDoNotCompile() {
   // @ts-expect-error an action needing ports on a graph that gives none
   feed.addNode(new Graph(), {});
   // @ts-expect-error ports that do not satisfy the graph's
-  void execute(g, { cache: new MemCache(), fs: createMemoryDagFs(), casBaseDir: "/cas" });
+  void execute(g, {
+    cache: new MemCache(),
+    fs: createMemoryDagFs(),
+    clock: Date,
+    casBaseDir: "/cas",
+  });
   // @ts-expect-error a graph typed as one that needs no ports: <P extends Ports>(graph: Graph<P>)
   const portlessGraph: Graph<unknown, Meta> = g;
   // @ts-expect-error a graph typed as one whose nodes carry other meta

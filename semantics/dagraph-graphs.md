@@ -48,15 +48,15 @@ Types, each explained further in its section:
 - `Action<Ports, R, D = {}, N = {}, I = {}>`: an action needing `Ports`, with outputs `R`, deps `D`, node inputs `N` and own inputs `I`. `Action<Ports, Record<never, never>>[]` accepts a portless action that returns no outputs.
 - `ActionSpec`: what `defineAction` takes.
 - `ActionContext<Ports = unknown, D = DepSpecs, I = Record<string, unknown>>`: what one call of the action gets; `I` is the action's inputs and its nodes' together.
-- `NodeRef<T>`, `SettledRef<T>`: a ref to a node, plain or wrapped in `settled`. `T` defaults to `Outputs`.
-- `OutputRef<T, S>`, `SettledOutputRef<T, S>`: a ref to one output of a dep, inside an `inputs` function. `S` is the scope of the call that received it, default `unknown`.
+- `NodeRef<T>`, `SettledRef<T>`: a ref to a node, plain or wrapped in `settled`. `T` defaults to `Outputs`. `AnyNodeRef<T>` is either.
+- `OutputRef<T, S>`, `SettledOutputRef<T, S>`: a ref to one output of a dep, inside an `inputs` function. `S` is the scope of the call that received it, default `unknown`. `AnyOutputRef<T, S>` is either.
 - `Dep<T>`, `SettledDep<T>`: what `dep<T>()` and `settled<T>()` (or `settled(action)`) return, a role declaration.
 - `DepSpecs`: the type of an action's `deps` record; a record typed so takes any role.
 - `DepSpecsOf<D>`: the declaration that matches the deps a node gives.
-- `DepRecord`: `Record<string, NodeRef | SettledRef | undefined>`, the type of a deps object built at run time.
+- `DepRecord`: `Record<string, AnyNodeRef | undefined>`, the type of a deps object built at run time.
 - `DepRefs<D, S>`: the argument of an `inputs` function.
 - `InputValue<S = never>`, `InputRecord<S = never>`: a value input, and inputs by name. `S` is the scope of the `inputs` call whose refs they may hold; the default `never` holds no refs.
-- `FileInput`: what `file(path)` returns. `FileHandle`, `Handles<T>`: how an action reads files.
+- `FileInput`: what `file(path)` returns. `FileHandle`, `Handles<T>`: how an action reads files. `Resolved<V>`: an input as the action reads it, a file as a `FileHandle` and an output ref as its handle or list of handles, `undefined` for a `SettledOutputRef` whose dep did not succeed.
 - `NodeInputsSpec<T>`: what `nodeInputs<T>()` returns.
 - `NodeParams`: the params of `addNode`.
 - `Node<Meta>`: a node as data, from `describe()`.

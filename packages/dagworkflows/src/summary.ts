@@ -56,7 +56,8 @@ function formatDelta(now: number, before: number): string {
   return pct === 0 ? "±0%" : pct > 0 ? `+${pct}%` : `${pct}%`;
 }
 
-const byName = (nodes: NodeReport[]) => [...nodes].sort((a, b) => a.name.localeCompare(b.name));
+const byName = (nodes: NodeReport[]) =>
+  [...nodes].sort((a, b) => a.node.name.localeCompare(b.node.name));
 const sum = (ns: number[]) => ns.reduce((s, n) => s + n, 0);
 /**
  * The DAG as a mermaid flowchart colored by status: `@mrmeku/dagraph/mermaid`'s `mermaidBody`,
@@ -109,24 +110,24 @@ export function dagMermaid(all: Node[], statusOf: (name: string) => Status | und
 /** Longest chain through the DAG by node duration: the one worth speeding up. `nodes` in graph order. */
 function longestChain(nodes: NodeReport[]): { names: string[]; total: number } | null {
   const counted = new Set(
-    nodes.filter((n) => (n.duration ?? 0) >= CRITICAL_PATH_FLOOR_MS).map((n) => n.name),
+    nodes.filter((n) => (n.duration ?? 0) >= CRITICAL_PATH_FLOOR_MS).map((n) => n.node.name),
   );
   const total = new Map<string, number>();
   const via = new Map<string, string | undefined>();
   for (const n of nodes) {
     if (n.duration === undefined) continue;
-    const own = counted.has(n.name) ? n.duration : 0;
+    const own = counted.has(n.node.name) ? n.duration : 0;
     let best = 0;
     let bestDep: string | undefined;
-    for (const d of n.deps) {
+    for (const d of n.node.deps) {
       const t = total.get(d) ?? 0;
       if (t > best) {
         best = t;
         bestDep = d;
       }
     }
-    total.set(n.name, own + best);
-    via.set(n.name, bestDep);
+    total.set(n.node.name, own + best);
+    via.set(n.node.name, bestDep);
   }
   let end: { name: string; total: number } | undefined;
   for (const [name, t] of total) if (end === undefined || t > end.total) end = { name, total: t };
@@ -143,8 +144,10 @@ function longestChain(nodes: NodeReport[]): { names: string[]; total: number } |
  */
 export function renderStatus({ nodes }: RunReport): string[] {
   const wall = wallTimeOf(nodes);
-  const busy = sum(nodes.filter(selectors.ran).map((n) => n.duration ?? 0));
-  const saved = sum(nodes.filter((n) => n.status === "cached").map((n) => n.previous ?? 0));
+  const busy = sum(
+    nodes.filter((n) => selectors.ranToItsEnd(n.result)).map((n) => n.duration ?? 0),
+  );
+  const saved = sum(nodes.filter((n) => n.result.status === "cached").map((n) => n.previous ?? 0));
   const hits = namesOf(nodes, "cached").length;
   const lookups = hits + namesOf(nodes, "done").length;
   return [
@@ -164,11 +167,11 @@ export function renderStatus({ nodes }: RunReport): string[] {
 /** A mermaid gantt of the nodes that ran: what happened when, and what overlapped. */
 export function renderTimeline({ nodes }: RunReport): string[] {
   const bars = byName(nodes)
-    .filter(selectors.ran)
+    .filter((n) => selectors.ranToItsEnd(n.result))
     .flatMap((n) =>
       n.start === undefined
         ? []
-        : `  ${n.name.replace(/:/g, "/")} :${n.status === "failed" ? "crit" : "done"}, ${n.start}, ${n.start + (n.duration ?? 0)}`,
+        : `  ${n.node.name.replace(/:/g, "/")} :${n.result.status === "failed" ? "crit" : "done"}, ${n.start}, ${n.start + (n.duration ?? 0)}`,
     );
   if (bars.length === 0) return [];
   return [
@@ -194,8 +197,13 @@ export function renderCriticalPath({ nodes }: RunReport): string[] {
  * the graph: `renderDag({ ...r, nodes: r.nodes.filter(keep) })`.
  */
 export function renderDag({ nodes }: RunReport): string[] {
-  const status = new Map(nodes.map((n) => [n.name, n.status]));
-  return nodes.length > 0 ? dagMermaid(nodes, (name) => status.get(name)) : [];
+  const status = new Map(nodes.map((n) => [n.node.name, n.result.status]));
+  return nodes.length > 0
+    ? dagMermaid(
+        nodes.map((n) => n.node),
+        (name) => status.get(name),
+      )
+    : [];
 }
 
 /**
@@ -204,22 +212,22 @@ export function renderDag({ nodes }: RunReport): string[] {
  */
 export async function renderFailures({ nodes, log }: RunReport): Promise<string[]> {
   const lines: string[] = [];
-  for (const n of nodes) {
-    if (n.status === "dep-failed")
-      lines.push(`- ${STATUS_ICON["dep-failed"]} ${n.name}: skipped, dependency failed`);
-    if (n.status === "cancelled") lines.push(`- ${STATUS_ICON.cancelled} ${n.name}: cancelled`);
-    if (n.status !== "failed") continue;
-    const detail =
-      n.failedWhile === "waiting"
-        ? " (not started)"
-        : n.duration !== undefined
-          ? ` (${formatDuration(n.duration)})`
-          : "";
+  for (const { node, result, duration } of nodes) {
+    if (result.status === "dep-failed")
+      lines.push(`- ${STATUS_ICON["dep-failed"]} ${node.name}: skipped, dependency failed`);
+    if (result.status === "cancelled")
+      lines.push(`- ${STATUS_ICON.cancelled} ${node.name}: cancelled`);
+    if (result.status !== "failed") continue;
+    const detail = !selectors.actionRan(result)
+      ? " (not started)"
+      : duration !== undefined
+        ? ` (${formatDuration(duration)})`
+        : "";
     lines.push(
-      `<details><summary>${STATUS_ICON.failed} ${n.name}${detail}</summary>`,
+      `<details><summary>${STATUS_ICON.failed} ${node.name}${detail}</summary>`,
       "",
       "```text",
-      ...(await log(n.name)).slice(-FAILURES_REPORT_LOG_LINES),
+      ...(await log(node.name)).slice(-FAILURES_REPORT_LOG_LINES),
       "```",
       "",
       "</details>",
@@ -238,8 +246,10 @@ export function renderTable({ nodes }: RunReport): string[] {
     ...byName(nodes).map((n) => {
       const d = n.duration;
       const delta =
-        n.status === "done" && d !== undefined && n.previous ? formatDelta(d, n.previous) : "";
-      return `| ${n.name} | ${n.status} | ${d !== undefined ? formatDuration(d) : ""} | ${delta} |`;
+        n.result.status === "done" && d !== undefined && n.previous
+          ? formatDelta(d, n.previous)
+          : "";
+      return `| ${n.node.name} | ${n.result.status} | ${d !== undefined ? formatDuration(d) : ""} | ${delta} |`;
     }),
   ];
 }

@@ -1,10 +1,11 @@
 import {
   isFileHandle,
   settled,
+  type AnyOutputRef,
   type DepRecord,
-  type FileHandle,
   type Graph,
   type NodeRef,
+  type Resolved,
 } from "@mrmeku/dagraph";
 import type { ArtifactUploadOptions, Ports } from "./ports.ts";
 import { addTask, type TaskContext } from "./task.ts";
@@ -110,7 +111,7 @@ export function requireAll(
  * An item of what an artifact's `path` function returns: a glob, a dep's output as its handle or
  * its list of handles, or `undefined`, as a `settled` dep that failed gives, which is left out.
  */
-type PathItem = string | FileHandle | FileHandle[] | undefined;
+type PathItem = string | Resolved<AnyOutputRef>;
 
 /**
  * The inputs of `actions/upload-artifact`: `name`, `path`, `if-no-files-found`, and those the

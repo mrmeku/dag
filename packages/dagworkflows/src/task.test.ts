@@ -23,7 +23,7 @@ import { addTask, type ActionTaskSpec } from "./task.ts";
 
 const CAS = "/cas";
 const executeUnder = (graph: Graph<Ports>, ports: Ports, cache = new MemCache()) =>
-  execute(graph, { ports, cache, fs: ports.fs, casBaseDir: CAS });
+  execute(graph, { ports, cache, fs: ports.fs, clock: Date, casBaseDir: CAS });
 const exited = (code: number, stdout = ""): ExecResult => ({
   ended: "exited",
   code,

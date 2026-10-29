@@ -4,6 +4,9 @@ import type { CacheEntry, DagFs } from "./cache.ts";
 import type { Outputs } from "./graph/index.ts";
 import { isMissingFileError } from "./utils.ts";
 
+/** What a cache entry keeps of its outputs' content: its own hash and each output's. */
+export type EntryHashes = Pick<CacheEntry, "contentHash" | "outputHashes">;
+
 /** Every path the outputs hold, in one list. */
 export const collectPaths = (outputs: Outputs): string[] => Object.values(outputs).flat();
 
@@ -64,7 +67,7 @@ export async function hashOutputFiles(
   outputs: Outputs,
   hashFile: HashFileFn,
   keyDir: string,
-): Promise<Pick<CacheEntry, "contentHash" | "outputHashes">> {
+): Promise<EntryHashes> {
   const files = async (paths: string[], name: string) => {
     const hashed: string[][] = [];
     for (const path of paths) {

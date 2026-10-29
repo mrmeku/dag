@@ -1,11 +1,13 @@
 import { file, settled } from "@mrmeku/dagraph";
 import assert from "node:assert/strict";
 import { describe, test } from "node:test";
+import { errorMessage } from "../kernel/format.ts";
 import type { ExecResult } from "../ports.ts";
 import { createTestPorts } from "../ports/memory.ts";
 import { runWorkflow } from "../runner.ts";
 import { renderFailures, renderStatus, renderTimeline } from "../summary.ts";
 import { defineWorkflow } from "../workflow.ts";
+import { createGithubStore } from "./renderer.ts";
 
 const exited = (code: number, output: string): ExecResult => {
   return { ended: "exited", code, stdout: output, stderr: "", output, ok: code === 0 };
@@ -76,7 +78,7 @@ describe("GitHub renderer", () => {
           { title: "◼︎ slow (cancelled)", lines: ["compiling"] },
           "◼︎ after: cancelled",
           "",
-          "✖︎ lint failed · ci.ts · built 0 · cached 0 · failed 1 · skipped 0 · cancelled 2 · wall 4.0s",
+          "✖︎ lint failed · ci.ts · built 0 · cached 0 · failed 1 · skipped 0 · cancelled 2 · wall 6.0s",
           "failed: lint",
           "cancelled: slow, after",
           "reproduce: npx --no dag run ci.ts --only lint",
@@ -207,6 +209,49 @@ describe("GitHub renderer", () => {
     );
   });
 
+  test("a task whose start the run's history cannot record shows its start, then fails not started, and the run rejects with the write's error", async () => {
+    const { ports, rec } = createTestPorts();
+    const writeText = ports.fs.writeText;
+    ports.fs.writeText = (path, text) =>
+      path.startsWith("/history/") && text.includes('"lint"')
+        ? Promise.reject(new Error("disk full"))
+        : writeText(path, text);
+    const store = createGithubStore(ports, "/cas");
+    const { implementation } = defineWorkflow({
+      implementation: (workflow) => void workflow.task({ name: "lint", cmd: ["lint"] }),
+    });
+    const error = await runWorkflow({
+      implementation,
+      workflowFile: "ci.ts",
+      ports,
+      casBaseDir: "/cas",
+      historyDir: "/history",
+      store,
+    }).catch(errorMessage);
+    await store.close(error);
+    assert.deepEqual(
+      { error, log: rec.log, checks: rec.checks },
+      {
+        error: "disk full",
+        log: [
+          { title: "ci.ts · 1 node", lines: ["lint"] },
+          "▷ lint",
+          { title: "✖︎ lint (not started)", lines: ["── error ──", "disk full"] },
+        ],
+        checks: [
+          { name: "lint", status: "in_progress", startedAt: "1970-01-01T00:00:01.000Z" },
+          {
+            name: "lint",
+            status: "completed",
+            conclusion: "failure",
+            completedAt: "1970-01-01T00:00:02.000Z",
+            summary: "disk full",
+          },
+        ],
+      },
+    );
+  });
+
   test("the reproduce line quotes a name the shell would split", async () => {
     const { ports, rec } = createTestPorts({
       exec: { run: async (cmd) => exited(1, `${cmd[0]}\n`) },
@@ -264,7 +309,7 @@ describe("GitHub renderer", () => {
       },
       {
         recap: [
-          "✖︎ test, require-all, down:db and 1 more failed · ci.ts · built 2 · cached 0 · failed 4 · skipped 0 · wall 15.0s",
+          "✖︎ test, require-all, down:db and 1 more failed · ci.ts · built 2 · cached 0 · failed 4 · skipped 0 · wall 25.0s",
           "failed: test, require-all, down:db, save:cas",
           "reproduce: npx --no dag run ci.ts --only test,require-all,down:db,save:cas",
         ],

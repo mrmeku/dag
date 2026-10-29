@@ -14,7 +14,13 @@ import { describe, test } from "node:test";
 import { addCommand } from "../commands.ts";
 import type { Ports } from "../ports.ts";
 import { createTestPorts, steppingClock } from "../ports/memory.ts";
-import { errorMessage, formatDuration, reportHeadline, warningMessages } from "./format.ts";
+import {
+  errorMessage,
+  failureMessage,
+  formatDuration,
+  reportHeadline,
+  warningMessages,
+} from "./format.ts";
 import type { NodeReport } from "./report.ts";
 import { completedLines, initialNodeState, nodeReducer, type NodeState } from "./run-slice.ts";
 import * as selectors from "./selectors.ts";
@@ -31,32 +37,44 @@ const [a, b, c, d, f, save] = [
   node("save"),
 ];
 type Settled<R = Result> = R extends unknown ? Omit<R, "name"> : never;
-const settled = (n: Node, result: Settled): ExecEvent => ({
+const resultOf = (n: Node, result: Settled): Result => ({ name: n.name, ...result });
+const resultEvent = (result: Result): ExecEvent => ({
   type: "result",
-  node: n.name,
-  result: { name: n.name, ...result },
+  node: result.name,
+  result,
+  occurredAt: 0,
 });
-const built = (n: Node, key: string): ExecEvent =>
-  settled(n, {
+const settled = (n: Node, result: Settled): ExecEvent => resultEvent(resultOf(n, result));
+const builtResult = (n: Node, key: string, elapsed = 1000): Result =>
+  resultOf(n, {
     actionKey: key,
     status: "done",
     outputs: { out: key },
     contentHash: "h",
     outputHashes: {},
-    elapsed: 1,
+    elapsed,
   });
-const failed = (n: Node, key: string, message: string, cause?: JsonValue): ExecEvent =>
-  settled(n, {
+const failedResult = (n: Node, key: string, message: string, cause?: JsonValue): Result =>
+  resultOf(n, {
     actionKey: key,
     status: "failed",
     error: { name: "Error", message, ...(cause !== undefined && { cause }) },
-    elapsed: 1,
+    elapsed: 1000,
   });
+const built = (n: Node, key: string, elapsed?: number): ExecEvent =>
+  resultEvent(builtResult(n, key, elapsed));
+const failed = (n: Node, key: string, message: string, cause?: JsonValue): ExecEvent =>
+  resultEvent(failedResult(n, key, message, cause));
 const started = (n: Node): ExecEvent[] => [
-  { type: "dispatch", node: n.name },
-  { type: "start", node: n.name },
+  { type: "dispatch", node: n.name, occurredAt: 0 },
+  { type: "start", node: n.name, occurredAt: 0 },
 ];
-const printed = (n: Node, chunk: string): ExecEvent => ({ type: "output", node: n.name, chunk });
+const printed = (n: Node, chunk: string): ExecEvent => ({
+  type: "output",
+  node: n.name,
+  chunk,
+  occurredAt: 0,
+});
 const command = { argv: ["make", "b"], cwd: ".", ended: "exited", code: 2 };
 const files = {
   "/cas/last-run.json": JSON.stringify({ durations: { a: 500, f: 1500 } }),
@@ -66,19 +84,18 @@ const files = {
   "/cas.logs/kp.log": "saved\n",
 };
 
+/** A store, and its events as an engine stamps them: a second apart, what a node prints aside. */
 function storeOf(listeners: RunListener[], lastRunAtBegin = false) {
   const { fs } = createTestPorts({ files });
-  const store = createRunStore({
-    fs,
-    clock: steppingClock(),
-    casBaseDir: "/cas",
-    listeners,
-    lastRunAtBegin,
-  });
+  const store = createRunStore({ fs, casBaseDir: "/cas", listeners, lastRunAtBegin });
+  const clock = steppingClock();
   return {
     fs,
     store,
-    events: (...events: ExecEvent[]) => events.forEach((event) => store.onEvent(event)),
+    events: (...events: ExecEvent[]) =>
+      events.forEach((event) =>
+        store.onEvent(event.type === "output" ? event : { ...event, occurredAt: clock.now() }),
+      ),
   };
 }
 
@@ -107,13 +124,16 @@ async function transcript(lastRunAtBegin: boolean) {
             nodeState.node.name,
             nodeState.status,
             log,
-            (nodeState.status === "failed" && nodeState.command) || "no command",
+            (nodeState.status === "failed" && selectors.commandOf(nodeState.result.error)) ||
+              "no command",
           ]),
         finish: (pass, nodes) =>
           void heard.push([
             "finish",
             pass.title,
-            nodes.map((node) => `${node.name} ${node.status} in ${node.duration}ms`),
+            nodes.map(
+              ({ node, result, duration }) => `${node.name} ${result.status} in ${duration}ms`,
+            ),
           ]),
         immediate: {
           start: (nodeState) => void heard.push(["immediate.start", nodeState.node.name]),
@@ -131,7 +151,7 @@ async function transcript(lastRunAtBegin: boolean) {
     built(a, "ka"),
     ...started(f),
     failed(b, "kb", "make b exited 2", command),
-    { type: "dispatch", node: "c" },
+    { type: "dispatch", node: "c", occurredAt: 0 },
     settled(c, {
       actionKey: "kc",
       status: "cached",
@@ -153,9 +173,17 @@ async function transcript(lastRunAtBegin: boolean) {
   return heard;
 }
 
+const skippedByB = resultOf(d, {
+  actionKey: "",
+  status: "dep-failed",
+  dep: "b",
+  rootCauses: ["b"],
+});
+const cancelledRunning = resultOf(c, { actionKey: "kc", status: "cancelled", elapsed: 1000 });
+
 /**
- * A run of a built node, a failed one, one it skipped and one a cancel stopped, reported while
- * another still runs.
+ * A run of a built node, whose action took 600 ms of the second from its start to its result, a
+ * failed one, one it skipped and one a cancel stopped, reported while another still runs.
  */
 async function failedRun() {
   const pass = { title: "main", nodes: [a, b, c, d, save] };
@@ -163,12 +191,12 @@ async function failedRun() {
   store.begin(pass);
   events(
     ...started(a),
-    built(a, "ka"),
+    built(a, "ka", 600),
     ...started(b),
     failed(b, "kb", "make b exited 2", command),
-    settled(d, { actionKey: "", status: "dep-failed", dep: "b" }),
+    resultEvent(skippedByB),
     ...started(c),
-    settled(c, { actionKey: "kc", status: "cancelled" }),
+    resultEvent(cancelledRunning),
     ...started(save),
   );
   return { fs, store, pass, reports: await store.report(pass) };
@@ -222,7 +250,7 @@ describe("run store", () => {
     const { store, events } = storeOf([]);
     store.begin(pass);
     events(
-      { type: "dispatch", node: "a" },
+      { type: "dispatch", node: "a", occurredAt: 0 },
       settled(a, {
         actionKey: "ka",
         status: "cached",
@@ -232,24 +260,34 @@ describe("run store", () => {
       }),
     );
     assert.deepEqual(await store.report(pass), [
-      { ...a, status: "cached", start: 0, duration: 1000, previous: 500, outputs: { out: "ka" } },
+      {
+        node: a,
+        result: resultOf(a, {
+          actionKey: "ka",
+          status: "cached",
+          outputs: { out: "ka" },
+          contentHash: "h",
+          outputHashes: {},
+        }),
+        start: 0,
+        duration: 1000,
+        previous: 500,
+      },
     ]);
   });
 
-  test("a pass's report: the nodes that settled, as they ended", async () => {
+  test("a pass's report: the nodes that settled, with their results, from when each started for as long as the engine ran it", async () => {
     const { reports } = await failedRun();
     assert.deepEqual(reports, [
-      { ...a, status: "done", start: 1000, duration: 1000, previous: 500, outputs: { out: "ka" } },
+      { node: a, result: builtResult(a, "ka", 600), start: 1000, duration: 600, previous: 500 },
       {
-        ...b,
-        status: "failed",
+        node: b,
+        result: failedResult(b, "kb", "make b exited 2", command),
         start: 4000,
         duration: 1000,
-        failedWhile: "running",
-        error: "make b exited 2",
       },
-      { ...c, status: "cancelled", start: 8000, duration: 1000 },
-      { ...d, status: "dep-failed", error: "dependency b failed" },
+      { node: c, result: cancelledRunning, start: 8000, duration: 1000 },
+      { node: d, result: skippedByB },
     ]);
   });
 
@@ -258,11 +296,11 @@ describe("run store", () => {
     fs.files.set("/cas/last-run.json", JSON.stringify({ durations: { a: 500 } }));
     await store.report(pass);
     assert.deepEqual(JSON.parse(await fs.readText("/cas/last-run.json")), {
-      durations: { a: 1000, b: 1000, f: 1500 },
+      durations: { a: 600, b: 1000, f: 1500 },
     });
   });
 
-  test("a node that failed before its action started has no start, duration or last run; one whose start the store heard has them, though recording the start failed", async () => {
+  test("whether a node's action ran is the engine's word: one whose key needs a missing file, and one whose start the store heard but whose record then failed, have no start, duration or last run", async () => {
     const { ports, fs } = createTestPorts();
     const graph = new Graph<Ports>();
     const hash = addCommand(graph, {
@@ -271,15 +309,15 @@ describe("run store", () => {
       inputs: { "src/a.ts": file("src/a.ts") },
     });
     addCommand(graph, { name: "journal", cmd: ["journal"], deps: { hash: settledDep(hash) } });
-    const store = createRunStore({ fs, clock: steppingClock(), casBaseDir: "/cas", listeners: [] });
+    const store = createRunStore({ fs, casBaseDir: "/cas", listeners: [] });
     const pass = { title: "main", nodes: graph.describe() };
     const [hashNode, journalNode] = pass.nodes;
     store.begin(pass);
-    await execute(
+    const [hashResult, journalResult] = await execute(
       graph,
-      { ports, cache: new MemCache(), fs, casBaseDir: "/cas" },
+      { ports, cache: new MemCache(), fs, casBaseDir: "/cas", clock: steppingClock() },
       {
-        // As the runner's history records a start, after the store has heard it.
+        // Heard before a record of the start that fails.
         onEvent: (event) => {
           store.onEvent(event);
           return event.type === "start" ? Promise.reject(new Error("disk full")) : undefined;
@@ -290,17 +328,14 @@ describe("run store", () => {
       {
         hash: store.getState().nodes.get("hash"),
         reports: await store.report(pass),
-        lastRun: await parsed(fs.readText("/cas/last-run.json")),
+        lastRun: await fs.exists("/cas/last-run.json"),
       },
       {
         hash: {
           node: hashNode,
           status: "failed",
-          failedWhile: "waiting",
-          actionKey: "",
+          result: hashResult,
           endedAt: 1000,
-          error: "ENOENT: src/a.ts",
-          timedOut: false,
           unfinishedLine: "",
           lastLine: "",
           printed: false,
@@ -308,17 +343,10 @@ describe("run store", () => {
           log: [],
         },
         reports: [
-          { ...hashNode, status: "failed", failedWhile: "waiting", error: "ENOENT: src/a.ts" },
-          {
-            ...journalNode,
-            status: "failed",
-            start: 3000,
-            duration: 1000,
-            failedWhile: "running",
-            error: "disk full",
-          },
+          { node: hashNode, result: hashResult },
+          { node: journalNode, result: journalResult },
         ],
-        lastRun: { durations: { journal: 1000 } },
+        lastRun: false,
       },
     );
   });
@@ -345,37 +373,42 @@ describe("run store", () => {
       cache: new MemCache(),
       fs,
       casBaseDir: "/cas",
+      clock: Date,
     });
     const noAttemptDirectory = {
       ...fs,
       ensureDir: (path: string) =>
         path.includes("/tmp-") ? Promise.reject(new Error("EACCES: mkdir")) : fs.ensureDir(path),
     };
-    const store = createRunStore({ fs, clock: steppingClock(), casBaseDir: "/cas", listeners: [] });
+    const store = createRunStore({ fs, casBaseDir: "/cas", listeners: [] });
     const pass = { title: "main", nodes: graph.describe() };
     store.begin(pass);
-    await execute(
+    const [stage] = await execute(
       graph,
-      { ports, cache: new MemCache(), fs: noAttemptDirectory, casBaseDir: "/cas" },
+      {
+        ports,
+        cache: new MemCache(),
+        fs: noAttemptDirectory,
+        casBaseDir: "/cas",
+        clock: steppingClock(),
+      },
       { onEvent: (event) => store.onEvent(event) },
     );
     await store.report(pass);
-    const actionKey = earlier?.actionKey ?? "";
     assert.deepEqual(
       {
-        earlierLog: await fs.readText(`/cas.logs/${actionKey}.log`),
+        earlierLog: await fs.readText(`/cas.logs/${earlier?.actionKey ?? ""}.log`),
+        sameKey: stage?.actionKey === earlier?.actionKey,
         stage: store.getState().nodes.get("stage"),
       },
       {
         earlierLog: output,
+        sameKey: true,
         stage: {
           node: pass.nodes[0],
           status: "failed",
-          failedWhile: "waiting",
-          actionKey,
+          result: stage,
           endedAt: 1000,
-          error: "EACCES: mkdir",
-          timedOut: false,
           unfinishedLine: "",
           lastLine: "",
           printed: false,
@@ -398,7 +431,7 @@ describe("run store", () => {
         file: await parsed(fs.readText("/cas/last-run.json")),
       },
       {
-        reports: [{ ...a, status: "done", start: 1000, duration: 1000, outputs: { out: "ka" } }],
+        reports: [{ node: a, result: builtResult(a, "ka"), start: 1000, duration: 1000 }],
         file: { durations: { a: 1000 } },
       },
     );
@@ -473,7 +506,7 @@ describe("run store", () => {
       let nodeState: NodeState = initialNodeState(node("n"));
       for (const chunk of chunks) {
         completed.push(...completedLines(nodeState.unfinishedLine, chunk));
-        nodeState = nodeReducer(nodeState, { type: "output", node: "n", chunk });
+        nodeState = nodeReducer(nodeState, { type: "output", node: "n", chunk, occurredAt: 0 });
       }
       return { completed, unfinishedLine: nodeState.unfinishedLine, lastLine: nodeState.lastLine };
     };
@@ -528,32 +561,42 @@ describe("run store", () => {
     );
   });
 
-  test("durations, timeouts and outcomes in a few words", () => {
-    const timedOut = (timeoutMs: number) => {
-      const error = { name: "TimeoutError", message: "timed out" };
-      const failed = nodeReducer(initialNodeState({ ...node("n"), timeoutMs }), {
+  test("durations, timeouts and outcomes in a few words: a timeout is the node's own, not an error an action names one", () => {
+    const failure = (timeoutMs: number, timedOut: boolean) => {
+      const error = { name: "TimeoutError", message: "fetch timed out" };
+      const nodeState = nodeReducer(initialNodeState({ ...node("n"), timeoutMs }), {
         type: "result",
         node: "n",
-        result: { name: "n", actionKey: "k", status: "failed", error, elapsed: 1 },
+        result: {
+          name: "n",
+          actionKey: "k",
+          status: "failed",
+          error,
+          elapsed: 1,
+          ...(timedOut && { timedOut }),
+        },
         occurredAt: 0,
       });
-      assert(failed.status === "failed");
-      return failed.error;
+      assert(nodeState.status === "failed");
+      return failureMessage(nodeState);
     };
-    const ended = (status: NodeReport["status"]): NodeReport => ({ ...node(status), status });
+    const ended = (result: Result): NodeReport => ({ node: node(result.name), result });
+    const done = ended(builtResult(node("done"), "k"));
+    const skipped = ended(
+      resultOf(node("skipped"), { actionKey: "", status: "dep-failed", dep: "b" }),
+    );
     assert.deepEqual(
       {
         durations: [450, 1500].map(formatDuration),
-        timeouts: [60_000, 100_000].map(timedOut),
-        outcomes: [[ended("done")], [ended("done"), ended("dep-failed")]].map((n) =>
-          reportHeadline(n),
-        ),
+        failures: [failure(60_000, true), failure(100_000, true), failure(60_000, false)],
+        outcomes: [[done], [done, skipped]].map((n) => reportHeadline(n)),
       },
       {
         durations: ["450ms", "1.5s"],
-        timeouts: [
+        failures: [
           "The action 'n' has timed out after 1 minute.",
           "The action 'n' has timed out after 1.67 minutes.",
+          "fetch timed out",
         ],
         outcomes: ["✔︎ 1 node succeeded", "⏭︎ 1 node skipped, a dependency failed"],
       },
@@ -585,21 +628,38 @@ describe("run store", () => {
     );
   });
 
-  test("a skipped node goes back through the skipped nodes between to the failures that caused it", () => {
-    const db = node("up:db");
-    const check = node("test", ["up:db"]);
-    const e2e = node("e2e", ["test"]);
-    const deploy = node("deploy", ["e2e"]);
+  test("a skipped node's causes are the engine's root causes: the failures along its required deps, through the skipped nodes between, and not a failed settled dep", async () => {
+    const failing = new Set(["test", "upload"]);
+    const { ports, fs } = createTestPorts({
+      exec: {
+        run: async ([program = ""]) => {
+          const code = failing.has(program) ? 1 : 0;
+          return { ended: "exited", code, stdout: "", stderr: "", output: "", ok: code === 0 };
+        },
+      },
+    });
+    const graph = new Graph<Ports>();
+    const db = addCommand(graph, { name: "up:db", cmd: ["up"] });
+    const check = addCommand(graph, { name: "test", cmd: ["test"], deps: { db } });
+    const e2e = addCommand(graph, { name: "e2e", cmd: ["e2e"], deps: { check } });
+    addCommand(graph, { name: "deploy", cmd: ["deploy"], deps: { e2e } });
     // After a failed `settled` dep: a failure of its own, whose block lists the dep.
-    const upload = node("upload", ["up:db", "test"]);
-    const { store, events } = storeOf([]);
-    store.begin({ title: "main", nodes: [db, check, e2e, deploy, upload] });
-    events(
-      built(db, "kdb"),
-      failed(check, "kt", "make b exited 2", command),
-      settled(e2e, { actionKey: "", status: "dep-failed", dep: "test" }),
-      settled(deploy, { actionKey: "", status: "dep-failed", dep: "e2e" }),
-      failed(upload, "ku", "upload exited 3", { ...command, argv: ["upload"], code: 3 }),
+    const upload = addCommand(graph, {
+      name: "upload",
+      cmd: ["upload"],
+      deps: { db, check: settledDep(check) },
+    });
+    addCommand(graph, {
+      name: "publish",
+      cmd: ["publish"],
+      deps: { upload, check: settledDep(check) },
+    });
+    const store = createRunStore({ fs, casBaseDir: "/cas", listeners: [] });
+    store.begin({ title: "main", nodes: graph.describe() });
+    await execute(
+      graph,
+      { ports, cache: new MemCache(), fs, casBaseDir: "/cas", clock: steppingClock() },
+      { onEvent: (event) => store.onEvent(event) },
     );
     const run = store.getState();
     const stateOf = (name: string) => {
@@ -609,7 +669,8 @@ describe("run store", () => {
     };
     assert.deepEqual(
       {
-        causesOfDeploy: selectors.causesOf(run, stateOf("deploy")),
+        causesOfDeploy: selectors.causesOf(stateOf("deploy")),
+        causesOfPublish: selectors.causesOf(stateOf("publish")),
         skippedBecauseOfTest: selectors.skippedBecauseOf(run, "test"),
         dependencyFailuresOfUpload: selectors
           .getDependencyFailures(run, stateOf("upload"))
@@ -617,6 +678,7 @@ describe("run store", () => {
       },
       {
         causesOfDeploy: ["test"],
+        causesOfPublish: ["upload"],
         skippedBecauseOfTest: ["e2e", "deploy"],
         dependencyFailuresOfUpload: ["test"],
       },

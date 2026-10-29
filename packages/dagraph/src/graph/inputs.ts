@@ -4,9 +4,8 @@ import {
   isFileInput,
   isIdentifier,
   isOutputRef,
+  type AnyOutputRef,
   type InputRecord,
-  type OutputRef,
-  type SettledOutputRef,
 } from "./types.ts";
 
 /**
@@ -77,10 +76,7 @@ export function checkInputs(
 }
 
 /** A value as JSON with sorted keys, each output ref as `#ref(...)`, which no JSON value spells. */
-export function canonical(
-  value: unknown,
-  refKey: (ref: OutputRef | SettledOutputRef) => string,
-): string {
+export function canonical(value: unknown, refKey: (ref: AnyOutputRef) => string): string {
   if (isOutputRef(value)) return `#ref(${refKey(value)})`;
   if (Array.isArray(value)) return `[${value.map((v) => canonical(v, refKey)).join(",")}]`;
   if (typeof value === "object" && value !== null)

@@ -1,7 +1,7 @@
 import type { CacheEntry } from "./cache.ts";
 import { ExecState, type Ready } from "./exec-state.ts";
 import type { Node } from "./graph/index.ts";
-import type { ExecEvent, ExecListener, Result } from "./types.ts";
+import type { Clock, ExecEvent, ExecListener, Result } from "./types.ts";
 import { errorOf } from "./utils.ts";
 
 export type { Ready } from "./exec-state.ts";
@@ -51,6 +51,7 @@ export async function orchestrate<Meta>(
   nodes: Iterable<Node<Meta>>,
   run: RunNode<Meta>,
   schedule: Scheduler,
+  clock: Clock,
   onEvent?: ExecListener<Meta>,
   signal?: AbortSignal,
 ): Promise<Result[]> {
@@ -91,7 +92,7 @@ export async function orchestrate<Meta>(
   const meta = (node: Node<Meta>) => (node.meta === undefined ? {} : { meta: node.meta });
   const settle = (node: Node<Meta>, result: Result) => {
     state.settle(node, result);
-    emit({ type: "result", node: node.name, ...meta(node), result });
+    emit({ type: "result", node: node.name, ...meta(node), result, occurredAt: clock.now() });
     releasePlace(node.name);
     wake();
   };
@@ -114,7 +115,7 @@ export async function orchestrate<Meta>(
       return new Promise<void>((resolve, reject) => {
         pendingRuns.set(node.name, { resolve, reject });
         state.waitForScheduler(node);
-        emit({ type: "pending", node: node.name, ...meta(node) });
+        emit({ type: "pending", node: node.name, ...meta(node), occurredAt: clock.now() });
         releasePlace(node.name);
         wake();
       });
@@ -142,21 +143,16 @@ export async function orchestrate<Meta>(
       const place = new Promise<void>((resolve) => places.set(node.name, resolve));
       const dep = state.failedDep(node);
       if (dep !== undefined) {
-        settle(node, { name: node.name, actionKey: "", status: "dep-failed", dep });
+        const rootCauses = state.rootCauses(node);
+        settle(node, { name: node.name, actionKey: "", status: "dep-failed", dep, rootCauses });
         return place;
       }
-      emit({ type: "dispatch", node: node.name, ...meta(node) });
+      emit({ type: "dispatch", node: node.name, ...meta(node), occurredAt: clock.now() });
       processing++;
       void run(node, state.depEntries(node), waitForSchedulerOf(node))
         .catch((e: unknown): Result => {
           if (signal?.aborted) return { name: node.name, actionKey: "", status: "cancelled" };
-          return {
-            name: node.name,
-            actionKey: "",
-            status: "failed",
-            error: errorOf(e),
-            elapsed: 0,
-          };
+          return { name: node.name, actionKey: "", status: "failed", error: errorOf(e) };
         })
         .then((result) => {
           processing--;

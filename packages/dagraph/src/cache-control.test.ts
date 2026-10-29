@@ -83,7 +83,10 @@ function buildGraph(transcriptVersion = 1) {
 
 function setup() {
   const ports: Ports = { fs: createMemoryDagFs(), ran: [], source: { id: "abc", bitrate: 128 } };
-  return { ports, ctx: { ports, cache: new MemCache(), fs: ports.fs, casBaseDir: "/cas" } };
+  return {
+    ports,
+    ctx: { ports, cache: new MemCache(), fs: ports.fs, clock: Date, casBaseDir: "/cas" },
+  };
 }
 
 /** How each node of `graph` looks up against the entries of `results`, none of them run. */

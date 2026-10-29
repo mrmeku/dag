@@ -1,6 +1,14 @@
 import { join } from "shlex";
 import { FAILURES_REPORT_LOG_LINES, STATUS_ICON } from "../../config.ts";
-import { logLines, plainLine, plural, rerunLine, textOf, titleOf } from "../../kernel/format.ts";
+import {
+  failureMessage,
+  logLines,
+  plainLine,
+  plural,
+  rerunLine,
+  textOf,
+  titleOf,
+} from "../../kernel/format.ts";
 import type { RunState } from "../../kernel/run-slice.ts";
 import * as selectors from "../../kernel/selectors.ts";
 import type { RunListener } from "../../kernel/store.ts";
@@ -89,17 +97,16 @@ function failuresReportMarkdown(run: RunState, localContext: LocalContext): stri
       .slice(-FAILURES_REPORT_LOG_LINES)
       .map((line) => plainLine(line));
     const inlineCodeList = (names: string[]) => names.map(inlineCode).join(", ");
+    const command = selectors.commandOf(nodeState.result.error);
     markdownLines.push(
       `## ${STATUS_ICON.failed} ${name} · ${detailOf(nodeState)}`,
       "",
-      ...(nodeState.command
-        ? [
-            `- command: ${inlineCode(join(nodeState.command.argv))} (cwd ${inlineCode(nodeState.command.cwd)})`,
-          ]
+      ...(command
+        ? [`- command: ${inlineCode(join(command.argv))} (cwd ${inlineCode(command.cwd)})`]
         : []),
       ...(errorSaysOnlyExitCode(nodeState)
         ? []
-        : [`- error: ${logLines(nodeState.error).join(" ")}`]),
+        : [`- error: ${logLines(failureMessage(nodeState)).join(" ")}`]),
       ...(logFile
         ? [`- log: ${inlineCode(logFile)} (${plural(nodeState.lineCount ?? 0, "line")})`]
         : []),

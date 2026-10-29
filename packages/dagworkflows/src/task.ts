@@ -2,6 +2,7 @@ import {
   nodeInputs,
   type ActionContext,
   type ActionSpec,
+  type AnyNodeRef,
   type DepRecord,
   type DepRefs,
   type DepSpecsOf,
@@ -9,17 +10,16 @@ import {
   type InputRecord,
   type NodeParams,
   type NodeRef,
-  type SettledRef,
 } from "@mrmeku/dagraph";
 import { isAbsolute } from "node:path";
 import { defineStep } from "./define-step.ts";
 import { errorMessage } from "./kernel/format.ts";
-import type { Exec, ExecResult, Ports, WorkflowPorts } from "./ports.ts";
+import type { ExecOptions, ExecResult, Ports, WorkflowPorts } from "./ports.ts";
 import { warningLine, writeLog, type CommandCause } from "./step-records.ts";
 
 /** Each role of `deps` with its dep, leaving out a role whose dep is `undefined`. */
 export const depRoles = (deps: DepRecord | undefined) =>
-  Object.entries(deps ?? {}).flatMap(([role, dep]): [string, NodeRef | SettledRef][] =>
+  Object.entries(deps ?? {}).flatMap(([role, dep]): [string, AnyNodeRef][] =>
     dep === undefined ? [] : [[role, dep]],
   );
 
@@ -36,7 +36,7 @@ type EngineContext<D extends DepRecord, I extends InputRecord<unknown>> = Action
   DeclaredOutputs & I
 >;
 
-type CommandOptions = Pick<NonNullable<Parameters<Exec["run"]>[1]>, "cwd" | "env">;
+type CommandOptions = Pick<ExecOptions, "cwd" | "env">;
 
 export type TaskContext<
   D extends DepRecord,

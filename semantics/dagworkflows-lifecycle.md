@@ -25,11 +25,14 @@ as it happens (the run store), and what it returns.
 - **Post step** (or just **post**): the release a task gives in its `post` field. It is a node of
   its own, with its own name.
 - **Owed**: a post is owed once its main has _started_, and stays owed until it _succeeds_.
-  Think of it as a debt: starting the main borrows, a successful post pays back.
+  Think of it as a debt: starting the main borrows, a successful post pays back. "Started" here
+  is **start recorded**: the run's history wrote the main's start down. It is not the same as
+  whether the main's **action ran**, which dagraph's result says (its `elapsed`) and which every
+  output shows.
 - **Pass**: one execution over a set of nodes, drawn as one block of output with its own banner,
   recap and step summary. A run is one pass. A **post pass** is a pass that runs only owed posts.
-- **Run history** (or **history**): a JSON file a run writes as it goes, recording which nodes
-  started and how each settled. It is how a later process knows what an earlier one owes.
+- **Run history** (or **history**): a JSON file a run writes as it goes, recording each node
+  whose start it recorded and how each settled. It is how a later process knows what an earlier one owes.
 - **Settled**: a node has a final result: `done`, `cached`, `failed`, `dep-failed` (skipped
   because a required dependency did not succeed) or `cancelled`.
 - **Run store**: the in-memory record of a run that every output (terminal, GitHub log, check
@@ -131,15 +134,15 @@ post is owed.
 
 Cases, all pinned by tests:
 
-| What happened to the main                                                          | Is the post owed?                                                                                                                |
-| ---------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------- |
-| Succeeded                                                                          | Yes (and it runs at the end of the run)                                                                                          |
-| Failed after starting                                                              | Yes; it runs, with the main's missing outputs unset                                                                              |
-| Cancelled while its command ran                                                    | Yes; it is paid by the post pass                                                                                                 |
-| Skipped because a dependency failed (`dep-failed`)                                 | No: it never started, so the post is skipped too (`dep-failed`)                                                                  |
-| Cancelled while waiting for a concurrency-group slot                               | No: it never started                                                                                                             |
-| Cancelled before its command started (e.g. while its output directory was made)    | No                                                                                                                               |
-| Cancelled in the instant between its start being recorded and its command starting | Yes, though nothing ran: the record says it started. This is why a release must be safe to run when there is nothing to release. |
+| What happened to the main                                                          | Is the post owed?                                                                                                                                                                                                                      |
+| ---------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Succeeded                                                                          | Yes (and it runs at the end of the run)                                                                                                                                                                                                |
+| Failed after starting                                                              | Yes; it runs, with the main's missing outputs unset                                                                                                                                                                                    |
+| Cancelled while its command ran                                                    | Yes; it is paid by the post pass                                                                                                                                                                                                       |
+| Skipped because a dependency failed (`dep-failed`)                                 | No: it never started, so the post is skipped too (`dep-failed`)                                                                                                                                                                        |
+| Cancelled while waiting for a concurrency-group slot                               | No: it never started                                                                                                                                                                                                                   |
+| Cancelled before its command started (e.g. while its output directory was made)    | No                                                                                                                                                                                                                                     |
+| Cancelled in the instant between its start being recorded and its command starting | Yes, though nothing ran: the record says it started. This is why a release must be safe to run when there is nothing to release. Every output shows the main's start line, yet reads it as not run, since its result has no `elapsed`. |
 
 A post's work must be safe to do twice and safe to do when nothing was set up (`docker rm -f`,
 `compose down`), because a retry, a crash at the wrong moment or the case just above can run it
@@ -567,7 +570,8 @@ Its content (type `RunHistoryFile`):
   implementations that share a history directory without a `workflowFile` pay each other's
   histories, each over its own graph.
 - `only`: the run's `--only` names, present only when it had some.
-- `started`: the nodes whose action started, in the order they started.
+- `started`: the nodes whose start it recorded, in that order (the name is kept so earlier
+  histories still read). A start is recorded before the action may run.
 - `results`: each settled node's whole result, as the engine produced it (type `RunHistory`, a
   record from node name to dagraph `Result`).
 
@@ -763,14 +767,18 @@ cancel (SIGINT, SIGTERM, SIGKILL). Then:
 
 - The node is `failed`, **whatever its command exited with**, even 0 (a command that traps SIGINT
   and exits cleanly still timed out).
-- In the run store (`FailedNodeState.error`, with `timedOut: true`) and in every output that
-  reads it, the error reads as GitHub's runner words it:
+- dagraph marks the result `timedOut: true`. Every output then gives the error (dagworkflows'
+  `failureMessage`) as GitHub's runner words it:
   `The action '<name>' has timed out after <time>.` where `<time>` is in minutes from one minute
   up (`1 minute`, `1.67 minutes`), otherwise as a short duration (`30ms`, `1.5s`). Example:
   `The action 'test' has timed out after 30ms.`
-- The dagraph `Result`, in `RunOutcome.results` and in the history file, keeps the engine's
-  words: `error.name` is `"TimeoutError"`, `error.message` is `timed out after <ms> ms`, plus the
-  `cause` carried by what the action threw as it stopped, if any.
+- The dagraph `Result`, in `RunOutcome.results`, in the history file and in the run store,
+  keeps the engine's words: `error.name` is `"TimeoutError"`, `error.message` is
+  `timed out after <ms> ms`, plus the `cause` carried by what the action threw as it stopped, if
+  any, and `timedOut: true`.
+- An action that throws an error of its own named `TimeoutError`, such as a `fetch` whose own
+  timeout fired, has no `timedOut`: it is a plain failure with its own message, concluded
+  `failure`.
 - On GitHub its check run concludes `timed_out`; an error annotation carries the message; the
   node's log group ends with `── error ──` and the message, after what the command printed.
 - A timed-out result is never cached. `timeoutMs` is not part of the node's cache key: changing
@@ -880,32 +888,34 @@ Every node of a pass is in one of these states (types exported as `NodeState` an
 - `pending` (`PendingNodeState`): not yet running. The pass has begun and the node has not been
   dispatched, or it was dispatched, missed, and the scheduler holds it back (dagraph's `pending`
   event). Why it waits is the scheduler's own business, so the state does not say.
-- `dispatched` or `running` (`InFlightNodeState`): handed to processing, then its action started.
-  Both carry `startedAt`.
-- Settled (`SettledNodeState`):
-  - `done` or `cached` (`SucceededNodeState`): with `actionKey`, `outputs`, `startedAt`, `endedAt`.
-  - `failed` (`FailedNodeState`): with `actionKey`, `endedAt`, `error` (the message, a timeout in
-    the runner's words), `timedOut`, `failedWhile`, and, when a command's failure caused it,
-    `command` (a `CommandCause`, see below), plus the log once read. The reducer sets
-    `failedWhile` from the state the node left, as it sets a cancelled node's `cancelledWhile`.
-    `failedWhile: "running"`: it had received `start`, and it has the start time as `startedAt`.
-    `failedWhile: "waiting"`: its action never started, from `pending` or `dispatched`: dagraph
-    could not compute its key, as for a `file()` input that does not exist (`actionKey` `""`),
-    could not make its attempt's directory (a real `actionKey`), or its `RunNode` rejected. It
-    has no `startedAt`, so its check run has no start time, it counts toward no duration or wall
-    time, and it has no CAS log and no entry in `last-run.json`. What the store heard decides, as for a cancel: a node whose
-    `start` the run history could not record failed `running`, since the store hears the start
-    before the history writes it, though its action never ran.
-  - `dep-failed` (`DepFailedNodeState`): never dispatched; `endedAt` and `error`, which reads
-    `dependency <name> failed`. The UI calls it skipped.
-  - `cancelled` (`CancelledNodeState`): with `actionKey`, `endedAt` and `cancelledWhile`, which
-    the reducer sets from the state the node left. `cancelledWhile: "running"`: it had received
-    `start`, so its action ran, and it has the start time as `startedAt`.
-    `cancelledWhile: "waiting"`: its action never started, from `pending` or `dispatched`. It has
-    no `startedAt`, even when it was dispatched, so its check run has no start time and it counts
-    toward no duration or wall time. It may still carry a real `actionKey`, since dagraph looks the
-    key up before the scheduler holds a miss back; `actionKey` is `""` for one cancelled before it
-    had a key. So `actionKey` does not say whether the action started: `cancelledWhile` does.
+- `dispatched` or `running` (`InFlightNodeState`): handed to processing, then its start came.
+  Both carry `startedAt`: the dispatch's time, then the start's.
+- Settled (`SettledNodeState`): each holds `result`, dagraph's `Result` for the node as it is,
+  and `endedAt`, the time dagraph stamped on that result. The store copies nothing out of it: the
+  key, outputs, error, `timedOut` and `rootCauses` are read from `result`. A failed or cancelled
+  state has `startedAt` if and only if its result has `elapsed`, and its type allows no other.
+  - `done` or `cached` (`SucceededNodeState`): with `startedAt`, its start's time, or a cache
+    hit's dispatch.
+  - `failed` (`FailedNodeState`): with `startedAt` exactly when its action ran, which its
+    result's `elapsed` says, plus its log once read. A failure without `elapsed` never ran its
+    action: dagraph could not compute its key, as for a `file()` input that does not exist
+    (`actionKey` `""`), could not make its attempt's directory or resolve its inputs (a real
+    `actionKey`), could not record its start (the run's history write failed), or its `RunNode`
+    rejected. It has no `startedAt`, so its check run has no start time, it counts toward no
+    duration or wall time, and it has no CAS log and no entry in `last-run.json`.
+  - `dep-failed` (`DepFailedNodeState`): never dispatched. Its result's `dep` is a required
+    dependency that did not succeed, and `rootCauses` the nodes behind it. The UI calls it
+    skipped.
+  - `cancelled` (`CancelledNodeState`): with `startedAt` exactly when its action ran (its result
+    has `elapsed`). One without never ran, even when it was dispatched, held back with a real
+    `actionKey` (dagraph looks the key up before the scheduler holds a miss back), or had its
+    start recorded and heard: so its check run has no start time and it counts toward no
+    duration or wall time.
+
+**Started and ran.** What dagraph says decides whether a node ran, not which events the store
+heard. A node can have a start line and a check run in progress, then settle as not run: dagraph
+emits `start` before the run's history records it, before it resolves the action's inputs and
+before a cancel is checked a last time.
 
 Every state also carries the node itself (`node`, the graph's `Node`), the line its
 command is printing now (`unfinishedLine`), the last line with text it ended (`lastLine`) and
@@ -914,11 +924,15 @@ whether it printed anything (`printed`). Settled states get `lineCount` once the
 The usual paths: `pending → dispatched → running → done|failed|cancelled`, or
 `pending → dispatched → pending → running → …` for a miss the scheduler holds back; a cache hit goes
 `pending → dispatched → cached`; a skipped node goes `pending → dep-failed`; a node that failed or
-was cancelled before it ran goes from `pending` or `dispatched` to `failed` or `cancelled`.
+was cancelled before its start came goes from `pending` or `dispatched` to `failed` or
+`cancelled`.
 
-A node's duration is from its action's start to its settle, never counting the wait for its
-concurrency group's slot. For a cache hit it is from its dispatch. It is at least 1 ms. A node that
-failed or was cancelled before its action started has none.
+**Times.** Each number has one source. `startedAt` and `endedAt` are the times dagraph stamped on
+the node's events (`occurredAt`), with the clock the runner gives it, `ports.clock`. A node whose
+action ran takes dagraph's `elapsed` as its duration: from just before the action ran, after its
+inputs resolved, to its result, never counting the wait for its concurrency group's slot. A
+cache hit's duration is from its dispatch to its result. Either is at least 1 ms. Any other node
+has none.
 
 A post pass begins its owed nodes afresh: they go back to `pending` in the store, replacing what
 the run recorded for them.
@@ -938,12 +952,12 @@ The run's lifecycle (`RunLifecycle`, in `RunState.lifecycle`):
 `RunState` is `{ nodes, lastRunDurations?, lifecycle }`: `nodes` is a map from name to
 `NodeState` over every pass so far; `lastRunDurations` the previous run's durations by node.
 
-Changes come only as actions (type `RunAction`) through one pure reducer: the engine's events,
-which keep dagraph's `ExecEvent` names rather than past-tense ones (`dispatch`, `pending`, `start`,
-`output`, `result`, the non-output ones stamped with the
-store's clock as `occurredAt`; with `logRead`, these are the node-level subset, type
-`NodeAction`), and `logRead`, `passBegun`, `runCancelled`, `runClosed`,
-`runErrored`, `runInterrupted`, `lastRunRead`, which the store adds. An event for a node no pass
+Changes come only as actions (type `RunAction`) through one pure reducer: the engine's events
+as dagraph emits them, which keep dagraph's `ExecEvent` names rather than past-tense ones
+(`dispatch`, `pending`, `start`, `output`, `result`, each with dagraph's `occurredAt`; with
+`logRead`, these are the node-level subset, type `NodeAction`), and `logRead`, `passBegun`,
+`runCancelled`, `runClosed`, `runErrored`, `runInterrupted`, `lastRunRead`, which the store adds.
+The store's own actions carry no time. An event for a node no pass
 began is ignored.
 
 Where it lives: `kernel/run-slice.ts`, `kernel/selectors.ts`.
@@ -960,16 +974,16 @@ listeners told of each change.
 
 ### Creating one
 
-`createRunStore({ fs, clock, casBaseDir, listeners, lastRunAtBegin? })` returns a `RunStore`:
+`createRunStore({ fs, casBaseDir, listeners, lastRunAtBegin? })` returns a `RunStore`:
 
-- `fs`, `clock`: ports; the clock stamps events.
+- `fs`: the port it reads logs and `last-run.json` through. It reads no clock.
 - `casBaseDir`: where it reads each settled node's log, `<casBaseDir>.logs/<actionKey>.log`, and
   reads and writes `<casBaseDir>/last-run.json`.
 - `listeners`: an array of `RunListener`s, in order.
 - `lastRunAtBegin`: read `last-run.json` when the store's first pass begins, so even the first
   start line can show the last run's time; later passes reuse that read. Without it the file is
   read once, just before the store first writes it (when the first node that built, or failed once
-  its action started, settles), because a node may restore the CAS that holds it, or at the first
+  its action ran, settles), because a node may restore the CAS that holds it, or at the first
   `report` if no such node settled. So a pass of cache hits learns its `previous` durations only at
   the report. Only the local `dag run` session sets the option; `dag post` and the GitHub store do
   not, which is why `dag post`'s start line shows no last-run time.
@@ -996,7 +1010,7 @@ What a store offers:
 A `RunListener` may have any of these hooks:
 
 - `begin(pass, run, isFirstPass)`: a pass began; `isFirstPass` is true for the store's first.
-- `start(nodeState, run)`: a node's action started.
+- `start(nodeState, run)`: a node's start came.
 - `settle(nodeState, run, log)`: a node settled, with its log read from beside the CAS
   (`::debug::` lines dropped).
 - `finish(pass, nodes)`: the pass ended, with its node reports.
@@ -1011,7 +1025,7 @@ logs are still being read. The `run` argument is the state as it stands when the
 may be later than the event.
 
 **The immediate hooks** come at once, ahead of settles still queued: `immediate.start` the moment
-a node's action starts, `immediate.output` each time a node's command ends one or more lines (the
+a node's start comes, `immediate.output` each time a node's command ends one or more lines (the
 lines as a terminal leaves them: after the last carriage return, escape codes and control
 characters removed, `::debug::` lines dropped; blank lines kept). When a node settles with an
 unfinished line, that line is announced as ended. They are for outputs that must not wait: the
@@ -1059,30 +1073,36 @@ an unhandled rejection: under Node's default unhandled-rejections mode the proce
 ### The last run's durations
 
 `<casBaseDir>/last-run.json` holds `{ "durations": { "<node>": <ms> } }`. As each node that
-**built, or failed once its action started**, settles, its duration is merged over the previous
+**built, or failed once its action ran**, settles, its duration is merged over the previous
 file's and the file is rewritten; cached and cancelled nodes, and a node that failed before its
-action started, do not change it. Because it sits in the CAS directory, a cache of the CAS carries
+action ran, do not change it. Because it sits in the CAS directory, a cache of the CAS carries
 it from run to run. A file the store cannot read counts as no last run. The durations show as
 `(last run 1.0s)` on start lines and as `previous` in node reports.
 
-`NodeReport` (one per settled node): the pass's node fields plus `status`, `start` and `duration`
-(absent for a skipped node and one that failed or was cancelled before its action started),
-`failedWhile` (on every failed node, as its state's; a failed report without it counts as one that
-ran), `previous`, `error` (failed or dep-failed), `outputs` (done or cached).
+`NodeReport` (one per settled node): `{ node, result, start?, duration?, previous? }`: the pass's
+node, dagraph's `Result` as it is, the node's `startedAt` as `start` and its duration (both absent
+for a skipped node and one that failed or was cancelled before its action ran), and `previous`,
+its duration in `last-run.json`.
 
 ### Reading the state
 
 `selectors` (exported as a namespace) are pure functions over the state: `isSettled`,
-`startedAtOf`, `logKeyOf` (the key whose CAS log holds what the node printed: none for a node that
-never started its action), `ran` (built, or failed once its action started; never a cache hit;
-it takes a node state or a `NodeReport`, and a failed report without `failedWhile` counts as
-ran), `durationOf`, `nodesInFlight` (dispatched or running, earliest first), `runStartedAt`,
-`nodeReports`, `failedNodes`, `getDependencyFailures` (the deps that failed or were `dep-failed`),
-`causesOf`, `skippedBecauseOf`.
+`startedAtOf`, `actionRan(result)` (whether dagraph ran the action: the result has `elapsed`, a
+cancel that caught the action running included), `ranToItsEnd(result)` (built, or failed once its
+action ran; never a cache hit nor a cancel; the nodes whose time `last-run.json`, busy time and
+the timeline count), `logKeyOf` (the key whose CAS log
+holds what the node printed: none for a node whose action did not run, a cache hit aside),
+`durationOf`, `commandOf(error)` (the `CommandCause` a failure's error carries), `nodesInFlight`
+(dispatched or running, earliest first), `runStartedAt`, `nodeReports`, `failedNodes`,
+`getDependencyFailures(run, nodeState)` (the node's deps that failed or were `dep-failed`),
+`causesOf(nodeState)`, `skippedBecauseOf(run, name)`. `failureMessage({ node, result })`,
+exported on its own, is what every output says of a failed or skipped node; it takes a node state
+or a `NodeReport` whose result is `failed` or `dep-failed`.
 
 Every output names every failed node as a failure. A `dep-failed` node is shown only under its
-causes: `causesOf` walks from it back to the failed nodes behind it, through other `dep-failed`
-nodes, and `skippedBecauseOf` goes the other way.
+causes: `causesOf` is its result's `rootCauses` (the nodes along its required deps that did not
+succeed and were not skipped themselves; none for any other node), and `skippedBecauseOf` goes
+the other way. A failed dependency the node takes `settled` is never a cause.
 
 Where it lives: `kernel/store.ts`, `kernel/run-slice.ts`, `kernel/selectors.ts`,
 `kernel/report.ts`; test `kernel/store.test.ts`.
@@ -1093,16 +1113,19 @@ Where it lives: `kernel/store.ts`, `kernel/run-slice.ts`, `kernel/selectors.ts`,
 
 Everything a run touches outside itself goes through `Ports`:
 
-- `exec` (`Exec`): `run(argv, { cwd?, env?, signal?, onOutput? })` resolves to an `ExecResult`,
-  `{ ended, code, stdout, stderr, output, ok }` (`output` is both streams in arrival order), and never
-  throws on a nonzero exit. No shell unless the argv starts one.
+- `exec` (`Exec`): `run(argv, opts?)`, with `ExecOptions` `{ cwd?, env?, signal?, onOutput? }`,
+  resolves to an `ExecResult`, `{ ended, code, stdout, stderr, output, ok }` (`output` is both
+  streams in arrival order), and never throws on a nonzero exit. No shell unless the argv starts one.
   `env` is merged over the inherited environment; an `undefined` value removes a variable. `ended`
   says how it ended: `exited` with `code`; `signalled`, killed by a signal, with code -1; or
   `not-started`, with code -1, when its program could not be spawned, with
   `spawn <program> <code>` as `stderr` and `output` (e.g. `spawn bash ENOENT`), or when the signal
   had already fired. A custom `Exec` must set it.
 - `fs`: dagraph's `DagFs`.
-- `clock` (`Clock`): `now()` and `sleep(ms, signal?)`, which ends early when the signal fires.
+- `clock` (`Clock`): dagraph's `Clock`, `now()`, and `sleep(ms, signal?)`, which ends early when
+  the signal fires.
+  The runner gives it to dagraph as the execution's clock, so it stamps every engine event and
+  times every action, in the run and in the post pass.
 - `host` (`Host`): `context()`, `group`, `info`, `annotate`, `summary`, `check` (GitHub or local
   output; the [dagworkflows-output](dagworkflows-output.md) domain). `context()` resolves to the `CiContext`: `ref`, `sha`,
   `eventName`, `actor`, `runId`, `repo`, `serverUrl` (as the GitHub toolkit names them), plus
@@ -1134,7 +1157,8 @@ still running has no log there yet.
 
 `CommandCause` (`{ argv, cwd, ended, code }`, where `cwd` is `"."` when the command named none,
 and `ended` and `code` are the command's `ExecResult`'s) is the
-`cause` of a node's error when a command it ran failed, and the `command` of `FailedNodeState`.
+`cause` of a node's error when a command it ran failed, which `selectors.commandOf` reads from a
+failed node's `result.error`.
 
 `formatDuration(ms)` is the short duration the timeout message and the outputs use: `<ms>ms`
 under 1000 ms, else seconds to one decimal (`1.5s`).
@@ -1160,7 +1184,9 @@ creating them to script a test.
   `summaries` (markdown strings) and `checks` (check-run updates). Its context has provider
   `recording` and empty fields unless overridden.
 - `steppingClock(start = 0, step = 1000)`: each `now()` returns the next time, `start` first, then
-  `step` ms later each call; sleeps end at once. This is why durations in tests are `1.0s`.
+  `step` ms later each call; sleeps end at once. dagraph reads it for each event it stamps and
+  at an action's start and end, so a test's times count those reads: an action that printed
+  nothing as it ran takes `1.0s`.
 - `clockAt(now = () => 0)`: a clock that reads `now()` from the given function; sleeps end at
   once.
 - `okExec`: an `Exec` whose every command exits 0 with no output.

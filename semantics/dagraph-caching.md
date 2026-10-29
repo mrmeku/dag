@@ -28,9 +28,9 @@ When the engine processes a node, these steps happen in this order. `execute` ca
 `lookupNode` takes the first three steps and `runAction` the last two. `processNode` runs both, and `runNode`, the `RunNode` that `execute` uses, waits for the scheduler between them ([dagraph-execution](dagraph-execution.md)).
 
 1. **Required deps.** `lookupNode` repeats the check for executors that call it directly. If a required dep (any dep not marked `settled`) has no entry in the `depEntries` it was given, the node settles `dep-failed` with `dep` set to that dep's name and `actionKey: ""`. Nothing is hashed.
-2. **Key.** The engine hashes every file input, then builds the key. If a file cannot be read, the node settles `failed` with `actionKey: ""` and `elapsed: 0`. The message is the file system's, such as `ENOENT: /missing.ts`.
+2. **Key.** The engine hashes every file input, then builds the key. If a file cannot be read, the node settles `failed` with `actionKey: ""` and no `elapsed`. The message is the file system's, such as `ENOENT: /missing.ts`.
 3. **Lookup.** This step is skipped when the node is `cacheable: false`. The engine reads the entry for the key. A `get` that rejects counts as a miss and is not an error. Otherwise the engine trusts the entry's shape (parsing and shape checks belong to `FsCache`, see below). If an entry exists, the engine re-hashes its files (this is **verification**). If they match `contentHash`, the node settles `cached` with the stored `outputs` and `contentHash`. A cached node has no `elapsed` and emits no `start` event. Otherwise the lookup is a miss, `{ name, actionKey, status: "missed" }`, which is not a result: it is what `runAction` runs.
-4. **Run.** The engine creates `<casBaseDir>/<actionKey>/tmp-<uuid>`, emits `start`, and calls the action with `outputDir` set to the absolute form of that directory. If the directory cannot be created, or a `start` listener's promise rejects, the node fails with that error and `elapsed: 0`, and the action never runs.
+4. **Run.** The engine creates `<casBaseDir>/<actionKey>/tmp-<uuid>`, emits `start`, and calls the action with `outputDir` set to the absolute form of that directory. If the directory cannot be created, or a `start` listener's promise rejects, the node fails with that error and no `elapsed`, and the action never runs.
 5. **Publish.** The engine checks that the returned paths are under `outputDir`, hashes them, renames the directory to `<casBaseDir>/<actionKey>/out-<contentHash>`, and writes the entry. This last write is skipped for `cacheable: false`. The node settles `done` with `outputs`, `contentHash` and `elapsed`.
 
 When the action throws, times out, is cancelled, misses an output or returns a path outside `outputDir`, the attempt directory is removed and no entry is written. When the entry write (`cache.put`) rejects, the node fails too, but its outputs are already published at `out-<contentHash>/` and are not removed. A tiered cache may already hold the local entry, so the next run can be `cached`. Publishing itself never fails: a rename that does not work falls back as described under "A damaged published copy".
@@ -260,7 +260,7 @@ Its dependents key on that content hash, so they cache normally. For example, a 
 These fail or stop without writing an entry, and their attempt directory is removed:
 
 - a node whose action threw;
-- a node that timed out (`error.name` is `"TimeoutError"`, message `timed out after <ms> ms`), whatever its action returned;
+- a node that timed out (`timedOut: true`, `error.name` is `"TimeoutError"`, message `timed out after <ms> ms`), whatever its action returned;
 - a node that was cancelled, whatever its action returned;
 - a node with a missing output, or an output outside its directory;
 - a node whose output ref names an output its dep did not produce (`"<node>" has no output "<output>"`);

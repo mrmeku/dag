@@ -9,7 +9,14 @@ import {
   SCROLLBACK_LINE_MAX_CHARS,
   STATUS_ICON,
 } from "../../config.ts";
-import { logLines, plainLine, plural, rerunLine, titleOf } from "../../kernel/format.ts";
+import {
+  failureMessage,
+  logLines,
+  plainLine,
+  plural,
+  rerunLine,
+  titleOf,
+} from "../../kernel/format.ts";
 import type { FailedNodeState, Pass, RunState } from "../../kernel/run-slice.ts";
 import * as selectors from "../../kernel/selectors.ts";
 import {
@@ -68,13 +75,11 @@ export function failureBlockLines(
   const alsoFailedDeps = selectors
     .getDependencyFailures(run, nodeState)
     .map((depState) => depState.node.name);
+  const command = selectors.commandOf(nodeState.result.error);
   const labelledRows: Array<[label: string, value: string]> = [];
   if (logFile) labelledRows.push(["log", localContext.link(logFile)]);
-  if (nodeState.command)
-    labelledRows.push([
-      "cmd",
-      `${join(nodeState.command.argv)}   ${paint("dim", `(cwd ${nodeState.command.cwd})`)}`,
-    ]);
+  if (command)
+    labelledRows.push(["cmd", `${join(command.argv)}   ${paint("dim", `(cwd ${command.cwd})`)}`]);
   if (alsoFailedDeps.length > 0)
     labelledRows.push(["deps", `${alsoFailedDeps.join(", ")} also failed`]);
   labelledRows.push(["rerun", rerunLine(localContext.rerunCommand, [name])]);
@@ -88,7 +93,7 @@ export function failureBlockLines(
       ...tail,
       ...(errorSaysOnlyExitCode(nodeState)
         ? []
-        : logLines(nodeState.error).map((line) => paint("red", line))),
+        : logLines(failureMessage(nodeState)).map((line) => paint("red", line))),
     ].map((line) => `${paint("dim", "│")} ${line}`),
     ...labelledRows.map(([label, value], index) =>
       labelLine(`${index === labelledRows.length - 1 ? "└" : "├"} ${label}`, value, localContext),

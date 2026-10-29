@@ -14,15 +14,38 @@ import {
 
 const node = (name: string, kind: string, deps: string[] = []): Node => ({ name, kind, deps });
 
-/** A settled node; `ran` is [start, duration] for one that was dispatched. */
+/** A result as the engine gives one, `elapsed` for an action that ran. */
+function resultOf(name: string, status: Result["status"], elapsed?: number): Result {
+  const entry = { outputs: {}, contentHash: "h", outputHashes: {} };
+  switch (status) {
+    case "done":
+      return { name, actionKey: "k", status, ...entry, elapsed: elapsed ?? 1 };
+    case "cached":
+      return { name, actionKey: "k", status, ...entry };
+    case "failed":
+      return {
+        name,
+        actionKey: "k",
+        status,
+        error: { name: "Error", message: "failed" },
+        ...(elapsed !== undefined && { elapsed }),
+      };
+    case "dep-failed":
+      return { name, actionKey: "", status, dep: "a" };
+    case "cancelled":
+      return { name, actionKey: "", status };
+  }
+}
+
+/** A settled node; `ran` is [start, duration] for one whose action ran or that hit the cache. */
 const settled = (
   name: string,
-  status: NodeReport["status"],
+  status: Result["status"],
   ran?: [number, number],
   deps: string[] = [],
 ): NodeReport => ({
-  ...node(name, name, deps),
-  status,
+  node: node(name, name, deps),
+  result: resultOf(name, status, status === "cached" ? undefined : ran?.[1]),
   ...(ran && { start: ran[0], duration: ran[1] }),
 });
 

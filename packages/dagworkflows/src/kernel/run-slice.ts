@@ -1,13 +1,5 @@
-import type { ExecEvent, FailedError, Node, Result, SucceededResult } from "@mrmeku/dagraph";
-import { commandOf, type CommandCause } from "../step-records.ts";
-import {
-  depFailedMessage,
-  formatDuration,
-  isDebugCommand,
-  isWarningCommand,
-  plainLine,
-  textAfterLastReturn,
-} from "./format.ts";
+import type { ExecEvent, Node, Result } from "@mrmeku/dagraph";
+import { isDebugCommand, isWarningCommand, plainLine, textAfterLastReturn } from "./format.ts";
 import { isSettled, startedAtOf } from "./selectors.ts";
 
 /** What every node has: the pass's node and what its command printed. */
@@ -29,53 +21,55 @@ interface LogRead {
 /** Not yet running: waiting on its deps, or held back by the scheduler, dispatched or not. */
 export type PendingNodeState = NodeLines & { readonly status: "pending" };
 
+/** Dispatched at `startedAt`, or running since its `start` came then. */
 export type InFlightNodeState = NodeLines & {
   readonly status: "dispatched" | "running";
   readonly startedAt: number;
 };
 
-export type SucceededNodeState = NodeLines &
-  LogRead &
-  Readonly<Pick<SucceededResult, "status" | "actionKey" | "outputs">> & {
-    readonly startedAt: number;
+/** Settled as dagraph's `result` says, whose event came at `endedAt`. */
+type SettledAs<Status extends Result["status"]> = NodeLines &
+  LogRead & {
+    readonly status: Status;
+    readonly result: Extract<Result, { status: Status }>;
     readonly endedAt: number;
   };
 
 /**
- * Failed while its action ran, from `startedAt`; or while it waited, its action never started:
- * its key could not be computed (`actionKey` ""), or its attempt could not be set up.
+ * Its action ran, as its result's `elapsed` says, from `startedAt`, when its `start` came; or it
+ * settled before its action ran, with no `elapsed` and no `startedAt`.
  */
-export type FailedNodeState = NodeLines &
-  LogRead &
-  Readonly<Pick<Extract<Result, { status: "failed" }>, "status" | "actionKey">> & {
-    readonly endedAt: number;
-    readonly error: string;
-    readonly timedOut: boolean;
-    /** A failed command, from its error's cause. */
-    readonly command?: CommandCause;
-    /** The CAS log, kept for the failure's block and report. */
-    readonly log?: string[];
-  } & (
-    | { readonly failedWhile: "waiting" }
-    | { readonly failedWhile: "running"; readonly startedAt: number }
-  );
+type ActionRanOrNot =
+  | { readonly startedAt: number; readonly result: { readonly elapsed: number } }
+  | { readonly startedAt?: undefined; readonly result: { readonly elapsed?: never } };
 
-/** Skipped because a dependency failed: never dispatched. */
-export type DepFailedNodeState = NodeLines &
-  LogRead & { readonly status: "dep-failed"; readonly endedAt: number; readonly error: string };
+/** Built since its `start` came at `startedAt`, or a cache hit since its dispatch then. */
+export type SucceededNodeState = (SettledAs<"done"> | SettledAs<"cached">) & {
+  readonly startedAt: number;
+};
 
 /**
- * Cancelled while its action ran, from `startedAt`; or while it waited, its action never started,
- * though it may have looked its key up: `actionKey` is "" for one cancelled before it had one.
+ * Failed once its action ran, or before it could: its key not computed or its `RunNode` rejected
+ * (its result's `actionKey` is ""), its attempt not set up, its start not recorded, or its inputs
+ * not resolved.
  */
-export type CancelledNodeState = NodeLines &
-  LogRead &
-  Readonly<Pick<Extract<Result, { status: "cancelled" }>, "status" | "actionKey">> & {
-    readonly endedAt: number;
-  } & (
-    | { readonly cancelledWhile: "waiting" }
-    | { readonly cancelledWhile: "running"; readonly startedAt: number }
-  );
+export type FailedNodeState = SettledAs<"failed"> &
+  ActionRanOrNot & {
+    /** The CAS log, kept for the failure's block and report. */
+    readonly log?: string[];
+  };
+
+/** Skipped because a required dependency did not succeed: never dispatched. */
+export type DepFailedNodeState = SettledAs<"dep-failed">;
+
+/**
+ * Cancelled once its action ran, or while it waited, though it may have looked its key up: its
+ * result's `actionKey` is "" for one cancelled before it had one.
+ */
+export type CancelledNodeState = SettledAs<"cancelled"> & ActionRanOrNot;
+
+/** A failure: failed, or skipped because a required dependency did not succeed. */
+export type FailureNodeState = FailedNodeState | DepFailedNodeState;
 
 export type SettledNodeState =
   | SucceededNodeState
@@ -84,10 +78,8 @@ export type SettledNodeState =
   | CancelledNodeState;
 
 /**
- * One node as far as the run has got with it. Every duration is `endedAt - startedAt`: from when
- * its action started, or for a cache hit, from its dispatch. A miss the scheduler holds back pends
- * between the two, which is not its time; a node that failed or was cancelled before its action
- * started has none.
+ * One node as far as the run has got with it. A miss the scheduler holds back pends between its
+ * dispatch and its start, which is not its time.
  */
 export type NodeState = PendingNodeState | InFlightNodeState | SettledNodeState;
 
@@ -114,14 +106,8 @@ export interface Pass {
   rerunCommand?: string;
 }
 
-/**
- * An engine event, stamped with when it came (what a node prints needs no time), or what the
- * run's own steps add to it.
- */
-export type NodeAction =
-  | (Exclude<ExecEvent, { type: "output" }> & { occurredAt: number })
-  | Extract<ExecEvent, { type: "output" }>
-  | { type: "logRead"; settled: SettledNodeState; log: string[] };
+/** An engine event as dagraph emits it, or a settled node's CAS log once the store has read it. */
+export type NodeAction = ExecEvent | { type: "logRead"; settled: SettledNodeState; log: string[] };
 
 export type RunAction =
   | NodeAction
@@ -141,19 +127,6 @@ export const initialNodeState = (node: Node): PendingNodeState => ({
   lastLine: "",
   printed: false,
 });
-
-const isTimeout = (error: FailedError): boolean => error.name === "TimeoutError";
-
-/** A failure's message; a timeout in the words of GitHub's runner. */
-function failureMessage(node: Node, error: FailedError): string {
-  if (!isTimeout(error) || node.timeoutMs === undefined) return error.message;
-  const minutes = node.timeoutMs / 60_000;
-  const after =
-    minutes >= 1
-      ? `${+minutes.toFixed(2)} minute${minutes === 1 ? "" : "s"}`
-      : formatDuration(node.timeoutMs);
-  return `The action '${node.name}' has timed out after ${after}.`;
-}
 
 /** `line`, not yet ended, after `chunk`: redrawn from the chunk's last carriage return, if any. */
 function redrawnLine(line: string, chunk: string): string {
@@ -198,7 +171,7 @@ export function settledWithLog(state: SettledNodeState, log: string[]): SettledN
   return { ...state, lineCount: log.length };
 }
 
-/** A node after `action`. A node that settles without a dispatch is timed from its settle. */
+/** A node after `action`. */
 export function nodeReducer(state: NodeState, action: NodeAction): NodeState {
   switch (action.type) {
     case "output":
@@ -224,37 +197,26 @@ export function nodeReducer(state: NodeState, action: NodeAction): NodeState {
     endedAt: occurredAt,
   };
   const { result } = action;
+  // From its start, or a cache hit's dispatch; a node settled unheard of is timed from its settle.
+  const startedAt = startedAtOf(state) ?? occurredAt;
   switch (result.status) {
     case "done":
+      return { ...ended, status: "done", result, startedAt };
     case "cached":
-      return {
-        ...ended,
-        status: result.status,
-        startedAt: startedAtOf(state) ?? occurredAt,
-        actionKey: result.actionKey,
-        outputs: result.outputs,
-      };
+      return { ...ended, status: "cached", result, startedAt };
     case "failed": {
-      const command = commandOf(result.error);
-      const failed = {
-        ...ended,
-        status: "failed",
-        actionKey: result.actionKey,
-        error: failureMessage(state.node, result.error),
-        timedOut: isTimeout(result.error),
-        ...(command && { command }),
-      } as const;
-      return state.status === "running"
-        ? { ...failed, failedWhile: "running", startedAt: state.startedAt }
-        : { ...failed, failedWhile: "waiting" };
+      const { elapsed, ...notRun } = result;
+      return elapsed === undefined
+        ? { ...ended, status: "failed", result: notRun }
+        : { ...ended, status: "failed", result: { ...notRun, elapsed }, startedAt };
     }
     case "dep-failed":
-      return { ...ended, status: "dep-failed", error: depFailedMessage(result.dep) };
+      return { ...ended, status: "dep-failed", result };
     case "cancelled": {
-      const cancelled = { ...ended, status: "cancelled", actionKey: result.actionKey } as const;
-      return state.status === "running"
-        ? { ...cancelled, cancelledWhile: "running", startedAt: state.startedAt }
-        : { ...cancelled, cancelledWhile: "waiting" };
+      const { elapsed, ...notRun } = result;
+      return elapsed === undefined
+        ? { ...ended, status: "cancelled", result: notRun }
+        : { ...ended, status: "cancelled", result: { ...notRun, elapsed }, startedAt };
     }
   }
 }

@@ -7,9 +7,9 @@ export type RunHistory = Record<string, Result>;
 
 /**
  * A run's history file: its workflow file (resolved; empty when none was named) and `--only`, so
- * a later pass of the same workflow rebuilds the graph it ran; the nodes whose action started, in
- * the order they started, so a run killed mid-action still shows what it owes; and its settled
- * nodes' results.
+ * a later pass of the same workflow rebuilds the graph it ran; the nodes whose start it recorded,
+ * before their action could run, in that order, so a run killed mid-action still shows what it
+ * owes; and its settled nodes' results.
  */
 export interface RunHistoryFile {
   workflow: string;
@@ -74,7 +74,7 @@ export async function createRunHistory(
     begin: saveHistory,
     /**
      * Records a start or a result. For a start it returns the write, which the engine awaits before
-     * the action runs, so a run killed after its command started still shows what it owes.
+     * the action may run, so a run killed after its command started still shows what it owes.
      */
     onEvent: (event: ExecEvent): Promise<void> | undefined => {
       if (event.type === "start") history.started.push(event.node);

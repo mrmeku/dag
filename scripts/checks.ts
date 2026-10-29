@@ -1,5 +1,8 @@
 import type { NodeRef, Workflow } from "@mrmeku/dagworkflows";
 
+/** A package this repository publishes. */
+export type Package = "dagraph" | "dagworkflows";
+
 const TOOLCHAIN = ["package.json", "bun.lock", "tsconfig.json"];
 // A version no release uses: a pack check packs each package as a release would.
 const PACK_VERSION = "0.0.0-ci";
@@ -18,7 +21,7 @@ export async function addPackChecks(
     "scripts/pack.ts",
     ...TOOLCHAIN,
   );
-  const pack = (pkg: "dagraph" | "dagworkflows") =>
+  const pack = (pkg: Package) =>
     workflow.task({
       name: `pack:${pkg}`,
       cmd: ({ outputDir }) => ["bun", "scripts/pack.ts", pkg, PACK_VERSION, outputDir],

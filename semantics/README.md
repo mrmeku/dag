@@ -9,7 +9,7 @@ This directory is the semantics tier of `@mrmeku/dagraph` and `@mrmeku/dagworkfl
 How a graph is declared. An action is a kind of work defined once with typed inputs, deps and outputs; a node is one use of it, added with `addNode`, which returns a typed ref. Graphs are acyclic by construction, and wiring mistakes are caught at compile time or when the node is added. The page also covers the package itself: entry points, runtimes and compiler settings.
 
 - Concepts: action, kind, node, role, dep, ref, ports, meta, settled and optional (`maybe`) roles, roles that pick some outputs (`pick`), node inputs and the action's own inputs, output refs, file handles, values that are never part of a string, subgraphs, closure.
-- Public names: `defineAction`, `actionsFor`, `Graph` (`subgraph`, `describe`), `closure`, `dep`, `settled`, `maybe`, `pick`, `nodeInputs`, `file`, `nodeRefNamed`, `requiredDeps`, `namedOutput`, `isFileHandle`, `notAString`, `Action`, `ActionSpec`, `ActionContext`, `NodeRef`, `OutputRef`, `NodeParams`, `Outputs`; `@mrmeku/dagraph/mermaid` (`mermaidBody`, `mermaidQuote`).
+- Public names: `defineAction`, `actionsFor`, `Graph` (`subgraph`, `describe`), `closure`, `dep`, `settled`, `maybe`, `pick`, `nodeInputs`, `file`, `nodeRefNamed`, `requiredDeps`, `namedOutput`, `isFileHandle`, `notAString`, `Action`, `ActionSpec`, `ActionContext`, `NodeRef`, `OutputRef`, `AnyNodeRef`, `AnyOutputRef`, `Resolved`, `NodeParams`, `Outputs`; `@mrmeku/dagraph/mermaid` (`mermaidBody`, `mermaidQuote`).
 - Read it when defining actions, wiring nodes, changing what `addNode` checks or the type-level guarantees, or drawing a graph.
 
 ### [dagraph-execution](dagraph-execution.md)
@@ -17,7 +17,7 @@ How a graph is declared. An action is a kind of work defined once with typed inp
 How a graph is walked. Orchestration decides when a node runs and does no I/O; processing decides what happens to one node; `execute` joins the two in one process. Every node ends with exactly one result, and a failure holds back only the nodes that need it.
 
 - Concepts: settle, ready, dispatch, hit and miss, start, places and slots, schedulers and concurrency groups, the execution context, testing one action, result statuses (`done`, `cached`, `failed`, `dep-failed`, `cancelled`), events, timeouts, cancellation, honouring the signal, replay across dagraph versions.
-- Public names: `execute`, `ExecuteOptions`, `ExecutionContext`, `orchestrate`, `RunNode`, `lookupNode`, `runAction`, `processNode`, `runNode`, `Lookup`, `Miss`, `RunActionOptions`, `unboundedScheduler`, `throttledScheduler`, `Scheduler`, `Result`, `isResult`, `isSucceeded`, `tally`, `ExecEvent`, `ExecListener`.
+- Public names: `execute`, `ExecuteOptions`, `ExecutionContext`, `orchestrate`, `RunNode`, `lookupNode`, `runAction`, `processNode`, `runNode`, `Lookup`, `Miss`, `RunActionOptions`, `unboundedScheduler`, `throttledScheduler`, `Scheduler`, `Result`, `isResult`, `isSucceeded`, `countResultsByStatus`, `Clock`, `ExecEvent`, `ExecListener`.
 - Read it when changing scheduling, failure propagation, events, timeouts or cancellation, or when writing an executor or a scheduler of your own.
 
 ### [dagraph-caching](dagraph-caching.md)
@@ -42,7 +42,7 @@ How a workflow file is written: it default-exports `defineWorkflow({ implementat
 
 The life of one run, from building the graph to its outcome. Post steps are obligations: owed once their task starts, recorded before any effect, and paid by a later run before any task if left unpaid. The page also covers services, run history and its lock, cancellation and signals, timeouts, exit codes, and the run store and its kernel.
 
-- Concepts: main and post, owed, pass and post pass, run history, services kept up across runs, cancel, node states (`DepFailedNodeState`; a failed node's `failedWhile` and a cancelled node's `cancelledWhile`) and the run's lifecycle, the run store and its listeners, ports (`ExecResult.ended`) and step records (`CommandCause.ended`).
+- Concepts: main and post, owed, pass and post pass, run history, services kept up across runs, cancel, node states holding dagraph's `Result` as it is and its event times, start recorded (the history's, which decides what is owed) apart from action ran (dagraph's `elapsed`), and the run's lifecycle, the run store and its listeners, ports (`ExecResult.ended`) and step records (`CommandCause.ended`).
 - Public names: `runWorkflow`, `runJob`, `runPost`, `RunOptions`, `RunOutcome`, `createRunHistory`, `readRunHistory`, `runHistoryLive`, `RunHistory`, `DEFAULT_HISTORY_DIR`, `RunState`, `RunLifecycle`, `RunAction`, `NodeAction`, `Pass`, `NodeState` and its cases, `selectors`, `createRunStore`, `RunStore`, `RunListener`.
 - Read it when touching post steps, cancellation, history, exit codes, the run store or the kernel's reducers and state types.
 
@@ -58,8 +58,8 @@ The cache and artifacts as nodes of the graph. `workflow.cache` adds a restore n
 
 What a run shows. Every output is a listener on the run store: the terminal in the `live`, `failures` or `grouped` style, per-node log files, the failures report, GitHub's log groups and check runs; the step summary is rendered from the store's report at the end of each pass.
 
-- Concepts: which failure is the cause (every failed node is named; a skipped one only under its causes), the recap, log files and the CAS log, `failures.md`, check runs, the step summary and its renderers, warnings, secrets and masking, hosts.
-- Public names: `createReporter`, `SummaryRenderer`, `RunReport`, `NodeReport`, `DEFAULT_SUMMARY_RENDERERS`, `renderStatus`, `renderTimeline`, `renderCriticalPath`, `renderDag`, `renderFailures`, `renderTable`, `formatDuration`, `Host`, `CommandCause`, `createLocalHost`, `nullHost`, `createRecordingHost`, `logPath`, `DEFAULT_SUMMARY_PATH`; `@mrmeku/dagworkflows/github` (`createGithubHost`).
+- Concepts: which failure is the cause (every failed node is named; a skipped one only under its causes, dagraph's `rootCauses`), durations (dagraph's `elapsed`, a cache hit's lookup), the recap, log files and the CAS log, `failures.md`, check runs, the step summary and its renderers, warnings, secrets and masking, hosts.
+- Public names: `createReporter`, `SummaryRenderer`, `RunReport`, `NodeReport`, `DEFAULT_SUMMARY_RENDERERS`, `renderStatus`, `renderTimeline`, `renderCriticalPath`, `renderDag`, `renderFailures`, `renderTable`, `formatDuration`, `failureMessage`, `Host`, `CommandCause`, `createLocalHost`, `nullHost`, `createRecordingHost`, `logPath`, `DEFAULT_SUMMARY_PATH`; `@mrmeku/dagworkflows/github` (`createGithubHost`).
 - Read it when changing anything a run prints or writes for a reader, which failure counts as the cause, or a host.
 
 ### [dagworkflows-cli-action-release](dagworkflows-cli-action-release.md)

@@ -4,7 +4,7 @@ import { EventEmitter } from "node:events";
 import { describe, test } from "node:test";
 import { STATUS_ICON } from "./config.ts";
 import { readRunHistory } from "./history.ts";
-import type { Exec } from "./ports.ts";
+import type { Exec, ExecOptions } from "./ports.ts";
 import { createMemoryCacheStore } from "./ports/cache-store.ts";
 import {
   clockAt,
@@ -35,8 +35,7 @@ const histories = async (fs: MemoryDagFs) =>
 const parsed = async (fs: MemoryDagFs, path: string): Promise<unknown> =>
   JSON.parse(await fs.readText(path));
 
-type RunOptions = Parameters<Exec["run"]>[1];
-const signalOf = (opts: RunOptions) => {
+const signalOf = (opts: ExecOptions | undefined) => {
   const signal = opts?.signal;
   assert.ok(signal, "signal for the command");
   return signal;
@@ -76,7 +75,7 @@ describe("cancel, then post", () => {
     };
     ports.exec = exec;
     const def = defineWorkflow({
-      summary: [(r) => r.nodes.map((n) => `${n.name} ${n.status}`)],
+      summary: [(r) => r.nodes.map(({ node, result }) => `${node.name} ${result.status}`)],
       implementation: (workflow) => {
         const bun = workflow.cache({
           name: "bun",
@@ -173,7 +172,7 @@ describe("cancel, then post", () => {
           "▷ up:db",
           "▷ fast",
           "▷ slow",
-          "◼\uFE0E cancelled, 4 nodes not run · run · built 3 · cached 0 · failed 0 · skipped 0 · cancelled 4 · wall 9.0s",
+          "◼\uFE0E cancelled, 4 nodes not run · run · built 3 · cached 0 · failed 0 · skipped 0 · cancelled 4 · wall 15.0s",
           "post · 1 of 1 post steps owed",
           "▷ down:db",
           "✔\uFE0E 1 node succeeded · run · post · built 1 · cached 0 · failed 0 · skipped 0 · wall 1.0s",
@@ -230,7 +229,7 @@ describe("runJob", () => {
       },
     };
     const def = defineWorkflow({
-      summary: [(r) => r.nodes.map((n) => `${n.name} ${n.status}`)],
+      summary: [(r) => r.nodes.map(({ node, result }) => `${node.name} ${result.status}`)],
       implementation: (workflow) => {
         const fast = workflow.task({
           name: "fast",
@@ -266,11 +265,12 @@ describe("runJob", () => {
           { title: "ci.ts · 3 of 4 nodes (--only slow)", lines: ["fast", "slow", "notify"] },
           "▷ fast",
           { title: "✔\uFE0E fast (1.0s)", lines: [] },
+          // Cancelled as its start was recorded: its action never ran.
           "▷ slow",
-          { title: "◼\uFE0E slow (cancelled)", lines: [] },
+          "◼\uFE0E slow: cancelled",
           "◼\uFE0E notify: cancelled",
           "",
-          "◼\uFE0E cancelled, 2 nodes not run · ci.ts · built 1 · cached 0 · failed 0 · skipped 0 · cancelled 2 · wall 4.0s",
+          "◼\uFE0E cancelled, 2 nodes not run · ci.ts · built 1 · cached 0 · failed 0 · skipped 0 · cancelled 2 · wall 1.0s",
           "cancelled: slow, notify",
           { title: "post · 1 of 1 post steps owed", lines: ["notify"] },
           "▷ notify",
@@ -369,7 +369,7 @@ describe("a run killed before its post pass", () => {
               "▷ down:db",
               "▷ up:db (last run 1.0s)",
               "▷ slow",
-              "▷ down:db (last run 1.0s)",
+              "▷ down:db (last run 3.0s)",
             ],
             failed: 0,
           },
@@ -860,9 +860,9 @@ describe("progress", () => {
         "▷ slow",
         "▷ fast",
         "✔\uFE0E fast (1.0s)",
-        "✔\uFE0E slow (3.0s)",
+        "✔\uFE0E slow (4.0s)",
         "",
-        "✔\uFE0E all 2 nodes succeeded · run · built 2 · cached 0 · failed 0 · skipped 0 · wall 3.0s",
+        "✔\uFE0E all 2 nodes succeeded · run · built 2 · cached 0 · failed 0 · skipped 0 · wall 4.0s",
       ],
     );
   });

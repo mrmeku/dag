@@ -34,6 +34,8 @@ export {
 } from "./graph/index.ts";
 export type {
   ActionContext,
+  AnyNodeRef,
+  AnyOutputRef,
   Dep,
   DepRecord,
   DepRefs,
@@ -51,6 +53,7 @@ export type {
   NotAString,
   OutputRef,
   Outputs,
+  Resolved,
   SettledDep,
   SettledOutputRef,
   SettledRef,
@@ -78,9 +81,10 @@ export {
   type ThrottledSchedulerOptions,
 } from "./schedulers.ts";
 export {
+  countResultsByStatus,
   isResult,
   isSucceeded,
-  tally,
+  type Clock,
   type ExecEvent,
   type ExecListener,
   type FailedError,

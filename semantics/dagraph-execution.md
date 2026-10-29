@@ -26,7 +26,7 @@ Terms used below:
 | Slot              | A unit of a concurrency group's limit. Only a miss in a group takes one, just before it starts.                                                                                                         |
 | Execution         | One call of `execute` (or of `orchestrate`): one walk of a graph, from its first dispatch to its last result. Its options (`scheduler`, `signal`, …) last for that call only.                           |
 | Executor          | Whatever drives an execution: `execute` itself, or code of your own that calls `orchestrate` with a `RunNode`, for example one that processes nodes in worker processes.                                |
-| Execution context | What the caller hands the engine: cache, file system, CAS directory and ports. It outlives any one execution.                                                                                           |
+| Execution context | What the caller hands the engine: cache, file system, CAS directory, clock and ports. It outlives any one execution.                                                                                    |
 
 Where it lives: `packages/dagraph/src/execute.ts`, `orchestrate.ts`, `process-node.ts`.
 
@@ -38,8 +38,8 @@ All of these are exported from the package index, `@mrmeku/dagraph`:
 | ------------------------------------------------------------------ | -------------- | -------------------------------------------------------------------------------------------------- |
 | `execute(graph, executionContext, options?)`                       | function       | Runs a whole graph in this process. Resolves to one `Result` per node.                             |
 | `ExecuteOptions`                                                   | type           | `{ onEvent?, scheduler?, signal? }`.                                                               |
-| `ExecutionContext<Ports>`                                          | type           | `{ cache, fs, casBaseDir, ports }`.                                                                |
-| `orchestrate(nodes, run, scheduler, onEvent?, signal?)`            | function       | The scheduling half, over node data. Resolves to one `Result` per node.                            |
+| `ExecutionContext<Ports>`                                          | type           | `{ cache, fs, casBaseDir, clock, ports }`.                                                         |
+| `orchestrate(nodes, run, scheduler, clock, onEvent?, signal?)`     | function       | The scheduling half, over node data. Resolves to one `Result` per node.                            |
 | `RunNode<Meta = unknown>`                                          | type           | The function `orchestrate` calls to process one node.                                              |
 | `lookupNode(graph, name, depEntries, executionContext)`            | function       | Computes a node's key and checks its entry. Resolves to a `Lookup`: a result, or a `Miss`.         |
 | `runAction(graph, miss, depEntries, executionContext, options?)`   | function       | Runs a missed node's action and stores what it made. Resolves to its `Result`.                     |
@@ -52,7 +52,8 @@ All of these are exported from the package index, `@mrmeku/dagraph`:
 | `Scheduler`, `SchedulerContext<Meta = unknown>`, `Ready<Meta>`     | types          | For writing a scheduler of your own.                                                               |
 | `Result`, `SucceededResult`, `FailedError`, `JsonValue`            | types          | A node's result and its parts.                                                                     |
 | `isResult(value)`, `isSucceeded(result)`                           | functions      | Type guards.                                                                                       |
-| `tally(results)`, `Tally`                                          | function, type | Counts results, or anything with a `status`, by status.                                            |
+| `countResultsByStatus(results)`, `Tally`                           | function, type | Counts results, or anything with a `status`, by status.                                            |
+| `Clock`                                                            | type           | What `ExecutionContext.clock` and `orchestrate` read the time from.                                |
 | `ExecEvent<Meta = unknown>`, `ExecListener<Meta = unknown>`        | types          | The event stream and its listener.                                                                 |
 
 The file system implementations live on subpaths so that the index reaches no I/O module: `@mrmeku/dagraph/fs` exports `createBunDagFs()` (Bun) and `@mrmeku/dagraph/fs/node` exports `createNodeDagFs()` (Node). `createMemoryDagFs()`, an in-memory file system for tests, is exported from the index.
@@ -63,7 +64,7 @@ Where it lives: `packages/dagraph/src/index.ts`, `package.json` (`exports`).
 
 `execute(graph, executionContext, options)` runs every node of `graph` in this process and resolves, once every node has settled, to an array of results, one per node, **in the order the nodes settled**. Under the default scheduler several nodes run at once, so that order can differ from run to run. Pass a subgraph view and only its nodes (with the nodes they depend on) are executed; that view is [dagraph-graphs](dagraph-graphs.md)'s.
 
-`execute` does not reject because a node failed. A failure is a result like any other: inspect the results, for example with `tally`. It rejects in three cases only:
+`execute` does not reject because a node failed. A failure is a result like any other: inspect the results, for example with `countResultsByStatus`. It rejects in three cases only:
 
 - A `dispatch` or `result` listener threw or rejected (see "Events and listeners"). A throw on `start` fails just that node.
 - The scheduler itself threw or rejected, for example a bug in one passed as `options.scheduler`. `execute` rejects with that error and returns no results, while the nodes already dispatched keep running with nobody watching.
@@ -79,11 +80,12 @@ The options, all optional:
 
 ### The execution context
 
-`ExecutionContext<Ports>` has four fields:
+`ExecutionContext<Ports>` has five fields:
 
 - `cache`: a `Cache` (`FsCache`, `MemCache` or your own), where action keys map to entries.
 - `fs`: a `DagFs`, the file system the engine reads, hashes and moves files with.
 - `casBaseDir`: the directory under which each action key gets its own directory of outputs.
+- `clock`: what the engine reads the time from, a `Clock`, which is `Pick<DateConstructor, "now">`, so `Date` itself or any `{ now(): number }` in ms since the epoch. It stamps every event's `occurredAt` and measures `elapsed` (see "Results" and "Events and listeners"); `execute` hands it to `orchestrate` too. Required, with no default: a caller passes `Date` for the wall clock, and a test a fake one to pin times.
 - `ports`: the tools the actions use, passed through to each action as `ports`. It is required when the graph's actions declare ports, and optional (and may be left out) when they need none.
 
 The same context is meant to serve many executions: a CLI builds it once and executes graph after graph against it. Ports go in the context, never in the graph. The cache, the file system and the CAS layout are [dagraph-caching](dagraph-caching.md)'s.
@@ -160,7 +162,14 @@ Two actions: `fetch` writes a page, `summarize` reads it. The second execution f
 import { writeFile, mkdtemp } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { defineAction, execute, FsCache, Graph, nodeInputs, tally } from "@mrmeku/dagraph";
+import {
+  countResultsByStatus,
+  defineAction,
+  execute,
+  FsCache,
+  Graph,
+  nodeInputs,
+} from "@mrmeku/dagraph";
 import { createNodeDagFs } from "@mrmeku/dagraph/fs/node";
 
 const fetchPage = defineAction({
@@ -191,8 +200,8 @@ const graph = new Graph();
 const page = fetchPage.addNode(graph, { name: "fetch", inputs: { url: "https://example.com" } });
 summarize.addNode(graph, { name: "summarize", deps: { page } });
 
-console.log(tally(await execute(graph, context)));
-console.log(tally(await execute(graph, context)));
+console.log(countResultsByStatus(await execute(graph, context)));
+console.log(countResultsByStatus(await execute(graph, context)));
 ```
 
 It prints (verified with Bun):
@@ -216,7 +225,7 @@ A node moves through these states. Each arrow names what moves it.
 4. **Looking up**. Processing computes the action key. If that fails (an input file cannot be read), the node settles `failed`, with no action key. Unless the node is not cacheable, it reads the cache. A verified entry settles the node `cached`. A cache whose read rejects counts as a miss, never as a failure.
 5. **Waiting for its slot**: only a miss whose action is in a concurrency group. It gives its place back and waits until the scheduler grants it a slot.
 6. **Starting**: the engine makes a fresh, empty output directory for this attempt and emits `start`. If the listener returns a promise, the action waits for it.
-7. **Running**: the action runs with a signal that fires on the node's timeout or on the execution's cancel.
+7. **Running**: the engine resolves the action's inputs and its deps' outputs to handles (a failure here fails the node without running the action), reads its clock, and runs the action with a signal that fires on the node's timeout or on the execution's cancel.
 8. **Settled**: `done` (outputs stored, entry written unless the node is not cacheable), `failed`, or `cancelled`.
 
 A node that does not succeed never gets a cache entry, so its next execution starts it again. If it fails or is cancelled before its outputs are published, its attempt's directory is removed (best effort: a failed removal changes nothing in the result). The one case that leaves files behind is a cache write that rejects. By then the outputs are already published under `<casBaseDir>/<actionKey>/out-<contentHash>/`, so the node settles `failed` but that directory stays, with no entry pointing at it.
@@ -227,15 +236,19 @@ Where it lives: `packages/dagraph/src/orchestrate.ts`, `process-node.ts`, `exec-
 
 A `Result` is how one node settled. It always has `name` (the node's name) and `actionKey` (the node's key, or `""` when it never got one). The rest depends on `status`:
 
-| `status`     | Extra fields                                        | When                                                                                                                                                                          |
-| ------------ | --------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `done`       | `outputs`, `contentHash`, `outputHashes`, `elapsed` | The action ran and its outputs were stored.                                                                                                                                   |
-| `cached`     | `outputs`, `contentHash`, `outputHashes`            | A verified cache entry was found. No `elapsed`.                                                                                                                               |
-| `failed`     | `error: { name, message, cause? }`, `elapsed`       | The node could not be keyed, or its action threw, timed out, or returned paths that are outside its output directory or cannot be read, or the work around the action failed. |
-| `dep-failed` | `dep`                                               | A required dep did not succeed. `dep` names it.                                                                                                                               |
-| `cancelled`  | none                                                | The execution was cancelled before or while the node ran.                                                                                                                     |
+| `status`     | Extra fields                                                | When                                                                                                                                                                          |
+| ------------ | ----------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `done`       | `outputs`, `contentHash`, `outputHashes`, `elapsed`         | The action ran and its outputs were stored.                                                                                                                                   |
+| `cached`     | `outputs`, `contentHash`, `outputHashes`                    | A verified cache entry was found. No `elapsed`.                                                                                                                               |
+| `failed`     | `error: { name, message, cause? }`, `elapsed?`, `timedOut?` | The node could not be keyed, or its action threw, timed out, or returned paths that are outside its output directory or cannot be read, or the work around the action failed. |
+| `dep-failed` | `dep`, `rootCauses?`                                        | A required dep did not succeed. `dep` names it; `rootCauses` names the nodes behind it (see "Failure semantics").                                                             |
+| `cancelled`  | `elapsed?`                                                  | The execution was cancelled before or while the node ran.                                                                                                                     |
 
-`outputs`, `contentHash` and `outputHashes` together are the node's cache entry (`CacheEntry`, from [dagraph-caching](dagraph-caching.md)): `outputs` is the record of outputs the action returned, moved to where the CAS keeps them. `elapsed` is in milliseconds, counted from the action's start to the result, so it includes hashing and storing the outputs. It is `0` for a failure that happened before the action started.
+`outputs`, `contentHash` and `outputHashes` together are the node's cache entry (`CacheEntry`, from [dagraph-caching](dagraph-caching.md)): `outputs` is the record of outputs the action returned, moved to where the CAS keeps them.
+
+`elapsed` is there **exactly when the engine ran the node's action**: always on `done`, on `failed` when the failure came from the action or after it, and on `cancelled` when the cancel caught the action running. It is in milliseconds by the context's clock, counted from just before the action is called (after the `start` event, its listener and the input resolution) to the result, so it includes hashing and storing the outputs. A node that failed or was cancelled before its action ran has no `elapsed`: one whose key could not be computed, whose attempt directory could not be made, whose inputs could not be resolved, whose `start` listener rejected, or that a cancel held back before the action. A `RunNode` rejection carries no `elapsed` either: orchestration does not know whether the action ran. Earlier versions wrote `elapsed: 0` on such failures; `isResult` still reads those.
+
+`timedOut: true` is on a failure exactly when the node's own `timeoutMs` fired (see "Timeouts"). An action that throws a `TimeoutError` of its own, as `fetch` given `AbortSignal.timeout(ms)` does, fails with that `error.name` but no `timedOut`, so `timedOut`, not the error's name, tells the two apart.
 
 The types require `Outputs`: a record of named outputs, each a path or a list of paths. A value cast past the types, such as a bare path, fails the node (see Failure semantics).
 
@@ -266,10 +279,10 @@ A cached result, as JSON:
 
 ### Helpers
 
-- `isResult(value)` tells whether a value read back from a file or another process is a `Result`. It checks the fields each status needs: `done` needs `elapsed` and an entry, `cached` an entry, `failed` an `elapsed` and an `error` whose `name` and `message` are strings and whose `cause`, if any, is JSON, `dep-failed` a `dep`. Every result needs `name` and `actionKey` as strings. An unknown status is refused.
+- `isResult(value)` tells whether a value read back from a file or another process is a `Result`. It checks the fields each status needs: `done` needs `elapsed` and an entry, `cached` an entry, `failed` an `error` whose `name` and `message` are strings and whose `cause`, if any, is JSON, `dep-failed` a `dep`. It checks the optional fields when they are there: `elapsed` a number on `failed` and `cancelled`, `timedOut` exactly `true`, `rootCauses` an array of strings. Every result needs `name` and `actionKey` as strings. An unknown status is refused. Every result an earlier version wrote still reads, a failure with `elapsed: 0` included, so a file of results (dagworkflows' run history, or an app's own record of results) survives an upgrade.
 - `isSucceeded(result)` is true for `done` and `cached`, and narrows the result to `SucceededResult`, which carries `outputs`, `contentHash` and `outputHashes`.
 - `FailedError` is the type of a failed result's `error`.
-- `tally(results)` counts results by status. It reads only `status`, so it takes any iterable of `Pick<Result, "status">`, such as dagworkflows' node reports. It returns a `Tally`, a record with all five statuses as keys, zero when none: `{ done, cached, failed, "dep-failed", cancelled }`.
+- `countResultsByStatus(results)` counts results by status. It reads only `status`, so it takes any iterable of `Pick<Result, "status">`, such as dagworkflows' node reports. It returns a `Tally`, a record with all five statuses as keys, zero when none: `{ done, cached, failed, "dep-failed", cancelled }`.
 
 Where it lives: `packages/dagraph/src/types.ts`, `utils.ts`.
 
@@ -278,6 +291,8 @@ Where it lives: `packages/dagraph/src/types.ts`, `utils.ts`.
 **A failure holds back only what needs it.** When a node fails, every node that requires it settles `dep-failed`, and so does every node that requires those, transitively. Nodes on other branches carry on. There is no fail-fast mode. For example, with `top → left, right → bottom` where `left` fails: `top` and `right` are `done`, `left` is `failed`, and `bottom` is `dep-failed` with `dep: "left"`. Further down a chain, `dep` names the direct dep: in `bad_root → mid → leaf`, `mid` has `dep: "bad_root"` and `leaf` has `dep: "mid"`.
 
 When a node has several deps that did not succeed, `dep` names the first of them in the node's dep order (the order its roles were given).
+
+**A held back node names its root causes.** A `dep-failed` result settled by orchestration carries `rootCauses`: the nodes upstream along required deps that did not succeed and were not held back themselves (they `failed`, or were `cancelled`), reached through any held back deps in between. Each is named once, in the node's dep order, a held back dep's own root causes taking its place. In `bad → mid → leaf`, both `mid` and `leaf` have `rootCauses: ["bad"]`, while `leaf`'s `dep` is `"mid"`. A node that requires `mid`, a failed `worse` and `bad` has `rootCauses: ["bad", "worse"]`. A `settled` dep is never one, even when it failed. So a node held back always names at least one root cause. A held back dep whose result has no `rootCauses`, which only a `RunNode` that returns a `dep-failed` result itself can give, counts as a root cause of its own. `lookupNode`'s own `dep-failed` result has none: it sees only the dep entries it is given.
 
 **A `settled` dep never holds its node back.** A dep declared with `settled(...)` (see [dagraph-graphs](dagraph-graphs.md)) is waited for, not required: when it does not succeed, its dependent runs without it and its role reads `undefined`. A node that names the same dep in two roles, one plain and one `settled`, still requires it.
 
@@ -289,13 +304,14 @@ When a node has several deps that did not succeed, `dep` names the first of them
 | ------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------- | ---- |
 | The action throws                                                                                       | its name, message and cause                                                                     | yes  |
 | The node's timeout fires                                                                                | `name: "TimeoutError"`, `message: "timed out after <timeoutMs> ms"`, the thrown error's `cause` | yes  |
-| An input file cannot be read                                                                            | that error                                                                                      | no   |
+| An input file cannot be read                                                                            | that error, no `elapsed`                                                                        | no   |
 | The action returns something other than a record of paths and lists of paths                            | `the action returned <value as JSON>, not a record of outputs: return { <name>: path }`         | yes  |
 | A returned path lies outside the output directory                                                       | `output not under the output dir: <path> is not under <outputDir>`                              | yes  |
 | A returned path has no file, or cannot be read                                                          | named by [dagraph-caching](dagraph-caching.md)                                                  | yes  |
-| The `start` listener throws or rejects                                                                  | that error, `elapsed: 0`, the action never runs                                                 | yes  |
-| The output directory cannot be made, or the cache write fails (the published outputs then stay on disk) | that error                                                                                      | yes  |
-| The `RunNode` rejects                                                                                   | its error, `elapsed: 0` (or `cancelled` once the execution is cancelled)                        | no   |
+| An output ref names an output its dep's entry does not hold                                             | `"<node>" has no output "<output>"`, no `elapsed`, the action never runs                        | yes  |
+| The `start` listener throws or rejects                                                                  | that error, no `elapsed`, the action never runs                                                 | yes  |
+| The output directory cannot be made, or the cache write fails (the published outputs then stay on disk) | that error, no `elapsed` when the directory could not be made                                   | yes  |
+| The `RunNode` rejects                                                                                   | its error, no `elapsed` (or `cancelled` once the execution is cancelled)                        | no   |
 
 Where it lives: `packages/dagraph/src/orchestrate.ts`, `exec-state.ts`, `process-node.ts`.
 
@@ -436,7 +452,7 @@ Where it lives: `packages/dagraph/src/orchestrate.ts` (`SchedulerContext`), `sch
 
 ## Events and listeners
 
-An execution reports what happens as one stream of `ExecEvent`s. Each event has `type`, `node` (the node's name) and, when the node has one, `meta` (the node's metadata, from [dagraph-graphs](dagraph-graphs.md)). `ExecEvent` is a union that narrows on `type`: a listener reads `event.chunk` after checking `event.type === "output"` and `event.result` after `event.type === "result"`. The types:
+An execution reports what happens as one stream of `ExecEvent`s. Each event has `type`, `node` (the node's name), `occurredAt` and, when the node has one, `meta` (the node's metadata, from [dagraph-graphs](dagraph-graphs.md)). `occurredAt` is when the event happened, in ms since the epoch, read from the clock at the moment it is emitted, before the listener sees it: orchestration stamps `dispatch`, `pending` and `result` from `orchestrate`'s `clock`, processing stamps `start` and `output` from the context's `clock`. Under `execute` they are one clock. A listener that is slow to run does not shift the stamp. `ExecEvent` is a union that narrows on `type`: a listener reads `event.chunk` after checking `event.type === "output"` and `event.result` after `event.type === "result"`. The types:
 
 | `type`     | Extra            | Emitted by    | When                                                                         |
 | ---------- | ---------------- | ------------- | ---------------------------------------------------------------------------- |
@@ -471,7 +487,7 @@ An action may declare `timeoutMs`: how long it may run, in milliseconds. It must
 
 - The clock starts when the action starts: after the cache lookup, the slot wait, the output directory and the `start` event.
 - When it runs out, the action's `signal` aborts with a `DOMException` named `"TimeoutError"` (message `"The operation timed out."`).
-- The node then fails **whatever the action does next**, even if it returns outputs: `error.name` is `"TimeoutError"`, `error.message` is `"timed out after <timeoutMs> ms"`, and `error.cause` is the cause of the error the action threw as it stopped, if any. The result is never cached, so the next execution runs the node again.
+- The node then fails **whatever the action does next**, even if it returns outputs: `error.name` is `"TimeoutError"`, `error.message` is `"timed out after <timeoutMs> ms"`, `error.cause` is the cause of the error the action threw as it stopped, if any, and the result has `timedOut: true`. Only this timer sets `timedOut`; a `TimeoutError` the action throws on its own (a `fetch` under `AbortSignal.timeout`) fails the node with that name and no `timedOut`. The result is never cached, so the next execution runs the node again.
 - The timeout is cooperative. The engine does not abandon the action: it waits for the action to settle. An action that ignores its signal runs to its end. No test pins this; a separate run checked it: a 10 ms timeout on an action that ignores its signal and sleeps 200 ms gives `failed` with `TimeoutError` and `elapsed` of about 200. How an action stops on time is under "Honouring the signal".
 - `timeoutMs` is not part of the action key. Changing it re-keys nothing.
 
@@ -483,19 +499,19 @@ Pass `signal` to cancel an execution, typically from an `AbortController` aborte
 
 - **Nothing new starts.** Every node that is ready, or becomes ready, settles `cancelled` without being dispatched (empty `actionKey`, `result` event only). The dependents of a cancelled node settle `cancelled` too, not `dep-failed`.
 - **A miss waiting for its group's slot** stops waiting and settles `cancelled`. It keeps its action key, since it was looked up.
-- **A running node** sees the cancel through its action's `signal`, whose `reason` is the signal's reason (for example the error passed to `controller.abort(reason)`). Whatever the action then returns, the node settles `cancelled`, its attempt's directory is removed, and nothing is cached. This matches GitHub's runner: once the signal fired, the action's exit no longer decides.
+- **A running node** sees the cancel through its action's `signal`, whose `reason` is the signal's reason (for example the error passed to `controller.abort(reason)`). Whatever the action then returns, the node settles `cancelled`, with the `elapsed` of its action, its attempt's directory is removed, and nothing is cached. This matches GitHub's runner: once the signal fired, the action's exit no longer decides.
 - **A cancel wins over a timeout.** If the timeout fired first and the cancel lands before the action settles, the node is `cancelled`.
-- **A cancel during the steps before the action**, while the output directory is made or while the `start` listener's promise is pending, holds the action back: the node settles `cancelled` and its action never runs, even though a journal may already have recorded its start.
+- **A cancel during the steps before the action**, while the output directory is made or while the `start` listener's promise is pending, holds the action back: the node settles `cancelled`, with no `elapsed`, and its action never runs, even though a journal may already have recorded its start.
 - **A lookup that hits** is still `cached`; a cancel does not undo a hit. A cancel that lands after the action returned, while its outputs are stored, does not undo `done`.
 - **The results are complete.** `execute` still resolves with one result per node. A signal that is already aborted when `execute` is called gives every node `cancelled` with no `dispatch` and no `start`.
 
 Like a timeout, a cancel is cooperative: the execution ends only once each running action settles (see "Honouring the signal").
 
-**A timeout for the whole execution** is a cancel on a timer: `execute(graph, context, { signal: AbortSignal.timeout(60_000) })`. When it fires, the nodes behave as on any cancel. Verified: with a node `a` that waits on its signal and a dependent `later`, `{ signal: AbortSignal.timeout(50) }` gives `a: cancelled` (with its action key, since it was looked up) and `later: cancelled` (empty key), tally `{ done: 0, cached: 0, failed: 0, "dep-failed": 0, cancelled: 2 }`. To have both Ctrl-C and a deadline, combine them with `AbortSignal.any([controller.signal, AbortSignal.timeout(ms)])`. A per-node limit is the action's `timeoutMs` instead, which fails the node rather than cancelling it.
+**A timeout for the whole execution** is a cancel on a timer: `execute(graph, context, { signal: AbortSignal.timeout(60_000) })`. When it fires, the nodes behave as on any cancel. Verified: with a node `a` that waits on its signal and a dependent `later`, `{ signal: AbortSignal.timeout(50) }` gives `a: cancelled` (with its action key, since it was looked up) and `later: cancelled` (empty key), counts `{ done: 0, cached: 0, failed: 0, "dep-failed": 0, cancelled: 2 }`. To have both Ctrl-C and a deadline, combine them with `AbortSignal.any([controller.signal, AbortSignal.timeout(ms)])`. A per-node limit is the action's `timeoutMs` instead, which fails the node rather than cancelling it.
 
 An execution removes every listener it added to `signal` when it ends, and each node's timeout timer is cleared once its action settles. So one long-lived `AbortSignal`, such as a process-wide Ctrl-C controller, can be passed to many executions in turn without piling up listeners.
 
-A worked example from the tests: `slow` (in the first execution only, waits for its signal, then returns normally), `quick`, `after` (needs `quick`) and `never` (needs `slow`), under `maxParallelism: 2`, with the abort fired from the listener when `quick`'s result arrives. The events are `start:slow`, `start:quick`, `done:quick`, `cancelled:after`, `cancelled:slow`, `cancelled:never`, and the tally is `{ done: 1, cached: 0, failed: 0, "dep-failed": 0, cancelled: 3 }`. Only `quick` and `slow` have an action key. The test then makes `slow` stop waiting, since with no signal it would never resolve, and the next execution without a signal finds `quick` cached and runs the other three. The order `start:slow`, `start:quick` holds with `createMemoryDagFs()` and a `MemCache`, as in the test; with a real file system the two starts may come in either order.
+A worked example from the tests: `slow` (in the first execution only, waits for its signal, then returns normally), `quick`, `after` (needs `quick`) and `never` (needs `slow`), under `maxParallelism: 2`, with the abort fired from the listener when `quick`'s result arrives. The events are `start:slow`, `start:quick`, `done:quick`, `cancelled:after`, `cancelled:slow`, `cancelled:never`, and the counts are `{ done: 1, cached: 0, failed: 0, "dep-failed": 0, cancelled: 3 }`. Only `quick` and `slow` have an action key. The test then makes `slow` stop waiting, since with no signal it would never resolve, and the next execution without a signal finds `quick` cached and runs the other three. The order `start:slow`, `start:quick` holds with `createMemoryDagFs()` and a `MemCache`, as in the test; with a real file system the two starts may come in either order.
 
 Where it lives: `packages/dagraph/src/orchestrate.ts`, `process-node.ts`.
 
@@ -582,23 +598,25 @@ Where it lives: `packages/dagraph/src/process-node.ts` (`actionSignal`), `graph/
 
 ## `orchestrate`: the scheduling half
 
-`orchestrate(nodes, run, scheduler, onEvent?, signal?)` does what `execute` does, except that it never processes a node itself: it calls `run` for that.
+`orchestrate(nodes, run, scheduler, clock, onEvent?, signal?)` does what `execute` does, except that it never processes a node itself: it calls `run` for that.
 
 - `nodes`: the node data, any iterable of `Node`, usually `graph.describe()`. It carries no actions or inputs, so it can cross into another process when its `meta` can.
 - `run`: a `RunNode`, `(node, depEntries, waitForScheduler) => Promise<Result>`. `depEntries` is the cache entry of each dep that succeeded, by dep name (a dep that did not succeed is absent). `waitForScheduler` waits until the scheduler lets the node's action run (below).
 - `scheduler`: required here; there is no default.
+- `clock`: required; stamps the `occurredAt` of the events it emits (`dispatch`, `pending`, `result`). `execute` passes the context's.
 - `onEvent`: receives `dispatch` and `result`.
 - `signal`: cancels, as in `execute`.
+- It fills each `dep-failed` result's `rootCauses` from the results it holds.
 
 It resolves to one result per node, in settle order. It does no I/O, hashes nothing and never sees an action, so it runs inside a sandbox that allows no I/O, such as a Temporal workflow. For the same reason, the package index imports no I/O module; the file systems are on the `fs` subpaths.
 
 `execute` is nothing more than `orchestrate` over `graph.describe()` with `runNode(graph, context, { signal, onEvent })` as its `RunNode`. That looks each node up with `lookupNode`, and on a miss awaits `waitForScheduler`, then runs the action with `runAction`. A cancel while it waits settles the node `cancelled`, with its key. So an executor built from these parts gets the same meaning for every primitive (keys, hits, `settled`, groups, timeouts, cancel, events) as `execute`: the parts are where those meanings live.
 
-**Determinism.** `orchestrate` reads no clock, draws no random number and does no I/O. What it does depends only on the node data, the scheduler, the results its `RunNode` calls resolve to, and the order in which they resolve. A workflow engine that replays a recorded history (Temporal) reproduces those, so the orchestration replays the same way. The code makes no promise that the ready order or the calls stay the same across dagraph versions (see "Open questions").
+**Determinism.** `orchestrate` draws no random number and does no I/O. It reads its `clock` once per event it emits, to stamp it, and for nothing else: no decision it makes depends on the time. What it does depends only on the node data, the scheduler, the results its `RunNode` calls resolve to, and the order in which they resolve. Inside a Temporal workflow, `Date` passed as its clock is the sandbox's, whose `now()` returns the time of the workflow task being run (`@temporalio/workflow` 1.24.0, `lib/global-overrides.js`), so a replay stamps the same times. A workflow engine that replays a recorded history (Temporal) reproduces those, so the orchestration replays the same way. The code makes no promise that the ready order or the calls stay the same across dagraph versions (see "Open questions").
 
 **The built-in schedulers are deterministic too.** `unboundedScheduler()` and `throttledScheduler(...)` read no clock, draw no random number, set no timer and do no I/O: `schedulers.ts` imports only types, and its only state is the counts in the closure of a `throttledScheduler(...)` call. What they admit depends only on what `take`, `hasWork` and `workAvailable` return and on when each `run` resolves, so with either of them a Temporal workflow that runs `orchestrate` replays the same way. A scheduler of your own replays only if it keeps the same rule. No test or lint rule pins this; two separate runs checked it:
 
-- Under Bun 1.4.4 and Node 25.8.1, with `Date`, `Math.random`, `performance.now`, every timer function, `queueMicrotask`, `process.nextTick` and `crypto`'s random functions wrapped to record each call, `orchestrate` over three roots, each with a `heavy` child and a plain one, called none of them under either scheduler, `throttledScheduler({ maxParallelism: 2, concurrencyLimits: { heavy: 1 } })` included, and made the same sequence of `run` calls twice.
+- Under Bun 1.4.4 and Node 25.8.1, with `Date`, `Math.random`, `performance.now`, every timer function, `queueMicrotask`, `process.nextTick` and `crypto`'s random functions wrapped to record each call, `orchestrate` over three roots, each with a `heavy` child and a plain one, called none of them under either scheduler, `throttledScheduler({ maxParallelism: 2, concurrencyLimits: { heavy: 1 } })` included, and made the same sequence of `run` calls twice. That run came before events were stamped. Since then, the same graph under Bun 1.4.4 makes 21 calls of `Date.now` under either scheduler, with a listener or without, one per event (9 `dispatch`, 3 `pending`, 9 `result`), and no call of `Math.random`, `performance.now`, `setTimeout`, `setInterval`, `queueMicrotask` or `crypto`'s random functions.
 - Under `@temporalio/worker` 1.24.0 on Node 25.8.1, `Worker.runReplayHistory` replayed hand-built histories of a workflow that takes `graph.describe()` as its argument and runs `orchestrate` over `r1`, `r2` and `c1` (needs `r1`), with one activity per node whose `activityId` is the node's name. A history in the order the scheduler gives replayed without error, twice: `r1 c1 r2` under `throttledScheduler({ maxParallelism: 1 })`, and `r1` and `r2` in one workflow task, then `c1`, under `unboundedScheduler()`. A history in another order failed with `DeterminismViolationError`, for example `Activity id of scheduled event 'r2' does not match activity id of activity command 'c1'`. Temporal compares activity IDs only when the history's first `WorkflowTaskCompleted` records core flag 1 (`sdkMetadata.coreUsedFlags: [1]`); without it the misordered histories replayed without error too.
 
 **Node data into a Temporal workflow.** `graph.describe()` can go into a workflow as its argument (`args` of `client.workflow.start`) as well as an activity's result. Both pass through the same data converter, whose default writes a value as JSON (`json/plain`), and node data survives JSON whenever its `meta` does ([dagraph-graphs](dagraph-graphs.md), "`describe()`"). Either way the graph is built outside the sandbox: in the client that starts the workflow, or in an activity. Verified: through `defaultPayloadConverter` of `@temporalio/common` 1.24.0, the node data of a graph with meta (`null` included), a `settled` dep, `cacheable: false` and a `timeoutMs` comes back deep-equal, and `orchestrate` over the copy gives the same results; the replays above pass it as the workflow's first argument. A `bigint` in meta makes the converter throw `ValueError: Unable to convert [object Object] to payload`. On Temporal Cloud each workflow argument and each activity result is one payload, limited to 2 MB (`docs.temporal.io/cloud/limits`, read on 2026-10-26), so the node data of a large graph must fit in that either way.
@@ -614,7 +632,7 @@ It refuses node data in which a node depends on a node it was not given, before 
 **The `RunNode` contract.**
 
 - It must resolve to the node's `Result`. Orchestration stores the dep entries of the nodes that succeed and holds back the dependents of those that did not, from the status alone. A `RunNode` may return a result recorded earlier instead of processing the node, as a replay does.
-- If it rejects, the node settles `failed` with the rejection's name, message and JSON cause, `elapsed: 0` and an empty `actionKey`; or `cancelled`, once the execution is cancelled.
+- If it rejects, the node settles `failed` with the rejection's name, message and JSON cause, an empty `actionKey` and no `elapsed`, since nothing says its action ran; or `cancelled`, once the execution is cancelled.
 - `waitForScheduler()` is what a miss awaits before its action runs. For a node with no concurrency group it resolves at once. For a grouped node the node pends: it returns its place to the scheduler and the promise resolves once the scheduler lets it run. It rejects once the execution is cancelled (at once if the cancel came first). Calling it twice returns the same promise. A `RunNode` that never calls it, such as one that only found a hit, is never held back.
 
 Where it lives: `packages/dagraph/src/orchestrate.ts`.
@@ -639,7 +657,7 @@ The split lets the orchestrator run in one place and the work in another. The pa
 3. On a miss, the `RunNode` awaits `waitForScheduler()` in the orchestrator, then sends the node to a worker to run.
 4. The worker rebuilds a graph that declares the node, and calls `processNode`, since the orchestrator already holds the slot. It sends the `Result` back as JSON; the orchestrator can check it with `isResult`.
 
-Workers and orchestrator must see the same CAS: `depEntries` and results hold paths into it (see [dagraph-caching](dagraph-caching.md) for how paths are stored). `lookupNode` looks entries up in the context's `cache`, which is separate from the CAS files, so for one worker to hit another's entries the workers also need one shared `Cache`, such as an `FsCache` over a shared directory. The orchestrator reads no files and needs neither. The `start` and `output` events happen in the worker; only `dispatch` and `result` reach the orchestrator's listener.
+Workers and orchestrator must see the same CAS: `depEntries` and results hold paths into it (see [dagraph-caching](dagraph-caching.md) for how paths are stored). `lookupNode` looks entries up in the context's `cache`, which is separate from the CAS files, so for one worker to hit another's entries the workers also need one shared `Cache`, such as an `FsCache` over a shared directory. The orchestrator reads no files and needs neither. The `start` and `output` events happen in the worker; only `dispatch` and `result` reach the orchestrator's listener. Each side stamps its own events with its own clock, so the stamps of one node come from two machines' clocks, and `elapsed` from the worker's.
 
 For a worker to compute the key the orchestrator's process would have, and to hit the entries other processes wrote:
 

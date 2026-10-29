@@ -61,6 +61,9 @@ export type SettledRef<T extends Outputs = Outputs> = {
   readonly _T?: T;
 } & NotAString;
 
+/** A dep a node gives a role: required, or `settled`. */
+export type AnyNodeRef<T extends Outputs = Outputs> = NodeRef<T> | SettledRef<T>;
+
 /**
  * A ref to one output of a required dep, which a node's `inputs` function receives by the dep's
  * role: `inputs: ({ pack }) => ({ argv: ["npm", "publish", pack.tarball] })`. In a value input it
@@ -89,6 +92,11 @@ export type SettledOutputRef<T extends string | string[] = string | string[], S 
   readonly _T?: T;
   readonly _scope?: S;
 } & NotAString;
+
+/** A ref to one output of a dep, required or `settled`. */
+export type AnyOutputRef<T extends string | string[] = string | string[], S = unknown> =
+  | OutputRef<T, S>
+  | SettledOutputRef<T, S>;
 
 /** The output `K` where every return holds it, and an index signature does not name it. */
 type RequiredOutput<T, K extends keyof T> = Record<never, never> extends Pick<T, K> ? never : K;
@@ -151,8 +159,7 @@ export type InputValue<S = never> =
   | null
   | readonly InputValue<S>[]
   | { readonly [key: string]: InputValue<S> | undefined }
-  | OutputRef<string | string[], S>
-  | SettledOutputRef<string | string[], S>;
+  | AnyOutputRef<string | string[], S>;
 
 /**
  * Inputs by name, as an action and a node declare them: each a `file(path)`, only ever a whole
@@ -229,8 +236,11 @@ export interface SettledDep<T extends Outputs = Outputs> {
   readonly _T?: T;
 }
 
+/** A dep an action declares for a role: required, or `settled`. */
+type AnyDep = Dep | SettledDep;
+
 /** A role as an action declares it. One whose type holds `undefined` is `maybe`. */
-type DepSpec = Dep | SettledDep | undefined;
+type DepSpec = AnyDep | undefined;
 
 /**
  * The deps an action declares, by role: each a `DepSpec`, or a function that returns one, as an
@@ -281,7 +291,7 @@ export function pick<T extends Outputs, K extends keyof T & string>(
   dep: Dep<T>,
   ...outputs: K[]
 ): Dep<Pick<T, K>>;
-export function pick(dep: Dep | SettledDep, ...outputs: string[]): Dep | SettledDep {
+export function pick(dep: AnyDep, ...outputs: string[]): AnyDep {
   return dep.settled ? { [DEP]: true, settled: true, outputs } : { [DEP]: true, outputs };
 }
 
@@ -296,7 +306,7 @@ const MAYBE: unique symbol = Symbol.for("@mrmeku/dagraph/maybe");
 export function maybe<T extends Outputs>(dep: SettledDep<T>): SettledDep<T> | undefined;
 export function maybe<T extends Outputs>(dep: Dep<T>): Dep<T> | undefined;
 export function maybe<T extends Outputs>(): Dep<T> | undefined;
-export function maybe(dep?: Dep | SettledDep): Dep | SettledDep | undefined {
+export function maybe(dep?: AnyDep): DepSpec {
   const role = {
     [DEP]: true as const,
     [MAYBE]: true as const,
@@ -341,7 +351,7 @@ export function nodeInputs<T extends InputRecord<unknown>>(): NodeInputsSpec<T> 
 }
 
 /** The deps a node may give, by role. */
-export type DepRecord = Record<string, NodeRef | SettledRef | undefined>;
+export type DepRecord = Record<string, AnyNodeRef | undefined>;
 
 /**
  * The argument of a node's `inputs` function: each dep in `deps`, by role, as refs to its outputs.
@@ -389,8 +399,7 @@ export function file(path: string): FileInput {
 
 const branded = (value: unknown, brand: symbol) =>
   typeof value === "object" && value !== null && brand in value;
-export const isOutputRef = (value: unknown): value is OutputRef | SettledOutputRef =>
-  branded(value, OUTPUT_REF);
+export const isOutputRef = (value: unknown): value is AnyOutputRef => branded(value, OUTPUT_REF);
 export const isFileInput = (value: unknown): value is FileInput => branded(value, FILE_INPUT);
 /** Whether a value is a handle: a list or a record of handles is not. */
 export const isFileHandle = (value: unknown): value is FileHandle => branded(value, FILE_HANDLE);
@@ -493,7 +502,7 @@ type TakesAnyInput<N> = [InputNames<N>] extends [never]
 type OwnInputs<N, I, S> =
   TakesAnyInput<N> extends true
     ? Flat<N & NotRedeclared<I> & InputRecord<S>>
-    : Flat<{ [K in keyof N]: N[K] & (InputValue<S> | FileInput | undefined) } & NotRedeclared<I>>;
+    : Flat<{ [K in keyof N]: N[K] & InputRecord<S>[string] } & NotRedeclared<I>>;
 
 /**
  * Each name of `NI`, the inputs a node gives, refused where `nodeInputs` does not declare it, also

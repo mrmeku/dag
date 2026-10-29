@@ -17,14 +17,14 @@ import { addCommand } from "../commands.ts";
 import { LIVE_FRAME_MS, type OutputStyle } from "../config.ts";
 import { defineStep } from "../define-step.ts";
 import { errorMessage } from "../kernel/format.ts";
-import type { Exec, ExecResult, Ports } from "../ports.ts";
+import type { Exec, ExecOptions, ExecResult, Ports } from "../ports.ts";
 import { clockAt, createMemorySyncFs, createTestPorts } from "../ports/memory.ts";
 import { runJob, type RunOptions } from "../runner.ts";
 import { defineWorkflow } from "../workflow.ts";
 import { createLocalSession } from "./session.ts";
 import type { WriteStreams } from "./terminal/frame.ts";
 
-const signalOf = (opts: Parameters<Exec["run"]>[1]) => {
+const signalOf = (opts: ExecOptions | undefined) => {
   const signal = opts?.signal;
   assert.ok(signal, "signal for the command");
   return signal;
@@ -128,26 +128,38 @@ const scriptedExec = (output: Record<string, { chunks: string[]; code: number }>
 const RUN_TIMEOUT = { timeout: 10_000 };
 
 /** The engine's events for `node`, as a store hears them from a run. */
-const dispatchOf = (node: Node): ExecEvent => ({ type: "dispatch", node: node.name });
-const pendingOf = (node: Node): ExecEvent => ({ type: "pending", node: node.name });
-const startOf = (node: Node): ExecEvent => ({ type: "start", node: node.name });
+const dispatchOf = (node: Node): ExecEvent => ({
+  type: "dispatch",
+  node: node.name,
+  occurredAt: 0,
+});
+const pendingOf = (node: Node): ExecEvent => ({ type: "pending", node: node.name, occurredAt: 0 });
+const startOf = (node: Node): ExecEvent => ({ type: "start", node: node.name, occurredAt: 0 });
 const outputOf = (node: Node, chunk: string): ExecEvent => ({
   type: "output",
   node: node.name,
   chunk,
+  occurredAt: 0,
 });
 type Settled<R = Result> = R extends unknown ? Omit<R, "name"> : never;
 const resultOf = (node: Node, result: Settled): ExecEvent => ({
   type: "result",
   node: node.name,
   result: { name: node.name, ...result },
+  occurredAt: 0,
 });
-const failureOf = (node: Node, actionKey: string, message: string, cause?: JsonValue) =>
+const failureOf = (
+  node: Node,
+  actionKey: string,
+  message: string,
+  cause?: JsonValue,
+  elapsed = 1,
+) =>
   resultOf(node, {
     actionKey,
     status: "failed",
     error: { name: "Error", message, ...(cause !== undefined && { cause }) },
-    elapsed: 1,
+    elapsed,
   });
 
 /** Lets the run go on a turn at a time until `done`, or until the test has timed out. */
@@ -1288,6 +1300,8 @@ describe("local session, live style", () => {
         schedulerOptions: { maxParallelism: 4, concurrencyLimits: { test: 1 } },
       });
       const { store } = session.runOptions;
+      // As the engine stamps its events, from the clock.
+      const onEvent = (event: ExecEvent) => store.onEvent({ ...event, occurredAt: now });
       const nodeNamed = (name: string, more: Partial<Node> = {}): Node => {
         return { name, kind: name, deps: [], ...more };
       };
@@ -1307,18 +1321,18 @@ describe("local session, live style", () => {
       };
       const emitAt = async (occurredAt: number, execEvents: ExecEvent[]) => {
         now = occurredAt;
-        execEvents.forEach((event) => store.onEvent(event));
+        execEvents.forEach(onEvent);
         await store.report(pass);
         session.tick();
       };
-      const done = (node: Node): ExecEvent =>
+      const done = (node: Node, elapsed: number): ExecEvent =>
         resultOf(node, {
           actionKey: "",
           status: "done",
           outputs: {},
           contentHash: "h",
           outputHashes: {},
-          elapsed: 1,
+          elapsed,
         });
 
       // The implementation prints as it builds the graph, before the run begins.
@@ -1328,13 +1342,13 @@ describe("local session, live style", () => {
       // The run begins before its first event, as the runner's awaits make it.
       await new Promise(setImmediate);
       for (const node of [lint, e2e, testA]) {
-        store.onEvent(dispatchOf(node));
-        store.onEvent(startOf(node));
+        onEvent(dispatchOf(node));
+        onEvent(startOf(node));
       }
-      store.onEvent(dispatchOf(build));
-      store.onEvent(outputOf(lint, "checking src\n"));
-      store.onEvent(outputOf(e2e, "x".repeat(100)));
-      store.onEvent(outputOf(testA, "ok 1 - parses\tthe feed\n"));
+      onEvent(dispatchOf(build));
+      onEvent(outputOf(lint, "checking src\n"));
+      onEvent(outputOf(e2e, "x".repeat(100)));
+      onEvent(outputOf(testA, "ok 1 - parses\tthe feed\n"));
       await new Promise((written) =>
         session.streams.stderr.write("a stray stderr write\n", written),
       );
@@ -1356,22 +1370,28 @@ describe("local session, live style", () => {
       // The terminal echoes a ^C at the cursor, the end of the status row.
       session.writes.push("^C");
       await emitAt(900, [
-        failureOf(lint, "k1", "eslint . exited 1", {
-          argv: ["eslint", "."],
-          cwd: ".",
-          ended: "exited",
-          code: 1,
-        }),
+        failureOf(
+          lint,
+          "k1",
+          "eslint . exited 1",
+          { argv: ["eslint", "."], cwd: ".", ended: "exited", code: 1 },
+          900,
+        ),
         dispatchOf(requireAll),
         startOf(requireAll),
         failureOf(requireAll, "", "failed: lint"),
-        resultOf(deploy, { actionKey: "", status: "dep-failed", dep: "require-all" }),
+        resultOf(deploy, {
+          actionKey: "",
+          status: "dep-failed",
+          dep: "require-all",
+          rootCauses: ["require-all"],
+        }),
       ]);
       await emitAt(1500, [
-        done(testA),
+        done(testA, 1500),
         startOf(testB),
-        done(testB),
-        done(e2e),
+        done(testB, 1),
+        done(e2e, 1500),
         resultOf(build, {
           actionKey: "kb",
           status: "cached",
@@ -1603,6 +1623,8 @@ describe("local session, live style", () => {
     );
     delete process.env.FORCE_HYPERLINK;
     const { store } = session.runOptions;
+    // As the engine stamps its events, from the clock.
+    const onEvent = (event: ExecEvent) => store.onEvent({ ...event, occurredAt: now });
     const nodeNamed = (name: string, more: Partial<Node> = {}): Node => {
       return { name, kind: name, deps: [], ...more };
     };
@@ -1629,21 +1651,19 @@ describe("local session, live style", () => {
     };
     const emitAt = async (occurredAt: number, execEvents: ExecEvent[]) => {
       now = occurredAt;
-      execEvents.forEach((event) => store.onEvent(event));
+      execEvents.forEach(onEvent);
       await store.report(pass);
     };
     const started = (node: Node): ExecEvent[] => [dispatchOf(node), startOf(node)];
-    const done = (node: Node): ExecEvent =>
+    const done = (node: Node, elapsed: number): ExecEvent =>
       resultOf(node, {
         actionKey: "",
         status: "done",
         outputs: {},
         contentHash: "h",
         outputHashes: {},
-        elapsed: 1,
+        elapsed,
       });
-    const cancelled = (node: Node, actionKey = ""): ExecEvent =>
-      resultOf(node, { actionKey, status: "cancelled" });
     const screenAt = async (occurredAt: number) => {
       now = occurredAt;
       session.tick();
@@ -1657,10 +1677,10 @@ describe("local session, live style", () => {
     // Started last to first, so the earliest in flight is the last in the graph.
     for (const [i, node] of [a6, a5, a4, a3, a2, a1].entries())
       await emitAt(1000 + i * 10, started(node));
-    store.onEvent(outputOf(a6, "ok\tparses\u00ad the feed\n"));
-    store.onEvent(outputOf(a5, "\x1b[32m50%\x1b[39m"));
-    store.onEvent(outputOf(a4, "built\n\n::debug::walking src"));
-    store.onEvent(outputOf(a3, "linked\n  "));
+    onEvent(outputOf(a6, "ok\tparses\u00ad the feed\n"));
+    onEvent(outputOf(a5, "\x1b[32m50%\x1b[39m"));
+    onEvent(outputOf(a4, "built\n\n::debug::walking src"));
+    onEvent(outputOf(a3, "linked\n  "));
     const beforeFirstDraw = await screenAt(1300);
     await screenAt(1600);
     const crowded = session.footer();
@@ -1675,28 +1695,29 @@ describe("local session, live style", () => {
           ended: "exited",
           code: 0,
         },
+        850,
       ),
       ...started(g),
       failureOf(g, "", "failed: a1"),
       ...skipped.map((node) => {
         const [dep] = node.deps;
         assert.ok(dep, "dep");
-        return resultOf(node, { actionKey: "", status: "dep-failed", dep });
+        return resultOf(node, { actionKey: "", status: "dep-failed", dep, rootCauses: ["a1"] });
       }),
-      ...[a2, a3, a4, a5].map(done),
+      ...[a2, a3, a4, a5].map((node) => done(node, 860)),
       ...started(b),
     ]);
     // Stray writes that end no line: each keeps a line of its own.
     session.streams.stdout.write(Buffer.from("linking"));
     const waiting = await screenAt(2200);
     session.streams.stdout.write("building");
-    await emitAt(2300, [done(a6), ...started(x), dispatchOf(y), pendingOf(y)]);
-    store.onEvent(outputOf(x, "uploading"));
+    await emitAt(2300, [done(a6, 1300), ...started(x), dispatchOf(y), pendingOf(y)]);
+    onEvent(outputOf(x, "uploading"));
     await screenAt(2400);
     const queued = session.footer();
     store.cancel();
     await emitAt(2500, [
-      done(b),
+      done(b, 600),
       dispatchOf(c),
       resultOf(c, {
         actionKey: "",
@@ -1705,10 +1726,10 @@ describe("local session, live style", () => {
         contentHash: "h",
         outputHashes: {},
       }),
-      cancelled(x, "kx"),
+      resultOf(x, { actionKey: "kx", status: "cancelled", elapsed: 200 }),
       // y looked its key up before the scheduler held it back, yet never ran: no line.
-      cancelled(y, "ky"),
-      cancelled(w),
+      resultOf(y, { actionKey: "ky", status: "cancelled" }),
+      resultOf(w, { actionKey: "", status: "cancelled" }),
     ]);
     // As the runner begins a post pass that owes nothing.
     store.begin({ title: "ci.ts · post", nodes: [] });
@@ -1827,23 +1848,25 @@ describe("local session, live style", () => {
       const { ports } = createTestPorts({ clock: clockAt(() => now) });
       const session = localRun("live", ports);
       const { store } = session.runOptions;
+      // As the engine stamps its events, from the clock.
+      const onEvent = (event: ExecEvent) => store.onEvent({ ...event, occurredAt: now });
       const save: Node = { name: "save", kind: "save", deps: [] };
       const main = { title: "ci.ts", nodes: [save] };
       const post = { title: "ci.ts · post", nodes: [save] };
       const start = () => {
-        store.onEvent(dispatchOf(save));
-        store.onEvent(startOf(save));
+        onEvent(dispatchOf(save));
+        onEvent(startOf(save));
       };
       store.begin(main);
       await new Promise(setImmediate);
       start();
-      store.onEvent(outputOf(save, "saving\n"));
+      onEvent(outputOf(save, "saving\n"));
       store.cancel();
-      store.onEvent(outputOf(save, "killed by SIGINT\n"));
+      onEvent(outputOf(save, "killed by SIGINT\n"));
       now = 600;
       session.tick();
       const stopping = session.writes.at(-1);
-      store.onEvent(resultOf(save, { actionKey: "ks", status: "cancelled" }));
+      onEvent(resultOf(save, { actionKey: "ks", status: "cancelled", elapsed: 600 }));
       await store.report(main);
       store.begin(post);
       await new Promise(setImmediate);

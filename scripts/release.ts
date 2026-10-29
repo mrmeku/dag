@@ -28,9 +28,8 @@
  *   can be inspected.
  */
 import { defineWorkflow, type NodeRef } from "@mrmeku/dagworkflows";
-import { addChecks } from "./checks.ts";
+import { addChecks, type Package } from "./checks.ts";
 
-type Pkg = "dagraph" | "dagworkflows";
 const TAG = /^refs\/tags\/v(\d+\.\d+\.\d+(?:-[\w.]+)?)$/;
 const TOOLCHAIN = ["tsconfig.json", "tsconfig.build.json", "bun.lock", "scripts/pack.ts"];
 
@@ -73,7 +72,7 @@ export default defineWorkflow({
       "packages/*/README.md",
       ...TOOLCHAIN,
     );
-    const pack = (pkg: Pkg) => {
+    const pack = (pkg: Package) => {
       const tarball = workflow.task({
         name: `pack:${pkg}`,
         cmd: ({ outputDir }) => ["bun", "scripts/pack.ts", pkg, version, outputDir],
@@ -114,7 +113,7 @@ export default defineWorkflow({
       deps: { bundle },
     });
 
-    const publish = (pkg: Pkg, after: { engine?: NodeRef }) =>
+    const publish = (pkg: Package, after: { engine?: NodeRef }) =>
       workflow.task({
         name: `publish:${pkg}`,
         shell: [

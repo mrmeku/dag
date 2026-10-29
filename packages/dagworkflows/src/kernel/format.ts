@@ -1,10 +1,10 @@
-import { tally } from "@mrmeku/dagraph";
+import { countResultsByStatus } from "@mrmeku/dagraph";
 import { stripVTControlCharacters } from "node:util";
 import { quote } from "shlex";
 import { STATUS_ICON } from "../config.ts";
 import type { AnnotationLevel } from "../ports.ts";
 import { namesOf, type NodeReport } from "./report.ts";
-import type { NodeState } from "./run-slice.ts";
+import type { FailureNodeState, NodeState } from "./run-slice.ts";
 
 const CONTROL_CHARACTERS = /[\x00-\x08\x0b-\x1f\x7f-\x9f]/g;
 
@@ -18,8 +18,34 @@ export const plural = (count: number, word: string): string =>
 export const errorMessage = (error: unknown): string =>
   error instanceof Error ? error.message : String(error);
 
-/** Why a node did not run: a required dep did not succeed. */
-export const depFailedMessage = (dep: string): string => `dependency ${dep} failed`;
+/** A node's own timeout in the words of GitHub's runner. */
+function timeoutMessage(name: string, timeoutMs: number): string {
+  const minutes = timeoutMs / 60_000;
+  const after =
+    minutes >= 1
+      ? `${+minutes.toFixed(2)} minute${minutes === 1 ? "" : "s"}`
+      : formatDuration(timeoutMs);
+  return `The action '${name}' has timed out after ${after}.`;
+}
+
+/**
+ * What every output says of a failure: its error's message, or its own timeout's in the words of
+ * GitHub's runner; or why a skipped node did not run: a required dep did not succeed. A renderer
+ * calls it with a report's `node` and `result` once the result is failed or dep-failed.
+ */
+export function failureMessage({
+  node,
+  result,
+}: Pick<FailureNodeState, "node" | "result">): string {
+  switch (result.status) {
+    case "failed":
+      return result.timedOut && node.timeoutMs !== undefined
+        ? timeoutMessage(node.name, node.timeoutMs)
+        : result.error.message;
+    case "dep-failed":
+      return `dependency ${result.dep} failed`;
+  }
+}
 
 /** What a run is called where its output needs a name: its workflow file. */
 export const titleOf = (workflowFile: string | undefined): string => workflowFile ?? "run";
@@ -100,13 +126,18 @@ export function reportHeadline(nodes: NodeReport[]): string {
 }
 
 export function countsLine(nodes: NodeReport[], formatCount: (count: number) => string): string {
-  const counts = tally(nodes);
+  const counts = countResultsByStatus(nodes.map(({ result }) => result));
   return `built ${formatCount(counts.done)} · cached ${formatCount(counts.cached)} · failed ${formatCount(counts.failed)} · skipped ${formatCount(counts["dep-failed"])}${counts.cancelled > 0 ? ` · cancelled ${formatCount(counts.cancelled)}` : ""}`;
 }
 
 /** A node's log as its group prints it: the log, then a failure's error; a skipped node's message. */
 export function groupLines(nodeState: NodeState, log: string[]): string[] {
-  if (nodeState.status === "failed") return [...log, "── error ──", ...logLines(nodeState.error)];
-  if (nodeState.status === "dep-failed") return [nodeState.error];
-  return log;
+  switch (nodeState.status) {
+    case "failed":
+      return [...log, "── error ──", ...logLines(failureMessage(nodeState))];
+    case "dep-failed":
+      return [failureMessage(nodeState)];
+    default:
+      return log;
+  }
 }

@@ -6,6 +6,7 @@ import {
   hashOutputFiles,
   mapPaths,
   verifyOutputs,
+  type EntryHashes,
   type HashFileFn,
   type KeyedDep,
   type KeyedInput,
@@ -14,7 +15,7 @@ import { fileHandle } from "./file-handle.ts";
 import { graphNodes, type Graph, type GraphNode } from "./graph/graph.ts";
 import { canonical, resolveValue } from "./graph/inputs.ts";
 import { FILE_INPUT, isFileInput, isOutputs, requiredDeps, type Outputs } from "./graph/types.ts";
-import type { ExecListener, FailedError, Result } from "./types.ts";
+import type { Clock, ExecListener, FailedError, Result } from "./types.ts";
 import { errorOf } from "./utils.ts";
 
 /**
@@ -25,6 +26,7 @@ export type ExecutionContext<Ports = unknown> = {
   cache: Cache;
   fs: DagFs;
   casBaseDir: string;
+  clock: Clock;
 } & (unknown extends Ports ? { ports?: Ports } : { ports: Ports });
 
 export interface RunActionOptions<Meta> {
@@ -59,7 +61,7 @@ async function publish(
   keyDir: string,
   staging: string,
   outputs: Outputs,
-  hashes: Pick<CacheEntry, "contentHash" | "outputHashes">,
+  hashes: EntryHashes,
 ): Promise<Outputs> {
   const published = `${keyDir}/out-${hashes.contentHash}`;
   const moved = mapPaths(outputs, (path) => published + normalize(path).slice(staging.length));
@@ -137,7 +139,7 @@ export async function lookupNode<Ports, Meta>(
   try {
     actionKey = await actionKeyOf(found, entryOf, fs.hashFile);
   } catch (e) {
-    return { name, actionKey: "", status: "failed", error: errorOf(e), elapsed: 0 };
+    return { name, actionKey: "", status: "failed", error: errorOf(e) };
   }
   if (node.cacheable !== false) {
     // An entry that cannot be read, the cache's own failure included, is a miss.
@@ -164,19 +166,13 @@ export async function runAction<Ports, Meta>(
   options: RunActionOptions<Meta> = {},
 ): Promise<Result> {
   const found = nodeNamed(graph, name);
-  const { cache, fs, casBaseDir, ports }: ExecutionContext = executionContext;
+  const { cache, fs, casBaseDir, ports, clock }: ExecutionContext = executionContext;
   const { node, spec, roles } = found;
   const meta = node.meta === undefined ? {} : { meta: node.meta };
   const entryOf = (dep: string) => (Object.hasOwn(depEntries, dep) ? depEntries[dep] : undefined);
   const handle = (path: string) => fileHandle(fs, path);
   const keyDir = join(casBaseDir, actionKey);
-  const notRun = (e: unknown): Result => ({
-    name,
-    actionKey,
-    status: "failed",
-    error: errorOf(e),
-    elapsed: 0,
-  });
+  const notRun = (e: unknown): Result => ({ name, actionKey, status: "failed", error: errorOf(e) });
 
   const cancel = options.signal;
   const cancelled: Result = { name, actionKey, status: "cancelled" };
@@ -196,34 +192,29 @@ export async function runAction<Ports, Meta>(
   if (cancel?.aborted) return dropped(cancelled);
   let open = true;
   const output = (chunk: string) => {
-    if (open) ignoreRejection(options.onEvent?.({ type: "output", node: name, ...meta, chunk }));
+    if (open)
+      ignoreRejection(
+        options.onEvent?.({ type: "output", node: name, ...meta, chunk, occurredAt: clock.now() }),
+      );
   };
   try {
-    await options.onEvent?.({ type: "start", node: name, ...meta });
+    await options.onEvent?.({ type: "start", node: name, ...meta, occurredAt: clock.now() });
   } catch (e) {
     return dropped(notRun(e));
   }
   // Checked after the last await before the action starts: a cancel during the start's record
   // holds it back, though the record says it started.
   if (cancel?.aborted) return dropped(cancelled);
-  const startTime = Date.now();
-  const failed = (error: FailedError): Result => ({
-    name,
-    actionKey,
-    status: "failed",
-    error,
-    elapsed: Date.now() - startTime,
-  });
-  const { signal, dispose } = actionSignal(node.timeoutMs, cancel);
-  let settled: { outputs: Outputs } | { error: unknown };
+  let inputs: Record<string, unknown>;
+  let depOutputs: Record<string, unknown>;
   try {
-    const inputs = Object.fromEntries(
+    inputs = Object.fromEntries(
       Object.entries(found.inputs).map(([k, v]) => [
         k,
         isFileInput(v) ? handle(v[FILE_INPUT]) : resolveValue(v, depEntries, handle),
       ]),
     );
-    const depOutputs = Object.fromEntries(
+    depOutputs = Object.fromEntries(
       Object.entries(roles).flatMap(([role, dep]) => {
         const entry = entryOf(dep);
         if (!entry) return [];
@@ -235,6 +226,21 @@ export async function runAction<Ports, Meta>(
         return [[role, mapPaths(read, handle)]];
       }),
     );
+  } catch (e) {
+    return dropped(notRun(e));
+  }
+  const { signal, dispose } = actionSignal(node.timeoutMs, cancel);
+  const startTime = clock.now();
+  const elapsed = () => clock.now() - startTime;
+  const failed = (error: FailedError) => ({
+    name,
+    actionKey,
+    status: "failed" as const,
+    error,
+    elapsed: elapsed(),
+  });
+  let settled: { outputs: Outputs } | { error: unknown };
+  try {
     const context = { inputs, depOutputs, ports, outputDir, signal, output };
     settled = { outputs: await spec.action(context) };
   } catch (error) {
@@ -246,12 +252,14 @@ export async function runAction<Ports, Meta>(
   try {
     // As GitHub's runner does: once the signal fired, the exit status no longer decides. A cancel
     // wins over the node's own timeout; neither result is ever cached.
-    if (cancel?.aborted) return await dropped(cancelled);
+    if (cancel?.aborted)
+      return await dropped({ name, actionKey, status: "cancelled", elapsed: elapsed() });
     // A timeout keeps what the action threw as it stopped: its cause says what it was running.
     const thrown = "error" in settled ? settled.error : undefined;
     if (signal.aborted) {
       const message = `timed out after ${node.timeoutMs} ms`;
-      return await dropped(failed({ ...errorOf(thrown, message), name: "TimeoutError" }));
+      const error = { ...errorOf(thrown, message), name: "TimeoutError" };
+      return await dropped({ ...failed(error), timedOut: true });
     }
     if ("error" in settled) return await dropped(failed(errorOf(thrown)));
     if (!isOutputs(settled.outputs))
@@ -273,7 +281,7 @@ export async function runAction<Ports, Meta>(
     const hashes = await hashOutputFiles(returned, fs.hashFile, keyDir);
     const outputs = await publish(fs, keyDir, staging, returned, hashes);
     if (node.cacheable !== false) await cache.put(actionKey, { outputs, ...hashes });
-    return { name, actionKey, status: "done", outputs, ...hashes, elapsed: Date.now() - startTime };
+    return { name, actionKey, status: "done", outputs, ...hashes, elapsed: elapsed() };
   } catch (e) {
     return await dropped(failed(errorOf(e)));
   } finally {

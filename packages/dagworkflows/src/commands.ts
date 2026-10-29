@@ -1,13 +1,14 @@
 import {
   notAString,
+  type AnyOutputRef,
   type DepRecord,
   type DepRefs,
-  type FileHandle,
   type Graph,
   type InputRecord,
   type NodeRef,
   type NotAString,
   type OutputRef,
+  type Resolved,
   type SettledOutputRef,
 } from "@mrmeku/dagraph";
 import type { Ports } from "./ports.ts";
@@ -41,19 +42,24 @@ type CommandRefs<D, O extends string, S> = DepRefs<D, S> & {
 
 export type OwnRoles = { out?: never; outputDir?: never };
 
-/** A ref to a dep's output, which a command reads as its path or paths. */
-type Ref<S> = OutputRef<string | string[], S>;
-type MaybeRef<S> = SettledOutputRef<string | string[], S>;
+/**
+ * An argument as the author's `cmd` function returns it: text, a dep's output, which the command
+ * reads as its path or paths, or the command's own.
+ */
+type AuthoredArgument<S> = string | OutputRef<string | string[], S> | OwnRef<S>;
+
+/** An env value as the author's `env` function returns it: an argument, or a `settled` dep's output. */
+type AuthoredEnvValue<S> = AuthoredArgument<S> | SettledOutputRef<string | string[], S>;
 
 /** A command's `env`: variables set over what it inherits, or a function of its refs that returns them. */
 type Env<D, O extends string> =
   | Record<string, string>
-  | (<S>(refs: CommandRefs<D, O, S>) => Record<string, string | Ref<S> | MaybeRef<S> | OwnRef<S>>);
+  | (<S>(refs: CommandRefs<D, O, S>) => Record<string, AuthoredEnvValue<S>>);
 
 /** A program and its arguments, or a function of the command's refs that returns them. */
 export type Argv<D, O extends string> =
   | readonly string[]
-  | (<S>(refs: CommandRefs<D, O, S>) => readonly (string | Ref<S> | OwnRef<S>)[]);
+  | (<S>(refs: CommandRefs<D, O, S>) => readonly AuthoredArgument<S>[]);
 
 /**
  * What a command, a task whose work is `cmd` or `shell`, takes beside its work.
@@ -125,21 +131,21 @@ export type ShellWork = { shell: string; cmd?: never };
 /** A command's work as the facade reads it: `cmd` or `shell`. */
 export type Work<D, O extends string> = CmdWork<D, O> | ShellWork;
 
-/** An argument as the command's key holds it: a dep's output by its ref, its own by file. */
-type Argument<S> = string | OwnKey | { dep: Ref<S> };
+/** An argument or env value as the command's key holds it: a dep's output by its ref, its own by file. */
+type Keyed<R extends AnyOutputRef> = string | OwnKey | { dep: R };
 
 type Command<S> = {
   version: string;
-  cmd: string | Argument<S>[];
+  cmd: string | Keyed<OutputRef<string | string[], S>>[];
   cwd: string;
-  env: Record<string, string | OwnKey | { dep: Ref<S> | MaybeRef<S> }>;
+  env: Record<string, Keyed<AnyOutputRef<string | string[], S>>>;
 };
 
 type CommandInputs = { [COMMAND_INPUT]: Command<unknown> };
 type CommandContext<D extends DepRecord, O extends string> = TaskContext<D, O, CommandInputs>;
 
 /** A command as its action reads it: each dep's output as handles. */
-type ResolvedCommand = CommandContext<DepRecord, string>["inputs"][typeof COMMAND_INPUT];
+type ResolvedCommand = Resolved<Command<unknown>>;
 type ResolvedArgument = Exclude<ResolvedCommand["cmd"], string>[number];
 
 /** Where a command's function got its refs: `cmd`, a `cmd` task's `env`, or a `shell` task's. */
@@ -161,15 +167,13 @@ function ownRef<S>(shown: string, key: OwnKey, place: Place): OwnRef<S> {
 }
 
 /** An argument or env value as its command keys it. */
-function keyed<R extends Ref<unknown> | MaybeRef<unknown>, S>(
-  value: string | OwnRef<S> | R,
-): string | OwnKey | { dep: R } {
+function keyed<R extends AnyOutputRef, S>(value: string | OwnRef<S> | R): Keyed<R> {
   if (typeof value === "string") return value;
   if (OWN_REF in value) return value[OWN_REF];
   return { dep: value };
 }
 
-const joined = (files: FileHandle | FileHandle[]) =>
+const joined = (files: Resolved<OutputRef>) =>
   [files]
     .flat()
     .map((file) => file.path)

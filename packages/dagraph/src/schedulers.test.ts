@@ -37,7 +37,7 @@ function harness(
     await new Promise<void>((resolve) => finishers.set(node.name, resolve));
     return { name: node.name, status: "done", ...entry, elapsed: 0 };
   };
-  const done = orchestrate(nodes, run, throttledScheduler(opts), (e) => {
+  const done = orchestrate(nodes, run, throttledScheduler(opts), Date, (e) => {
     if (e.type === "dispatch") log.push(`dispatch ${e.node}`);
     if (e.type === "result") log.push(`${e.result.status} ${e.node}`);
   });
@@ -213,7 +213,7 @@ describe("orchestrate", () => {
 
   test("refuses nodes whose deps it was not given, naming them", async () => {
     const nodes = [node("a", undefined, ["x"]), node("b"), node("c", undefined, ["y", "b", "z"])];
-    const refused = await orchestrate(nodes, done, unboundedScheduler()).catch((e: unknown) =>
+    const refused = await orchestrate(nodes, done, unboundedScheduler(), Date).catch((e: unknown) =>
       errorMessage(e),
     );
     expect(refused).toBe(
@@ -231,6 +231,7 @@ describe("orchestrate", () => {
         return done(n);
       },
       unboundedScheduler(),
+      Date,
       (event) => {
         if (event.type === "dispatch" && event.node === "a") throw new Error("dispatch of a");
         if (event.type === "result" && event.node === "b") throw new Error("result of b");
@@ -247,7 +248,7 @@ describe("orchestrate", () => {
     }).toEqual({ outcome: "dispatch of a", ran: ["a", "b"], listeners: 0 });
   });
 
-  test("a RunNode that rejects settles its node failed, its cause kept as JSON, or cancelled once the execution is cancelled", async () => {
+  test("a RunNode that rejects settles its node failed, its cause kept as JSON and with no elapsed, since it is not known to have run, or cancelled once the execution is cancelled", async () => {
     const controller = new AbortController();
     const run: RunNode = async (n) => {
       if (n.name === "later") controller.abort();
@@ -258,6 +259,7 @@ describe("orchestrate", () => {
       [node("first"), later],
       run,
       unboundedScheduler(),
+      Date,
       undefined,
       controller.signal,
     );
@@ -267,7 +269,6 @@ describe("orchestrate", () => {
         actionKey: "",
         status: "failed",
         error: { name: "RangeError", message: "first broke", cause: { code: 1 } },
-        elapsed: 0,
       },
       { name: "later", actionKey: "", status: "cancelled" },
     ]);
@@ -275,7 +276,7 @@ describe("orchestrate", () => {
 
   test("with runNode given no signal, a cancel still ends a pending miss's wait: it settles cancelled", async () => {
     const fs = createMemoryDagFs();
-    const ctx = { ports: { fs }, cache: new MemCache(), fs, casBaseDir: "/cas" };
+    const ctx = { ports: { fs }, cache: new MemCache(), fs, casBaseDir: "/cas", clock: Date };
     const controller = new AbortController();
     const defineActionWithPorts = actionsFor<{ fs: DagFs }, "heavy">();
     const heavy = defineActionWithPorts({
@@ -296,6 +297,7 @@ describe("orchestrate", () => {
       g.describe(),
       runNode(g, ctx),
       throttledScheduler({ concurrencyLimits: { heavy: 1 } }),
+      Date,
       undefined,
       controller.signal,
     );

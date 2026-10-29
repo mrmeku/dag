@@ -54,7 +54,7 @@ const isDurations = (value: unknown): value is Record<string, number> =>
  * nodes settle, so a CAS saved in the graph carries it.
  */
 export function createRunStore(
-  opts: Pick<Ports, "fs" | "clock"> & {
+  opts: Pick<Ports, "fs"> & {
     casBaseDir: string;
     listeners: RunListener[];
     lastRunAtBegin?: boolean;
@@ -123,7 +123,7 @@ export function createRunStore(
   const settleNode = async (nodeState: SettledNodeState) => {
     const log = await casLogLines(selectors.logKeyOf(nodeState));
     const duration = selectors.durationOf(nodeState);
-    if (selectors.ran(nodeState) && duration !== undefined) {
+    if (selectors.ranToItsEnd(nodeState.result) && duration !== undefined) {
       durations[nodeState.node.name] = duration;
       await writeLastRun();
     }
@@ -179,8 +179,7 @@ export function createRunStore(
     getState: (): RunState => state,
     begin: (pass: Pass) => dispatch({ type: "passBegun", pass }),
     cancel: () => dispatch({ type: "runCancelled" }),
-    onEvent: (event: ExecEvent) =>
-      dispatch(event.type === "output" ? event : { ...event, occurredAt: opts.clock.now() }),
+    onEvent: (event: ExecEvent) => dispatch(event),
     /** `pass`'s nodes, once every settle is told and the last run's durations are known. */
     report: async (pass: Pass): Promise<NodeReport[]> => {
       await listenerQueue;
