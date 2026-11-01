@@ -12,7 +12,8 @@ import {
   type SummaryRenderer,
 } from "./summary.ts";
 
-const CAS = "/cas";
+const BUILD_LOG_DIR = "/build-logs";
+const DURATIONS_FILE = "/durations/ci.ts.json";
 const parsed = async (text: Promise<string>): Promise<unknown> => JSON.parse(await text);
 const node = (name: string, kind: string, deps: string[] = [], settledDeps?: string[]): Node => ({
   name,
@@ -62,31 +63,39 @@ const settled = (result: Result, occurredAt = 0): ExecEvent => ({
   result,
   occurredAt,
 });
+const printed = (name: string, chunk: string, occurredAt = 0): ExecEvent => ({
+  type: "output",
+  node: name,
+  chunk,
+  occurredAt,
+});
 /** A second apart, from 1,000,000 ms. */
 const EVENTS: ExecEvent[] = [
   { type: "dispatch", node: "a", occurredAt: 1_000_000 },
   { type: "start", node: "a", occurredAt: 1_001_000 },
+  printed("a", "ok line 1\nwarned\n", 1_001_000),
+  printed("a", "ok line 2\n", 1_001_000),
   settled(A, 1_002_000),
   { type: "dispatch", node: "b", occurredAt: 1_003_000 },
   settled(B, 1_004_000),
   { type: "dispatch", node: "c", occurredAt: 1_005_000 },
   { type: "start", node: "c", occurredAt: 1_006_000 },
+  printed("c", "::debug::walking\nboom\n", 1_006_000),
   settled(C, 1_007_000),
   settled(D, 1_008_000),
 ];
 
-/** a built, b cached, c failed with logs in the CAS, d skipped; a and b ran before. */
+/** a built and c failed, each printing, b cached with the log of an earlier build, d skipped; a and b ran before. */
 async function play(summary?: readonly SummaryRenderer[]) {
   const { ports, fs, rec } = createTestPorts({
     files: {
-      "/cas.logs/k1.log": "ok line 1\nwarned\nok line 2\n",
-      "/cas.logs/k2.log": "from an earlier run\n",
-      "/cas.logs/k3.log": "::debug::walking\nboom\n",
-      "/cas/last-run.json": JSON.stringify({ durations: { a: 500, b: 2000, c: 3000 } }),
+      [`${BUILD_LOG_DIR}/k2.log`]: "from an earlier run\n",
+      [DURATIONS_FILE]: JSON.stringify({ durations: { a: 500, b: 2000, c: 3000 } }),
     },
   });
   const reporter = createReporter(ports, {
-    casBaseDir: CAS,
+    buildLogDir: BUILD_LOG_DIR,
+    durationsFile: DURATIONS_FILE,
     nodes: NODES,
     rerunCommand: "npx --no dag run ci.ts",
     ...(summary && { summary }),
@@ -104,12 +113,10 @@ const CLASSDEFS = [
 
 describe("reporter", () => {
   test("a timeout of a minute or more reads in minutes with a timed_out check", async () => {
-    const { ports, rec } = createTestPorts({
-      files: { "/cas.logs/k2.log": "partial\n" },
-    });
+    const { ports, rec } = createTestPorts();
     const slow = { ...node("slow", "test"), timeoutMs: 900_000 };
     const half = { ...node("half", "test"), timeoutMs: 90_000 };
-    const reporter = createReporter(ports, { casBaseDir: CAS, nodes: [slow, half] });
+    const reporter = createReporter(ports, { durationsFile: DURATIONS_FILE, nodes: [slow, half] });
     const timedOut = (name: string, actionKey: string): Result => {
       const error = { name: "TimeoutError", message: "timed out" };
       return { name, actionKey, status: "failed", error, elapsed: 1000, timedOut: true };
@@ -119,6 +126,7 @@ describe("reporter", () => {
     const events: ExecEvent[] = results.flatMap((result) => [
       { type: "dispatch", node: result.name, occurredAt: 0 },
       { type: "start", node: result.name, occurredAt: 0 },
+      ...(result.name === "slow" ? [printed("slow", "partial\n")] : []),
       settled(result),
     ]);
     for (const ev of events) reporter.onEvent(ev);
@@ -149,7 +157,7 @@ describe("reporter", () => {
     );
   });
 
-  test("start lines, live checks, groups with CAS logs, plain lines for what did not run, annotations, the default summary and the closing recap; a cached node never starts, last-run.json is read only once a node settles, and a tool's debug commands are not part of the log", async () => {
+  test("start lines, live checks, groups with each node's log, plain lines for what did not run, annotations, the default summary and the closing recap; a cached node never starts, the last run is known from the first start, and a tool's debug commands are not part of the log", async () => {
     const { fs, rec, failed, markdown } = await play();
 
     assert.deepEqual(
@@ -158,11 +166,11 @@ describe("reporter", () => {
         annotations: rec.annotations,
         checks: rec.checks,
         failed,
-        lastRun: await parsed(fs.readText("/cas/last-run.json")),
+        durations: await parsed(fs.readText(DURATIONS_FILE)),
       },
       {
         log: [
-          "▷ a",
+          "▷ a (last run 500ms)",
           { title: "✔\uFE0E a (1.0s)", lines: ["ok line 1", "warned", "ok line 2"] },
           { title: "✔\uFE0E b (cached)", lines: ["from an earlier run"] },
           "▷ c (last run 3.0s)",
@@ -211,7 +219,7 @@ describe("reporter", () => {
           },
         ],
         failed: 2,
-        lastRun: { durations: { a: 1000, b: 2000, c: 1000 } },
+        durations: { durations: { a: 1000, b: 2000, c: 1000 } },
       },
     );
 

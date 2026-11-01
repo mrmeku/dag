@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import assert from "node:assert/strict";
 
-import { MemCache, type CacheEntry, type DagFs } from "./cache.ts";
+import type { CacheEntry, DagFs } from "./cache.ts";
 import { actionsFor, defineAction, type Action } from "./define-action.ts";
 import { execute } from "./execute.ts";
 import {
@@ -91,7 +91,7 @@ function channel(videoIds: string[]) {
 
 function setup() {
   const fs = createMemoryDagFs();
-  return { fs, ctx: { ports: { fs }, cache: new MemCache(), fs, casBaseDir: "/cas", clock: Date } };
+  return { fs, ctx: { ports: { fs }, fs, cacheDir: "/cache", clock: Date } };
 }
 
 const refusal = (declare: () => unknown) => {
@@ -673,10 +673,9 @@ export function wrongDeclarationsDoNotCompile() {
   feed.addNode(new Graph(), {});
   // @ts-expect-error ports that do not satisfy the graph's
   void execute(g, {
-    cache: new MemCache(),
     fs: createMemoryDagFs(),
     clock: Date,
-    casBaseDir: "/cas",
+    cacheDir: "/cache",
   });
   // @ts-expect-error a graph typed as one that needs no ports: <P extends Ports>(graph: Graph<P>)
   const portlessGraph: Graph<unknown, Meta> = g;

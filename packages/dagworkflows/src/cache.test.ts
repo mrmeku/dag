@@ -1,18 +1,24 @@
-import { execute, Graph, MemCache, namedOutput, type Result } from "@mrmeku/dagraph";
+import { execute, Graph, namedOutput, type Result } from "@mrmeku/dagraph";
 import assert from "node:assert/strict";
 import { describe, test } from "node:test";
 import { cache } from "./cache.ts";
 import { addCommand } from "./commands.ts";
 import type { Ports } from "./ports.ts";
 import { createActionsCacheStore, createMemoryCacheStore } from "./ports/cache-store.ts";
-import { createTestPorts } from "./ports/memory.ts";
-import { logPath } from "./steps.ts";
+import { createOutputRecorder, createTestPorts } from "./ports/memory.ts";
 
-const CAS = "/cas";
+const CACHE_DIR = "/cache";
 
-/** Executes `graph` under `ports`, on a cache of its own unless given one. */
-const executeUnder = (graph: Graph<Ports>, ports: Ports, store = new MemCache()) =>
-  execute(graph, { ports, cache: store, fs: ports.fs, clock: Date, casBaseDir: CAS });
+/** Executes `graph` under `ports`, over the cache in their fs, with what each node printed. */
+async function executeUnder(graph: Graph<Ports>, ports: Ports) {
+  const output = createOutputRecorder();
+  const results = await execute(
+    graph,
+    { ports, fs: ports.fs, clock: Date, cacheDir: CACHE_DIR },
+    { onEvent: output.onEvent },
+  );
+  return { results, printed: output.printed };
+}
 
 /**
  * A cache service as `@actions/cache` reaches it: a restore matches the primary key, then each
@@ -31,17 +37,21 @@ function serviceOf(keys: string[]) {
 }
 
 /** A save's `saved` and log once it ran, or the message it failed with. */
-async function saveOutcome(fs: Ports["fs"], save: Result | undefined): Promise<unknown> {
+async function saveOutcome(
+  fs: Ports["fs"],
+  save: Result | undefined,
+  log: string | undefined,
+): Promise<unknown> {
   assert.ok(save, "a save");
   if (save.status === "failed") return save.error.message;
   assert.ok(save.status === "done", save.status);
   const saved: unknown = JSON.parse(await fs.readText(namedOutput(save.outputs, "saved")));
-  return { saved, log: await fs.readText(logPath(CAS, save.actionKey)) };
+  return { saved, log };
 }
 
 describe("cache", () => {
   test("the restore logs what it found and has no outputs, so its dependent keys alike after an exact hit, a restore-key hit and a miss", async () => {
-    const { ports: p, fs } = createTestPorts();
+    const { ports: p } = createTestPorts();
     const graph = new Graph<Ports>();
     const cas = cache(
       graph,
@@ -54,18 +64,14 @@ describe("cache", () => {
       inputs: { version: "lint-v1" },
       deps: { cas: cas.restore },
     });
-    const store = new MemCache();
     const runs = [];
     for (const held of [["cas-2"], ["cas-1"], []]) {
       const cacheStore = createMemoryCacheStore(held);
-      const results = await executeUnder(graph, { ...p, cacheStore }, store);
+      const { results, printed } = await executeUnder(graph, { ...p, cacheStore });
       const restore = results.find((r) => r.name === "restore:cas");
       assert.ok(restore?.status === "done", "restore:cas");
       runs.push({
-        restore: {
-          outputs: restore.outputs,
-          log: await fs.readText(logPath(CAS, restore.actionKey)),
-        },
+        restore: { outputs: restore.outputs, log: printed.get("restore:cas") },
         lint: results.find((r) => r.name === "lint")?.status,
       });
     }
@@ -85,12 +91,14 @@ describe("cache", () => {
     p.cacheStore = createActionsCacheStore(service);
     const graph = new Graph<Ports>();
     cache(graph, { name: "cas", path: [".cas"], key: "cas-1" }, await p.host.context()).save();
-    const store = new MemCache();
-    const saveRun = async () =>
-      saveOutcome(
+    const saveRun = async () => {
+      const { results, printed } = await executeUnder(graph, p);
+      return saveOutcome(
         fs,
-        (await executeUnder(graph, p, store)).find((r) => r.name === "save:cas"),
+        results.find((r) => r.name === "save:cas"),
+        printed.get("save:cas"),
       );
+    };
     const first = await saveRun();
     const again = await saveRun();
     service.entries.pop();
@@ -131,9 +139,15 @@ describe("cache", () => {
       ["invalid", "in,valid"],
     ] as const)
       cache(graph, { name, path: [name], key }, ctx).save();
-    const saves = (await executeUnder(graph, p)).filter((r) => r.name.startsWith("save:"));
+    const { results, printed } = await executeUnder(graph, p);
+    const saves = results.filter((r) => r.name.startsWith("save:"));
     const outcomes = await Promise.all(
-      saves.map(async (r): Promise<[string, unknown]> => [r.name, await saveOutcome(fs, r)]),
+      saves.map(
+        async (r): Promise<[string, unknown]> => [
+          r.name,
+          await saveOutcome(fs, r, printed.get(r.name)),
+        ],
+      ),
     );
     assert.deepEqual(
       {
@@ -156,7 +170,7 @@ describe("cache", () => {
 
   test("a restore that fails warns and misses, so what depends on it runs; an invalid key fails it", async () => {
     const service = createMemoryCacheStore();
-    const { ports: p, fs } = createTestPorts({ cacheStore: service });
+    const { ports: p } = createTestPorts({ cacheStore: service });
     service.restore = async (_paths, key) => {
       if (key === "in,valid")
         throw Object.assign(new Error("Key Validation Error: in,valid cannot contain commas."), {
@@ -173,18 +187,18 @@ describe("cache", () => {
     );
     cache(graph, { name: "invalid", path: ["x"], key: "in,valid" }, ctx);
     addCommand(graph, { name: "lint", cmd: ["lint"], deps: { cas: cas.restore } });
-    const results = await executeUnder(graph, p);
-    const outcomeOf = async (name: string) => {
+    const { results, printed } = await executeUnder(graph, p);
+    const outcomeOf = (name: string) => {
       const result = results.find((r) => r.name === name);
       assert.ok(result, name);
       if (result.status === "failed") return result.error.message;
-      return { status: result.status, log: await fs.readText(logPath(CAS, result.actionKey)) };
+      return { status: result.status, log: printed.get(name) ?? "" };
     };
     assert.deepEqual(
       {
-        restore: await outcomeOf("restore:cas"),
-        lint: await outcomeOf("lint"),
-        invalid: await outcomeOf("restore:invalid"),
+        restore: outcomeOf("restore:cas"),
+        lint: outcomeOf("lint"),
+        invalid: outcomeOf("restore:invalid"),
       },
       {
         restore: {

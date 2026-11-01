@@ -32,31 +32,11 @@ export const actionRan = <R extends Result>(
 
 /**
  * Whether a node's action ran to its end: built, or failed once its action ran; never a cache hit,
- * nor a node a cancel stopped while its action ran. Its duration is what last-run.json keeps, and
- * what the summary counts as busy and draws on its timeline.
+ * nor a node a cancel stopped while its action ran. Its duration is what the durations file keeps,
+ * and what the summary counts as busy and draws on its timeline.
  */
 export const ranToItsEnd = (result: Result): boolean =>
   result.status !== "cancelled" && actionRan(result);
-
-/**
- * The key whose CAS log holds what a node printed: the one it ran or found cached. None for a node
- * whose action did not run, though one that failed or was cancelled may have looked its key up.
- */
-export function logKeyOf(nodeState: NodeState): string | undefined {
-  switch (nodeState.status) {
-    case "done":
-    case "cached":
-      return nodeState.result.actionKey;
-    case "failed":
-    case "cancelled":
-      return actionRan(nodeState.result) ? nodeState.result.actionKey : undefined;
-    case "pending":
-    case "dispatched":
-    case "running":
-    case "dep-failed":
-      return undefined;
-  }
-}
 
 /**
  * How long a node took, at least 1 ms: the engine's `elapsed` for a node whose action ran, and a

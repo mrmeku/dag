@@ -8,7 +8,7 @@ export interface NodeReport {
   start?: number;
   /** At least 1 ms: the engine's `elapsed` once its action ran, or a cache hit's from dispatch to result. */
   duration?: number;
-  /** Its duration the last time it was built, or failed once its action ran, from last-run.json. */
+  /** Its duration the last time it was built, or failed once its action ran, from the durations file. */
   previous?: number;
 }
 

@@ -5,7 +5,19 @@
  */
 import { createHash } from "node:crypto";
 import { createReadStream } from "node:fs";
-import { access, mkdir, readdir, readFile, rename, rm, writeFile } from "node:fs/promises";
+import {
+  access,
+  chmod,
+  lstat,
+  mkdir,
+  open,
+  readdir,
+  readFile,
+  rename,
+  rm,
+  utimes,
+  writeFile,
+} from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 import type { DagFs } from "../cache.ts";
 import { isMissingFileError } from "../utils.ts";
@@ -36,6 +48,17 @@ export function createNodeDagFs(): DagFs {
     },
     rename,
     remove: (path) => rm(path, { recursive: true, force: true }),
+    lstat,
+    chmod,
+    fsync: async (path) => {
+      const file = await open(path, "r");
+      try {
+        await file.sync();
+      } finally {
+        await file.close();
+      }
+    },
+    utimes,
     readdir: (dir) =>
       readdir(dir).catch((e: unknown) => {
         if (isMissingFileError(e)) return [];

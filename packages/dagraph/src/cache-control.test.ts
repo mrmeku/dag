@@ -1,7 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import assert from "node:assert/strict";
 
-import { forcedCache, MemCache } from "./cache.ts";
 import { actionsFor } from "./define-action.ts";
 import { execute } from "./execute.ts";
 import { dep, Graph, nodeInputs, type ActionContext } from "./graph/index.ts";
@@ -85,7 +84,7 @@ function setup() {
   const ports: Ports = { fs: createMemoryDagFs(), ran: [], source: { id: "abc", bitrate: 128 } };
   return {
     ports,
-    ctx: { ports, cache: new MemCache(), fs: ports.fs, clock: Date, casBaseDir: "/cas" },
+    ctx: { ports, fs: ports.fs, clock: Date, cacheDir: "/cache" },
   };
 }
 
@@ -127,7 +126,7 @@ describe("cache control", () => {
     ports.source = { id: "abc", bitrate: 320 };
     const healed = await execute(buildGraph(), {
       ...ctx,
-      cache: forcedCache(ctx.cache, sourceKey),
+      forcedKeys: sourceKey,
     });
     const healRan = [...ports.ran].sort();
 
@@ -138,7 +137,7 @@ describe("cache control", () => {
     // A different video behind the same node: the transcript writes other words.
     ports.ran = [];
     ports.source = { id: "xyz", bitrate: 320 };
-    await execute(buildGraph(), { ...ctx, cache: forcedCache(ctx.cache) });
+    await execute(buildGraph(), { ...ctx, forcedKeys: "all" });
 
     const transcriptHash = (results: Result[]) =>
       results.flatMap((r) => (r.name === "transcript" && isSucceeded(r) ? [r.contentHash] : []));

@@ -4,7 +4,7 @@ import { createNodeDagFs } from "@mrmeku/dagraph/fs/node";
 import { resolve } from "node:path";
 import { check, lock } from "proper-lockfile";
 import {
-  DEFAULT_CAS_DIR,
+  DEFAULT_CACHE_DIR,
   DEFAULT_FAILURES_REPORT_PATH,
   DEFAULT_HISTORY_DIR,
   DEFAULT_LOG_DIR,
@@ -29,7 +29,7 @@ const withCommonOptions = <Options extends OptionValues>(cmd: Command<[], Option
       "--only <names>",
       "comma-separated nodes to run, with the post steps of what runs, each with its dependencies",
     )
-    .option("--cas-dir <dir>", "local content-addressed cache directory", DEFAULT_CAS_DIR)
+    .option("--cache-dir <dir>", "local content-addressed cache directory", DEFAULT_CACHE_DIR)
     .option(
       "--history-dir <dir>",
       "where each run records what started and settled, in a history of its own",
@@ -74,7 +74,7 @@ async function runOptionsFor(
       lockfile,
       env: process.env,
     },
-    casBaseDir: opts.casDir,
+    cacheDir: opts.cacheDir,
     historyDir: opts.historyDir,
     ...(only && { only }),
     ...(def.schedulerOptions && { schedulerOptions: def.schedulerOptions }),
@@ -86,7 +86,7 @@ const runCommand = withCommonOptions(
   program
     .command("run")
     .description("Execute a workflow file that default-exports defineWorkflow(...)")
-    .option("--force", "ignore the cache for this run")
+    .option("--force", "run every node: no lookup in the cache dir hits")
     .addOption(
       new Option("--output-style <style>", "terminal output (default: picked from the terminal)")
         .choices(OUTPUT_STYLES)

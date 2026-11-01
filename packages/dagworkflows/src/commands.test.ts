@@ -1,4 +1,12 @@
-import { actionsFor, execute, file, Graph, MemCache, settled, type Result } from "@mrmeku/dagraph";
+import {
+  actionsFor,
+  execute,
+  file,
+  Graph,
+  settled,
+  type ExecListener,
+  type Result,
+} from "@mrmeku/dagraph";
 import { createNodeDagFs } from "@mrmeku/dagraph/fs/node";
 import assert from "node:assert/strict";
 import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
@@ -6,21 +14,19 @@ import { tmpdir } from "node:os";
 import { join, relative } from "node:path";
 import { describe, test } from "node:test";
 import { addCommand } from "./commands.ts";
-import { LAST_RUN_FILE } from "./config.ts";
 import type { ExecResult, Ports } from "./ports.ts";
-import { createTestPorts } from "./ports/memory.ts";
+import { createOutputRecorder, createTestPorts } from "./ports/memory.ts";
 import { createExec } from "./ports/real.ts";
 import { runWorkflow } from "./runner.ts";
-import { logPath } from "./step-records.ts";
 
-const CAS = "/cas";
+const CACHE_DIR = "/cache";
 const newGraph = () => new Graph<Ports>();
 const executeUnder = (
   graph: Graph<Ports>,
   ports: Ports,
-  cache = new MemCache(),
-  casBaseDir = CAS,
-) => execute(graph, { ports, cache, fs: ports.fs, clock: Date, casBaseDir });
+  cacheDir = CACHE_DIR,
+  onEvent: ExecListener = () => {},
+) => execute(graph, { ports, fs: ports.fs, clock: Date, cacheDir }, { onEvent });
 const exited = (code: number, output = ""): ExecResult => ({
   ended: "exited",
   code,
@@ -47,7 +53,7 @@ const found = <T>(value: T | undefined, what: string): T => {
 };
 
 describe("a command", () => {
-  test("takes a dep's output as its own argument or env value, its path when it starts, and its own out and outputDir; a nonzero exit fails it, and its log sits beside its output", async () => {
+  test("takes a dep's output as its own argument or env value, its path when it starts, and its own out and outputDir; a nonzero exit fails it, and it prints what its command prints", async () => {
     const seen: Array<{ cmd: string[]; env: Record<string, string | undefined> | undefined }> = [];
     const { ports, fs } = createTestPorts({
       exec: {
@@ -55,7 +61,9 @@ describe("a command", () => {
           seen.push({ cmd, env: opts?.env });
           const [program, path] = cmd;
           if (program === "pack" && path) await fs.writeText(path, "bytes");
-          return program === "bad" ? exited(1, "err\n") : exited(0, "hello\n");
+          const result = program === "bad" ? exited(1, "err\n") : exited(0, "hello\n");
+          opts?.onOutput?.(result.output);
+          return result;
         },
       },
     });
@@ -72,11 +80,12 @@ describe("a command", () => {
       env: ({ pack, outputDir }) => ({ TARBALL: pack.tarball, OUT: outputDir, MODE: "dry" }),
     });
     addCommand(graph, { name: "bad", cmd: ["bad", "--flag"] });
-    const results = byName(await executeUnder(graph, ports));
+    const output = createOutputRecorder();
+    const results = byName(await executeUnder(graph, ports, CACHE_DIR, output.onEvent));
     const packed = found(results.get("pack"), "pack's result");
-    const publishKey = found(results.get("publish"), "publish's result").actionKey;
     const tarball =
-      packed.status === "done" && `${CAS}/${packed.actionKey}/out-${packed.contentHash}/pkg.tgz`;
+      packed.status === "done" &&
+      `${CACHE_DIR}/v1/${packed.actionKey}/${packed.contentHash}/pkg.tgz`;
     const publish = found(
       seen.find((s) => s.cmd[0] === "publish"),
       "the publish command",
@@ -88,7 +97,7 @@ describe("a command", () => {
           ...publish,
           env: { ...publish.env, OUT: publish.env?.OUT?.replace(/[0-9a-f-]{36}$/, "<uuid>") },
         },
-        publishLog: await fs.readText(logPath(CAS, publishKey)),
+        publishLog: output.printed.get("publish"),
         bad: errorOf(results.get("bad")),
       },
       {
@@ -97,7 +106,7 @@ describe("a command", () => {
           cmd: ["publish", tarball],
           env: {
             TARBALL: tarball,
-            OUT: `${CAS}/${publishKey}/tmp-<uuid>`,
+            OUT: `${CACHE_DIR}/tmp/<uuid>`,
             MODE: "dry",
           },
         },
@@ -116,8 +125,7 @@ describe("a command", () => {
         },
       },
     });
-    const cache = new MemCache();
-    const statusesOf = async (packName: string, role: string, casBaseDir = CAS, at = cache) => {
+    const statusesOf = async (packName: string, role: string, cacheDir = CACHE_DIR) => {
       const graph = newGraph();
       const pack = addCommand(graph, {
         name: packName,
@@ -132,7 +140,7 @@ describe("a command", () => {
         env: (refs) => ({ TARBALL: found(refs[role], role).tarball }),
         cacheable: true,
       });
-      const results = await executeUnder(graph, ports, at, casBaseDir);
+      const results = await executeUnder(graph, ports, cacheDir);
       return {
         ...statuses(results),
         key: found(byName(results).get("publish"), "publish").actionKey,
@@ -140,8 +148,8 @@ describe("a command", () => {
     };
     const first = await statusesOf("pack", "pack");
     const { key, ...firstStatuses } = first;
-    // Another CAS directory gives every output another path, which must not change the key.
-    const { key: elsewhere } = await statusesOf("pack", "pack", "/elsewhere", new MemCache());
+    // Another cache dir gives every output another path, which must not change the key.
+    const { key: elsewhere } = await statusesOf("pack", "pack", "/elsewhere");
     const { key: _renamedKey, ...renamed } = await statusesOf("pack:renamed", "pack");
     const { key: _otherKey, ...otherRole } = await statusesOf("pack", "tarballs");
     assert.deepEqual(
@@ -215,7 +223,6 @@ describe("a command", () => {
       files: { "src/a.ts": "a" },
       exec: { run: async () => exited(0) },
     });
-    const cache = new MemCache();
     const src = { "src/a.ts": file("src/a.ts") };
     const once = async () => {
       const graph = newGraph();
@@ -225,7 +232,7 @@ describe("a command", () => {
       addCommand(graph, { name: "empty", cmd: ["empty"], inputs: {} });
       addCommand(graph, { name: "publish", cmd: ["publish"], cacheable: true });
       addCommand(graph, { name: "e2e", cmd: ["e2e"], inputs: src, cacheable: false });
-      return statuses(await executeUnder(graph, ports, cache));
+      return statuses(await executeUnder(graph, ports));
     };
     assert.deepEqual(
       [await once(), await once()],
@@ -301,24 +308,29 @@ describe("a command's paths", () => {
     });
     const results = byName(await executeUnder(graph, ports));
     const listed = found(results.get("files"), "the files node's result");
-    const dir = listed.status === "done" && `${CAS}/${listed.actionKey}/out-${listed.contentHash}`;
+    const dir =
+      listed.status === "done" && `${CACHE_DIR}/v1/${listed.actionKey}/${listed.contentHash}`;
     assert.deepEqual(seen, [["ls", `${dir}/a.txt:${dir}/b.txt`]]);
   });
 
-  test("refs reach a command as absolute paths when it starts, so one with its own cwd sees the same files under a relative CAS directory; its outputs and its manifest's paths stay relative, and its log and last-run.json sit where the CAS directory names", async () => {
+  test("refs reach a command as absolute paths when it starts, so one with its own cwd sees the same files under a relative cache directory; its outputs are absolute, and its log and durations sit where the run's options name", async () => {
     const root = mkdtempSync(join(tmpdir(), "dag-cwd-"));
     try {
       mkdirSync(join(root, "sub"));
       const fs = createNodeDagFs();
       const { ports } = createTestPorts({ exec: createExec() });
       ports.fs = fs;
-      // Relative, as the CLI's .dag/cas is.
-      const cas = relative(process.cwd(), join(root, "cas"));
+      // Relative, as the CLI's .dag/cache is.
+      const cacheDir = relative(process.cwd(), join(root, "cache"));
       const sub = relative(process.cwd(), join(root, "sub"));
+      const buildLogDir = join(root, "build-logs");
+      const durationsDir = join(root, "durations");
       const { results } = await runWorkflow({
         ports,
-        casBaseDir: cas,
+        cacheDir,
         historyDir: join(root, "history"),
+        buildLogDir,
+        durationsDir,
         implementation: async (graph) => {
           const pack = addCommand(graph, {
             name: "pack",
@@ -335,8 +347,6 @@ describe("a command's paths", () => {
           addCommand(graph, {
             name: "own",
             cwd: sub,
-            // An input makes it cacheable, so it writes a manifest.
-            inputs: { version: "own-v1" },
             shell: 'echo 1 > "$ID"',
             env: ({ out }) => ({ ID: out.id }),
             outputs: { id: "id" },
@@ -345,32 +355,24 @@ describe("a command's paths", () => {
       });
       const byNode = byName(results);
       const own = found(byNode.get("own"), "own's result");
-      const ownDir = own.status === "done" ? `${own.actionKey}/out-${own.contentHash}` : "";
+      const ownDir =
+        own.status === "done" ? `${root}/cache/v1/${own.actionKey}/${own.contentHash}` : "";
       const listKey = found(byNode.get("list"), "list's result").actionKey;
-      const manifest: unknown = JSON.parse(
-        await fs.readText(`${cas}/${own.actionKey}/manifest.json`),
-      );
       assert.deepEqual(
         {
           statuses: Object.fromEntries([...byNode].map(([name, r]) => [name, r.status])),
-          listed: await fs.readText(logPath(cas, listKey)),
+          listed: await fs.readText(`${buildLogDir}/${listKey}.log`),
           own: {
             outputs: own.status === "done" && own.outputs,
-            content: await fs.readText(`${cas}/${ownDir}/id`),
+            content: await fs.readText(`${ownDir}/id`),
           },
-          manifest,
-          lastRun: await fs.exists(`${cas}/${LAST_RUN_FILE}`),
+          durations: await fs.exists(`${durationsDir}/run.json`),
         },
         {
           statuses: { pack: "done", list: "done", own: "done" },
           listed: "bytes\n",
-          own: { outputs: { id: `${cas}/${ownDir}/id` }, content: "1\n" },
-          manifest: {
-            outputs: { id: `${cas}/${ownDir}/id` },
-            contentHash: own.status === "done" && own.contentHash,
-            outputHashes: own.status === "done" && own.outputHashes,
-          },
-          lastRun: true,
+          own: { outputs: { id: `${ownDir}/id` }, content: "1\n" },
+          durations: true,
         },
       );
     } finally {
@@ -381,7 +383,7 @@ describe("a command's paths", () => {
 
 describe("a shell task", () => {
   test("runs its string under bash -eo pipefail, where a settled dep's output is unset when the dep failed, even when inherited; a machine without bash fails the node, saying so, as a cmd task does for a program it cannot start", async () => {
-    const { ports, fs } = createTestPorts({ exec: createExec() });
+    const { ports } = createTestPorts({ exec: createExec() });
     const graph = newGraph();
     const tests = addCommand(graph, {
       name: "tests",
@@ -399,9 +401,10 @@ describe("a shell task", () => {
     addCommand(graph, { name: "no-bash", shell: "echo hi", env: { PATH: "/nonexistent" } });
     addCommand(graph, { name: "missing", cmd: ["dag-test-no-such-program"] });
     process.env["DAG_TEST_REPORT"] = "inherited";
+    const output = createOutputRecorder();
     let results: Map<string, Result>;
     try {
-      results = byName(await executeUnder(graph, ports));
+      results = byName(await executeUnder(graph, ports, CACHE_DIR, output.onEvent));
     } finally {
       delete process.env["DAG_TEST_REPORT"];
     }
@@ -409,11 +412,8 @@ describe("a shell task", () => {
       {
         statuses: Object.fromEntries([...results].map(([name, r]) => [name, r.status])),
         tests: errorOf(results.get("tests")),
-        pipe: [
-          errorOf(results.get("pipe")),
-          await fs.readText(logPath(CAS, found(results.get("pipe"), "pipe").actionKey)),
-        ],
-        report: await fs.readText(logPath(CAS, found(results.get("report"), "report").actionKey)),
+        pipe: [errorOf(results.get("pipe")), output.printed.get("pipe") ?? ""],
+        report: output.printed.get("report"),
         noBash: errorOf(results.get("no-bash")),
         missing: errorOf(results.get("missing")),
       },

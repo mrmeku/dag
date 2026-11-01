@@ -13,16 +13,17 @@ import {
   okExec,
   type RecordedHost,
 } from "./ports/memory.ts";
-import { runJob, runPost, runWorkflow } from "./runner.ts";
+import { durationsFileOf, runJob, runPost, runWorkflow } from "./runner.ts";
 import { renderStatus, renderTimeline } from "./summary.ts";
 import { defineWorkflow } from "./workflow.ts";
 
-const CAS = "/cas";
+const CACHE_DIR = "/cache";
 
 /** The lines of the first logged group whose title starts with `title`. */
 const groupLines = (log: RecordedHost["log"], title: string) =>
   log.flatMap((e) => (typeof e !== "string" && e.title.startsWith(title) ? [e.lines] : []))[0];
 const HISTORY_DIR = "/state/history";
+const DURATIONS_DIR = "/state/durations";
 
 /** The history files runs left in HISTORY_DIR, parsed. */
 const histories = async (fs: MemoryDagFs) =>
@@ -60,7 +61,8 @@ describe("cancel, then post", () => {
         if (program !== "slow")
           return { ended: "exited", code: 0, stdout: "", stderr: "", output: "", ok: true };
         return new Promise((resolve) =>
-          signalOf(opts).addEventListener("abort", () =>
+          signalOf(opts).addEventListener("abort", () => {
+            opts?.onOutput?.("killed by SIGINT\n");
             resolve({
               ended: "signalled",
               code: -1,
@@ -68,8 +70,8 @@ describe("cancel, then post", () => {
               stderr: "killed by SIGINT\n",
               output: "killed by SIGINT\n",
               ok: false,
-            }),
-          ),
+            });
+          }),
         );
       },
     };
@@ -110,7 +112,7 @@ describe("cancel, then post", () => {
       implementation: def.implementation,
       ...(def.summary && { summary: def.summary }),
       ports,
-      casBaseDir: CAS,
+      cacheDir: CACHE_DIR,
       historyDir: HISTORY_DIR,
     };
     const fastSettled = new Promise<void>((resolve) => {
@@ -172,10 +174,10 @@ describe("cancel, then post", () => {
           "▷ up:db",
           "▷ fast",
           "▷ slow",
-          "◼\uFE0E cancelled, 4 nodes not run · run · built 3 · cached 0 · failed 0 · skipped 0 · cancelled 4 · wall 15.0s",
+          "◼\uFE0E cancelled, 4 nodes not run · run · built 3 · cached 0 · failed 0 · skipped 0 · cancelled 4 · wall 19.0s",
           "post · 1 of 1 post steps owed",
           "▷ down:db",
-          "✔\uFE0E 1 node succeeded · run · post · built 1 · cached 0 · failed 0 · skipped 0 · wall 1.0s",
+          "✔\uFE0E 1 node succeeded · run · post · built 1 · cached 0 · failed 0 · skipped 0 · wall 2.0s",
         ],
         // The workflow's own section, in both passes; the post pass draws its owed steps alone.
         summaries: [
@@ -247,7 +249,7 @@ describe("runJob", () => {
         workflowFile: "ci.ts",
         summary: def.summary,
         ports,
-        casBaseDir: CAS,
+        cacheDir: CACHE_DIR,
         historyDir: HISTORY_DIR,
         only: ["slow"],
         signal: controller.signal,
@@ -264,19 +266,19 @@ describe("runJob", () => {
         log: [
           { title: "ci.ts · 3 of 4 nodes (--only slow)", lines: ["fast", "slow", "notify"] },
           "▷ fast",
-          { title: "✔\uFE0E fast (1.0s)", lines: [] },
-          // Cancelled as its start was recorded: its action never ran.
+          { title: "✔\uFE0E fast (2.0s)", lines: [] },
+          // Cancelled once it started, before its action ran.
           "▷ slow",
           "◼\uFE0E slow: cancelled",
           "◼\uFE0E notify: cancelled",
           "",
-          "◼\uFE0E cancelled, 2 nodes not run · ci.ts · built 1 · cached 0 · failed 0 · skipped 0 · cancelled 2 · wall 1.0s",
+          "◼\uFE0E cancelled, 2 nodes not run · ci.ts · built 1 · cached 0 · failed 0 · skipped 0 · cancelled 2 · wall 2.0s",
           "cancelled: slow, notify",
           { title: "post · 1 of 1 post steps owed", lines: ["notify"] },
           "▷ notify",
-          { title: "✔\uFE0E notify (1.0s)", lines: [] },
+          { title: "✔\uFE0E notify (2.0s)", lines: [] },
           "",
-          "✔\uFE0E 1 node succeeded · ci.ts · post · built 1 · cached 0 · failed 0 · skipped 0 · wall 1.0s",
+          "✔\uFE0E 1 node succeeded · ci.ts · post · built 1 · cached 0 · failed 0 · skipped 0 · wall 2.0s",
         ],
         summaries: [
           ["## ci.ts", "", "fast done", "slow cancelled", "notify cancelled", ""].join("\n"),
@@ -325,7 +327,7 @@ describe("a run killed before its post pass", () => {
           workflow.task({ name: "slow", cmd: ["slow"], deps: { db } });
         },
       }).implementation;
-      const common = { implementation, ports, casBaseDir: CAS, historyDir: HISTORY_DIR };
+      const common = { implementation, ports, cacheDir: CACHE_DIR, historyDir: HISTORY_DIR };
       /** A run of the workflow: the commands it ran, its post and start lines, and whether it failed. */
       const next = async (signal?: AbortSignal) => {
         calls.length = 0;
@@ -361,15 +363,16 @@ describe("a run killed before its post pass", () => {
             lines: ["post · 1 of 1 post steps owed", "▷ down:db"],
             failed: 1,
           },
-          // Paid, then the run starts from nothing and releases what it set up.
+          // Paid, then the run starts from nothing and releases what it set up. down:db has no
+          // last run: a run whose own pass never began writes no durations.
           paid: {
             calls: ["db stop 1", "db", "slow", "db stop 2"],
             lines: [
               "post · 1 of 1 post steps owed",
               "▷ down:db",
-              "▷ up:db (last run 1.0s)",
+              "▷ up:db (last run 2.0s)",
               "▷ slow",
-              "▷ down:db (last run 3.0s)",
+              "▷ down:db",
             ],
             failed: 0,
           },
@@ -405,7 +408,7 @@ describe("a damaged history", () => {
       implementation: (workflow) =>
         void workflow.task({ name: "lint", cmd: ["lint"], cacheable: false }),
     }).implementation;
-    const common = { implementation, ports, casBaseDir: CAS, historyDir: HISTORY_DIR };
+    const common = { implementation, ports, cacheDir: CACHE_DIR, historyDir: HISTORY_DIR };
     const running = runWorkflow(common);
     await halfWritten.promise;
     const midWrite = await histories(fs);
@@ -466,7 +469,7 @@ describe("--only", () => {
       const run = await runWorkflow({
         implementation,
         ports,
-        casBaseDir: CAS,
+        cacheDir: CACHE_DIR,
         historyDir: HISTORY_DIR,
         only,
       });
@@ -497,7 +500,7 @@ describe("--only", () => {
     );
   });
 
-  test("saves the CAS after lint alone when lint depends on its restore: the save waits for every node of the selection", async () => {
+  test("saves the cache after lint alone when lint depends on its restore: the save waits for every node of the selection", async () => {
     const service = createMemoryCacheStore();
     const { ports } = createTestPorts({ cacheStore: service });
     const events: string[] = [];
@@ -522,7 +525,7 @@ describe("--only", () => {
     const run = await runWorkflow({
       implementation,
       ports,
-      casBaseDir: CAS,
+      cacheDir: CACHE_DIR,
       historyDir: HISTORY_DIR,
       only: ["lint"],
     });
@@ -565,7 +568,7 @@ describe("--only", () => {
     const common = {
       implementation,
       ports,
-      casBaseDir: CAS,
+      cacheDir: CACHE_DIR,
       historyDir: HISTORY_DIR,
       only: ["e2e"],
     };
@@ -622,7 +625,7 @@ describe("two runs at once", () => {
         workflow.task({ name: "lint", cmd: ["lint"], cacheable: false });
       },
     }).implementation;
-    const common = { implementation, ports, casBaseDir: CAS, historyDir: HISTORY_DIR };
+    const common = { implementation, ports, cacheDir: CACHE_DIR, historyDir: HISTORY_DIR };
     const first = runWorkflow({ ...common, only: ["e2e"], signal: controller.signal });
     await e2eRunning.promise;
     await runWorkflow({ ...common, only: ["lint"] });
@@ -658,7 +661,7 @@ describe("a history's lock", () => {
         workflow.task({ name: "e2e", cmd: ["e2e"], deps: { db }, cacheable: false });
       },
     }).implementation;
-    const common = { implementation, ports, casBaseDir: CAS, historyDir: HISTORY_DIR };
+    const common = { implementation, ports, cacheDir: CACHE_DIR, historyDir: HISTORY_DIR };
     // Cancelled, then killed before its post pass.
     await runWorkflow({ ...common, signal: controller.signal });
     const [history] = await ports.fs.readdir(HISTORY_DIR);
@@ -712,7 +715,7 @@ describe("a history of another workflow", () => {
         });
       },
     }).implementation;
-    const common = { ports, casBaseDir: CAS, historyDir: HISTORY_DIR };
+    const common = { ports, cacheDir: CACHE_DIR, historyDir: HISTORY_DIR };
     await runWorkflow({
       ...common,
       implementation: a,
@@ -764,7 +767,7 @@ describe("a killed --only run", () => {
         workflow.task({ name: "e2e", cmd: ["e2e"], deps: { db }, cacheable: false });
       },
     }).implementation;
-    const common = { implementation, ports, casBaseDir: CAS, historyDir: HISTORY_DIR };
+    const common = { implementation, ports, cacheDir: CACHE_DIR, historyDir: HISTORY_DIR };
     await runWorkflow({ ...common, only: ["e2e"], signal: controller.signal });
     killed = false;
     await runWorkflow(common);
@@ -773,55 +776,48 @@ describe("a killed --only run", () => {
 });
 
 describe("logs", () => {
-  test("a run never shows half of the log a concurrent run of the same node is writing", async () => {
-    const { ports, fs, rec } = createTestPorts();
-    const aWrote = Promise.withResolvers<void>();
-    const bHalf = Promise.withResolvers<void>();
+  test("a hit never shows half of the log a concurrent run is printing", async () => {
+    const { ports, rec } = createTestPorts();
+    const bPrinted = Promise.withResolvers<void>();
     const bResume = Promise.withResolvers<void>();
-    let execs = 0;
-    let logs = 0;
-    // Run A puts its log in place first; then B's log write stops halfway while A's reporter reads.
+    // Each build prints its name; B stops halfway through its line until resumed.
+    let build = "A";
     ports.exec = {
-      run: async () => {
-        const run = ++execs === 1 ? "A" : "B";
-        if (run === "B") await aWrote.promise;
-        return {
-          ended: "exited",
-          code: 0,
-          stdout: "",
-          stderr: "",
-          output: `${run} output\n`,
-          ok: true,
-        };
-      },
-    };
-    ports.fs = {
-      ...fs,
-      writeText: async (path, content) => {
-        if (content === "B output\n") {
-          await fs.writeText(path, content.slice(0, 4));
-          bHalf.resolve();
+      run: async (_cmd, opts) => {
+        const name = build;
+        opts?.onOutput?.(`${name} out`);
+        if (name === "B") {
+          bPrinted.resolve();
           await bResume.promise;
         }
-        return fs.writeText(path, content);
-      },
-      rename: async (from, to) => {
-        await fs.rename(from, to);
-        if (to.endsWith(".log") && ++logs === 1) {
-          aWrote.resolve();
-          await bHalf.promise;
-        }
+        opts?.onOutput?.("put\n");
+        const output = `${name} output\n`;
+        return { ended: "exited", code: 0, stdout: output, stderr: "", output, ok: true };
       },
     };
     const implementation = defineWorkflow({
-      implementation: (workflow) => void workflow.task({ name: "x", cmd: ["x"], cacheable: false }),
+      implementation: (workflow) =>
+        void workflow.task({ name: "x", cmd: ["x"], inputs: { version: "x-v1" } }),
     }).implementation;
-    const common = { implementation, ports, casBaseDir: CAS, historyDir: HISTORY_DIR };
-    const runs = [runWorkflow(common), runWorkflow(common)];
-    await Promise.race(runs);
+    const common = { implementation, ports, cacheDir: CACHE_DIR, historyDir: HISTORY_DIR };
+    await runWorkflow(common);
+    build = "B";
+    const forced = runWorkflow({ ...common, force: true });
+    await bPrinted.promise;
+    await runWorkflow(common);
     bResume.resolve();
-    await Promise.all(runs);
-    assert.deepEqual(groupLines(rec.log, `${STATUS_ICON.done} x`), ["A output"]);
+    await forced;
+    await runWorkflow(common);
+    assert.deepEqual(
+      rec.log.flatMap((e) => (typeof e !== "string" && e.title.includes(" x (") ? [e.lines] : [])),
+      [
+        ["A output"],
+        // A hit while B prints.
+        ["A output"],
+        ["B output"],
+        ["B output"],
+      ],
+    );
   });
 });
 
@@ -850,7 +846,7 @@ describe("progress", () => {
     await runWorkflow({
       implementation: def.implementation,
       ports,
-      casBaseDir: CAS,
+      cacheDir: CACHE_DIR,
       historyDir: HISTORY_DIR,
     });
     assert.deepEqual(
@@ -859,17 +855,17 @@ describe("progress", () => {
         "2 nodes",
         "▷ slow",
         "▷ fast",
-        "✔\uFE0E fast (1.0s)",
-        "✔\uFE0E slow (4.0s)",
+        "✔\uFE0E fast (2.0s)",
+        "✔\uFE0E slow (6.0s)",
         "",
-        "✔\uFE0E all 2 nodes succeeded · run · built 2 · cached 0 · failed 0 · skipped 0 · wall 4.0s",
+        "✔\uFE0E all 2 nodes succeeded · run · built 2 · cached 0 · failed 0 · skipped 0 · wall 6.0s",
       ],
     );
   });
 });
 
 describe("a step's time", () => {
-  test("runs from its action's start, never its wait for its group's slot: in the log, the check runs, last-run.json, the timeline and the parallelism", async () => {
+  test("runs from its action's start, never its wait for its group's slot: in the log, the check runs, the durations file, the timeline and the parallelism", async () => {
     let now = 0;
     const { ports, fs, rec } = createTestPorts({
       clock: clockAt(() => now),
@@ -895,8 +891,9 @@ describe("a step's time", () => {
       schedulerOptions: def.schedulerOptions,
       summary: def.summary,
       ports,
-      casBaseDir: CAS,
+      cacheDir: CACHE_DIR,
       historyDir: HISTORY_DIR,
+      durationsDir: DURATIONS_DIR,
     });
     assert.deepEqual(
       {
@@ -904,7 +901,7 @@ describe("a step's time", () => {
         checks: rec.checks
           .filter((c) => c.status === "completed")
           .map((c) => [c.name, c.startedAt, c.completedAt]),
-        lastRun: await parsed(fs, `${CAS}/last-run.json`),
+        durations: await parsed(fs, `${DURATIONS_DIR}/run.json`),
         summary: rec.summaries,
       },
       {
@@ -914,7 +911,7 @@ describe("a step's time", () => {
           ["b", "1970-01-01T00:00:01.000Z", "1970-01-01T00:00:02.000Z"],
           ["c", "1970-01-01T00:00:02.000Z", "1970-01-01T00:00:03.000Z"],
         ],
-        lastRun: { durations: { a: 1000, b: 1000, c: 1000 } },
+        durations: { durations: { a: 1000, b: 1000, c: 1000 } },
         summary: [
           [
             "## run",
@@ -958,7 +955,7 @@ describe("cancel during a save", () => {
         workflow.cache({ name: "cas", path: [".cas"], key: "cas-1" }).save();
       },
     }).implementation;
-    const common = { implementation, ports, casBaseDir: CAS, historyDir: HISTORY_DIR };
+    const common = { implementation, ports, cacheDir: CACHE_DIR, historyDir: HISTORY_DIR };
     const run = await runWorkflow({ ...common, signal: controller.signal });
     const post = await runPost(common);
     const status = (rs: { name: string; status: string }[]) =>
@@ -988,7 +985,8 @@ describe("timeoutMs", () => {
       run: (cmd, opts) =>
         cmd[0] === "hang"
           ? new Promise((resolve) =>
-              signalOf(opts).addEventListener("abort", () =>
+              signalOf(opts).addEventListener("abort", () => {
+                opts?.onOutput?.("partial\n");
                 resolve({
                   ended: "exited",
                   code: 0,
@@ -996,8 +994,8 @@ describe("timeoutMs", () => {
                   stderr: "",
                   output: "partial\n",
                   ok: true,
-                }),
-              ),
+                });
+              }),
             )
           : okExec.run(cmd, opts),
     };
@@ -1011,7 +1009,7 @@ describe("timeoutMs", () => {
           workflow.task({ name: "report", cmd: ["ok"], inputs, deps: { test: settled(test) } });
         },
       }).implementation;
-    const common = { ports, casBaseDir: CAS, historyDir: HISTORY_DIR };
+    const common = { ports, cacheDir: CACHE_DIR, historyDir: HISTORY_DIR };
     const first = await runWorkflow({ ...common, implementation: implementationFor(600_000) });
     const second = await runWorkflow({ ...common, implementation: implementationFor(1_200_000) });
     const status = (rs: { name: string; status: string }[]) =>
@@ -1045,7 +1043,7 @@ describe("timeoutMs", () => {
 });
 
 describe("secrets", () => {
-  test("a command inherits the whole environment, on GitHub the runner's credentials and the action's inputs too; nothing a command prints lands in the CAS", async () => {
+  test("a command inherits the whole environment, on GitHub the runner's credentials and the action's inputs too", async () => {
     const env = {
       NPM_TOKEN: "npm-s3cret",
       GITHUB_TOKEN: "ghs-token",
@@ -1053,7 +1051,7 @@ describe("secrets", () => {
       INPUT_WORKFLOW: "scripts/ci.ts",
       GITHUB_ACTIONS: "true",
     };
-    const { ports, fs } = createTestPorts({ env });
+    const { ports } = createTestPorts({ env });
     const seen: Array<Record<string, string | undefined> | undefined> = [];
     ports.exec = {
       run: async (_cmd, opts) => {
@@ -1065,11 +1063,137 @@ describe("secrets", () => {
     const implementation = defineWorkflow({
       implementation: (workflow) => void workflow.task({ name: "publish", cmd: ["publish"] }),
     }).implementation;
-    await runWorkflow({ implementation, ports, casBaseDir: CAS, historyDir: HISTORY_DIR });
-    const inCas = [...fs.files]
-      .filter(([path, data]) => path.startsWith(`${CAS}/`) && String(data).includes("s3cret"))
-      .map(([path]) => path);
+    await runWorkflow({ implementation, ports, cacheDir: CACHE_DIR, historyDir: HISTORY_DIR });
     // createExec merges what the step sets over process.env, so nothing set here is inherited.
-    assert.deepEqual({ seen, inCas }, { seen: [{}], inCas: [] });
+    assert.deepEqual(seen, [{}]);
+  });
+});
+
+describe("the durations file", () => {
+  const durationsFile = `${DURATIONS_DIR}/ci.ts.json`;
+  test("is named by the workflow file's path from the working directory, inside the durations dir", () => {
+    const fileOf = (workflowFile?: string) =>
+      durationsFileOf({ ...(workflowFile && { workflowFile }) });
+    assert.deepEqual(
+      {
+        ci: fileOf("scripts/ci.ts"),
+        sameCi: fileOf("./scripts/../scripts/ci.ts"),
+        release: fileOf("scripts/release.ts"),
+        outside: fileOf("../other/ci.ts"),
+        none: fileOf(),
+      },
+      {
+        ci: ".dag/durations/scripts/ci.ts.json",
+        sameCi: ".dag/durations/scripts/ci.ts.json",
+        release: ".dag/durations/scripts/release.ts.json",
+        outside: ".dag/durations/%2E%2E/other/ci.ts.json",
+        none: ".dag/durations/run.json",
+      },
+    );
+  });
+
+  test("a cache with no path saves the run's cache and durations dirs, this run's durations in them", async () => {
+    let now = 0;
+    const { ports, fs, rec } = createTestPorts({ clock: clockAt(() => now) });
+    ports.exec = {
+      run: async (cmd, opts) => {
+        now += 1000;
+        return okExec.run(cmd, opts);
+      },
+    };
+    let saved: unknown;
+    ports.cacheStore = {
+      restore: async (_paths, key) => {
+        await fs.writeText(durationsFile, JSON.stringify({ durations: { lint: 2000, old: 500 } }));
+        return key;
+      },
+      save: async (paths) => {
+        saved = { paths, file: await parsed(fs, durationsFile) };
+        return true;
+      },
+    };
+    const { implementation } = defineWorkflow({
+      implementation: (workflow) => {
+        const cache = workflow.cache({ key: "k" });
+        workflow.task({ name: "lint", cmd: ["lint"], deps: { cache: cache.restore } });
+        cache.save();
+      },
+    });
+    await runWorkflow({
+      implementation,
+      workflowFile: "ci.ts",
+      ports,
+      cacheDir: CACHE_DIR,
+      historyDir: HISTORY_DIR,
+      durationsDir: DURATIONS_DIR,
+    });
+    assert.deepEqual(
+      {
+        lintStart: rec.log.find((e) => typeof e === "string" && e.startsWith("▷ lint")),
+        saved,
+      },
+      {
+        lintStart: "▷ lint (last run 2.0s)",
+        saved: {
+          paths: [CACHE_DIR, DURATIONS_DIR],
+          file: { durations: { lint: 1000, old: 500, "restore:cache": 1 } },
+        },
+      },
+    );
+  });
+
+  test("a run that first pays an earlier run's posts writes no durations before its restore, and still reads the one it brings", async () => {
+    const { ports, fs, rec } = createTestPorts();
+    const controller = new AbortController();
+    ports.exec = {
+      run: async (cmd, opts) => {
+        // The first run is cancelled while slow runs, so it owes down:db.
+        if (cmd[0] === "slow") controller.abort();
+        return okExec.run(cmd, opts);
+      },
+    };
+    let durationsThere: boolean | undefined;
+    ports.cacheStore = {
+      restore: async (_paths, key) => {
+        durationsThere = await fs.exists(durationsFile);
+        await fs.writeText(durationsFile, JSON.stringify({ durations: { slow: 7000 } }));
+        return key;
+      },
+      save: async () => true,
+    };
+    const { implementation } = defineWorkflow({
+      implementation: (workflow) => {
+        const cache = workflow.cache({ path: [CACHE_DIR, DURATIONS_DIR], key: "k" });
+        const db = workflow.task({
+          name: "up:db",
+          cmd: ["db", "start"],
+          post: { name: "down:db", cmd: ["db", "stop"] },
+        });
+        workflow.task({ name: "slow", cmd: ["slow"], deps: { cache: cache.restore, db } });
+        cache.save();
+      },
+    });
+    const run = (signal?: AbortSignal) =>
+      runWorkflow({
+        implementation,
+        workflowFile: "ci.ts",
+        ports,
+        cacheDir: CACHE_DIR,
+        historyDir: HISTORY_DIR,
+        durationsDir: DURATIONS_DIR,
+        ...(signal && { signal }),
+      });
+    await run(controller.signal);
+    // As a clean checkout leaves it, the history kept outside it.
+    await fs.remove(DURATIONS_DIR);
+    ports.exec = okExec;
+    await run();
+    assert.deepEqual(
+      {
+        durationsThere,
+        slowStart: rec.log.findLast((e) => typeof e === "string" && e.startsWith("▷ slow")),
+      },
+      { durationsThere: false, slowStart: "▷ slow (last run 7.0s)" },
+    );
   });
 });

@@ -5,12 +5,12 @@ import type { ExecResult, Ports } from "./ports.ts";
 import { createTestPorts } from "./ports/memory.ts";
 import { runWorkflow } from "./runner.ts";
 import { selectNodes } from "./select.ts";
-import { logPath } from "./step-records.ts";
 import { postNodes } from "./steps.ts";
 import { defineWorkflow } from "./workflow.ts";
 
-const CAS = "/cas";
+const CACHE_DIR = "/cache";
 const HISTORY_DIR = "/state/history";
+const BUILD_LOG_DIR = "/state/build-logs";
 const exited = (code: number): ExecResult => ({
   ended: "exited",
   code,
@@ -55,7 +55,7 @@ describe("a post", () => {
     const { results } = await runWorkflow({
       implementation,
       ports,
-      casBaseDir: CAS,
+      cacheDir: CACHE_DIR,
       historyDir: HISTORY_DIR,
     });
     assert.deepEqual(
@@ -115,15 +115,16 @@ describe("a post", () => {
     const { results } = await runWorkflow({
       implementation,
       ports,
-      casBaseDir: CAS,
+      cacheDir: CACHE_DIR,
       historyDir: HISTORY_DIR,
+      buildLogDir: BUILD_LOG_DIR,
     });
     const inspect = results.find((r) => r.name === "inspect:queue");
     assert.deepEqual(
       {
         statuses: statuses(results),
         envs,
-        inspectLog: inspect && (await fs.readText(logPath(CAS, inspect.actionKey))),
+        inspectLog: inspect && (await fs.readText(`${BUILD_LOG_DIR}/${inspect.actionKey}.log`)),
       },
       {
         statuses: {
@@ -165,7 +166,7 @@ describe("a post", () => {
     const { results } = await runWorkflow({
       implementation,
       ports,
-      casBaseDir: CAS,
+      cacheDir: CACHE_DIR,
       historyDir: HISTORY_DIR,
     });
     assert.deepEqual(
@@ -206,7 +207,7 @@ describe("a post", () => {
     const { results } = await runWorkflow({
       implementation,
       ports,
-      casBaseDir: CAS,
+      cacheDir: CACHE_DIR,
       historyDir: HISTORY_DIR,
     });
     assert.deepEqual(
@@ -251,12 +252,13 @@ describe("a post", () => {
     const { results } = await runWorkflow({
       implementation,
       ports,
-      casBaseDir: CAS,
+      cacheDir: CACHE_DIR,
       historyDir: HISTORY_DIR,
+      buildLogDir: BUILD_LOG_DIR,
     });
     const logOf = async (name: string) => {
       const result = results.find((r) => r.name === name);
-      return result && (await ports.fs.readText(logPath(CAS, result.actionKey)));
+      return result && (await ports.fs.readText(`${BUILD_LOG_DIR}/${result.actionKey}.log`));
     };
     assert.deepEqual(
       {

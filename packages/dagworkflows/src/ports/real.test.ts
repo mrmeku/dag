@@ -4,7 +4,7 @@ import { existsSync, mkdtempSync, readdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, test } from "node:test";
-import { createExec } from "./real.ts";
+import { createExec, systemClock } from "./real.ts";
 
 /** Ignores SIGINT, then touches the file named by its argument so the test knows it is ready. */
 const IGNORES_SIGINT = [
@@ -149,9 +149,10 @@ describe("createExec output", () => {
 describe("createExec with a process left behind", () => {
   test("a command that exits while a background process holds its output settles after the drain grace, with what it printed", async () => {
     const exec = createExec({ streamDrainGraceMs: 200 });
-    const started = Date.now();
+    const clock = systemClock();
+    const started = clock.now();
     const r = await exec.run(["sh", "-c", "sleep 30 & echo $!"]);
-    const elapsed = Date.now() - started;
+    const elapsed = clock.now() - started;
     process.kill(Number(r.stdout.trim()));
     assert.deepEqual(
       {

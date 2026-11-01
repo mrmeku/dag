@@ -11,7 +11,9 @@ export {
 export type { ActionsCacheSpec, ActionsCacheTasks, SaveSpec } from "./cache.ts";
 export type { CmdTaskSpec, ShellTaskSpec } from "./commands.ts";
 export {
-  DEFAULT_CAS_DIR,
+  DEFAULT_BUILD_LOG_DIR,
+  DEFAULT_CACHE_DIR,
+  DEFAULT_DURATIONS_DIR,
   DEFAULT_EXCLUDES,
   DEFAULT_HISTORY_DIR,
   DEFAULT_SUMMARY_PATH,
@@ -89,17 +91,12 @@ export {
   runPost,
   runWorkflow,
   type Implementation,
+  type RunDataPaths,
   type RunOptions,
   type RunOutcome,
 } from "./runner.ts";
 export { selectNodes } from "./select.ts";
-export {
-  hashFiles,
-  logPath,
-  postNodes,
-  type CommandCause,
-  type UploadArtifactSpec,
-} from "./steps.ts";
+export { hashFiles, postNodes, type CommandCause, type UploadArtifactSpec } from "./steps.ts";
 export {
   DEFAULT_SUMMARY_RENDERERS,
   renderCriticalPath,

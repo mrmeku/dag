@@ -16,14 +16,14 @@ import { format, resolveConfig } from "prettier";
 import { parse } from "yaml";
 import { program } from "../packages/dagworkflows/src/cli.ts";
 import {
-  DEFAULT_CAS_DIR,
+  DEFAULT_BUILD_LOG_DIR,
+  DEFAULT_CACHE_DIR,
+  DEFAULT_DURATIONS_DIR,
   DEFAULT_FAILURES_REPORT_PATH,
   DEFAULT_HISTORY_DIR,
   DEFAULT_LOG_DIR,
   DEFAULT_SUMMARY_PATH,
-  LAST_RUN_FILE,
 } from "../packages/dagworkflows/src/config.ts";
-import { logPath } from "../packages/dagworkflows/src/step-records.ts";
 
 const DAG_DIR = fileURLToPath(new URL("..", import.meta.url));
 const PACKAGES = ["dagraph", "dagworkflows"];
@@ -111,16 +111,16 @@ function actionLines(): string[] {
 function fileLines(): string[] {
   const files: [string, string][] = [
     [
-      `${DEFAULT_CAS_DIR}/`,
+      `${DEFAULT_CACHE_DIR}/`,
       "The outputs of each task, by cache key. Cache this directory between runs.",
     ],
     [
-      logPath(DEFAULT_CAS_DIR, "<key>"),
-      "The log of each task, next to the CAS and not in it. Never cache it.",
+      `${DEFAULT_BUILD_LOG_DIR}/<key>.log`,
+      "The log of each task that built, by cache key, which a cache hit shows. Never cache it.",
     ],
     [
-      `${DEFAULT_CAS_DIR}/${LAST_RUN_FILE}`,
-      "The time of each task in the last run. The footer and the step summary compare with it.",
+      `${DEFAULT_DURATIONS_DIR}/<workflow file>.json`,
+      "The time of each task in the workflow's last run. The footer and the step summary compare with it. Cache this directory with the cache dir.",
     ],
     [
       `${DEFAULT_HISTORY_DIR}/`,

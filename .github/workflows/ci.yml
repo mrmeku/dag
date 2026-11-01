@@ -24,8 +24,8 @@ jobs:
       # The action's bundle is build output, never committed: built here from source.
       - run: bun run build:action
 
-      # Everything else is in the graph (scripts/ci.ts): an actions/cache node restores the CAS,
-      # the checks run, and another saves it on main.
+      # Everything else is in the graph (scripts/ci.ts): an actions/cache node restores the cache
+      # dir, the checks run, and another saves it on main.
       - uses: ./packages/dagworkflows/action
         with:
           workflow: scripts/ci.ts

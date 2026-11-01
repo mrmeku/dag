@@ -2,8 +2,8 @@ import {
   execute,
   file,
   Graph,
-  MemCache,
   type DepRecord,
+  type ExecListener,
   type InputRecord,
   type Result,
 } from "@mrmeku/dagraph";
@@ -15,15 +15,14 @@ import { join, relative } from "node:path";
 import { describe, test } from "node:test";
 import { addCommand } from "./commands.ts";
 import type { ExecResult, Ports } from "./ports.ts";
-import { createTestPorts } from "./ports/memory.ts";
+import { createOutputRecorder, createTestPorts } from "./ports/memory.ts";
 import { createExec } from "./ports/real.ts";
 import { runWorkflow } from "./runner.ts";
-import { logPath } from "./step-records.ts";
 import { addTask, type ActionTaskSpec } from "./task.ts";
 
-const CAS = "/cas";
-const executeUnder = (graph: Graph<Ports>, ports: Ports, cache = new MemCache()) =>
-  execute(graph, { ports, cache, fs: ports.fs, clock: Date, casBaseDir: CAS });
+const CACHE_DIR = "/cache";
+const executeUnder = (graph: Graph<Ports>, ports: Ports, onEvent: ExecListener = () => {}) =>
+  execute(graph, { ports, fs: ports.fs, clock: Date, cacheDir: CACHE_DIR }, { onEvent });
 const exited = (code: number, stdout = ""): ExecResult => ({
   ended: "exited",
   code,
@@ -64,7 +63,7 @@ const task = <
 ) => addTask(graph, spec);
 
 describe("a task", () => {
-  test("reads its inputs, deps and declared outputs as paths, runs commands through its shell and writes its own lines to its log; a declared output missing on return fails it, and what its action throws reaches the engine unchanged", async () => {
+  test("reads its inputs, deps and declared outputs as paths, runs commands through its shell and prints what they print and its own lines; a declared output missing on return fails it, and what its action throws reaches the engine unchanged", async () => {
     const commands: Array<{ cmd: string[]; env: unknown }> = [];
     const { ports, fs } = createTestPorts({
       files: { "CHANGELOG.md": "## 1.0.0" },
@@ -72,7 +71,9 @@ describe("a task", () => {
       exec: {
         run: async (cmd, opts) => {
           commands.push({ cmd, env: opts?.env });
-          return cmd[0] === "tar" ? exited(0, "a.txt\nb.txt\n") : exited(0, "2\n");
+          const result = cmd[0] === "tar" ? exited(0, "a.txt\nb.txt\n") : exited(0, "2\n");
+          opts?.onOutput?.(result.output);
+          return result;
         },
       },
     });
@@ -110,7 +111,8 @@ describe("a task", () => {
         throw new TypeError("no notes", { cause: { exitCode: 2 } });
       },
     });
-    const results = await executeUnder(graph, ports);
+    const output = createOutputRecorder();
+    const results = await executeUnder(graph, ports, output.onEvent);
     const tarball = pathOf(results, "pack", "tarball");
     const failure = (name: string) => {
       const result = resultOf(results, name);
@@ -119,7 +121,7 @@ describe("a task", () => {
     assert.deepEqual(
       {
         notes: await fs.readText(pathOf(results, "notes", "notes")),
-        log: await fs.readText(logPath(CAS, resultOf(results, "notes").actionKey)),
+        log: output.printed.get("notes"),
         commands,
         forgot: failure("forgot"),
         throws: failure("throws"),
@@ -152,19 +154,20 @@ describe("a task", () => {
     );
   });
 
-  test("gets its out and depOutputs as absolute paths, so a command it runs with its own cwd finds them under a relative CAS directory; the outputs it returns stay relative", async () => {
+  test("gets its out and depOutputs as absolute paths, so a command it runs with its own cwd finds them under a relative cache directory", async () => {
     const root = mkdtempSync(join(tmpdir(), "dag-task-cwd-"));
     try {
       mkdirSync(join(root, "sub"));
       const { ports } = createTestPorts({ exec: createExec() });
       ports.fs = createNodeDagFs();
-      // Relative, as the CLI's .dag/cas is.
-      const cas = relative(process.cwd(), join(root, "cas"));
+      // Relative, as the CLI's .dag/cache is.
+      const cacheDir = relative(process.cwd(), join(root, "cache"));
       const sub = relative(process.cwd(), join(root, "sub"));
       const { results } = await runWorkflow({
         ports,
-        casBaseDir: cas,
+        cacheDir,
         historyDir: join(root, "history"),
+        durationsDir: join(root, "durations"),
         implementation: async (graph) => {
           const pack = task(graph, {
             name: "pack",
@@ -182,19 +185,20 @@ describe("a task", () => {
         },
       });
       const copy = resultOf(results, "copy");
-      const dir = copy.status === "done" ? `${copy.actionKey}/out-${copy.contentHash}` : "";
+      const dir =
+        copy.status === "done" ? `${root}/cache/v1/${copy.actionKey}/${copy.contentHash}` : "";
       assert.deepEqual(
         {
           statuses: results.map((r) => [r.name, r.status]),
           outputs: copy.status === "done" && copy.outputs,
-          copied: await ports.fs.readText(`${cas}/${dir}/copy.txt`),
+          copied: await ports.fs.readText(`${dir}/copy.txt`),
         },
         {
           statuses: [
             ["pack", "done"],
             ["copy", "done"],
           ],
-          outputs: { copy: `${cas}/${dir}/copy.txt` },
+          outputs: { copy: `${dir}/copy.txt` },
           copied: "bytes\n",
         },
       );
@@ -205,13 +209,12 @@ describe("a task", () => {
 
   test("keys its kind: identical cached cmd tasks share one entry, a renamed cmd task hits, and a renamed action task runs again", async () => {
     const { ports } = createTestPorts({ exec: { run: async () => exited(0) } });
-    const cache = new MemCache();
     const once = async (lint: string[], notes: string) => {
       const graph = new Graph<Ports>();
       for (const name of lint)
         addCommand(graph, { name, cmd: ["lint"], inputs: { version: "lint-v1" } });
       task(graph, { name: notes, inputs: { version: "notes-v1" }, action: ({ log }) => log("x") });
-      const results = await executeUnder(graph, ports, cache);
+      const results = await executeUnder(graph, ports);
       return Object.fromEntries(results.map((r) => [r.name, r.status]));
     };
     assert.deepEqual(

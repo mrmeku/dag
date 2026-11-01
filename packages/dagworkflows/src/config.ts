@@ -1,7 +1,11 @@
 import type { Result } from "@mrmeku/dagraph";
 
-/** Local CAS directory, relative to the repo root. Carried between runs by actions/cache nodes in the workflow. */
-export const DEFAULT_CAS_DIR = ".dag/cas";
+/** dagraph's cache dir, relative to the repo root. Carried between runs by actions/cache nodes in the workflow. */
+export const DEFAULT_CACHE_DIR = ".dag/cache";
+/** Each built node's log, by action key; never cached, since any pull request can restore a cache. */
+export const DEFAULT_BUILD_LOG_DIR = ".dag/build-logs";
+/** Each workflow's node durations from its last run, in `<dir>/<workflow file>.json`. */
+export const DEFAULT_DURATIONS_DIR = ".dag/durations";
 /** Each run writes its history, its settled nodes, here as they settle; `dag post` reads them. */
 export const DEFAULT_HISTORY_DIR = ".dag/history";
 /**
@@ -110,8 +114,6 @@ export const FAILURES_REPORT_LOG_LINES = 60;
 export const SUMMARY_BUDGET_BYTES = 900_000;
 /** A node shorter than this is left out of the critical path; none as long hides the line. */
 export const CRITICAL_PATH_FLOOR_MS = 1000;
-/** Node durations from the previous run, kept beside the CAS so main's cache entry carries it. */
-export const LAST_RUN_FILE = "last-run.json";
 /**
  * A node's status as an icon, in log group titles, the summary and the DAG's labels: Nx's
  * terminal set (figures' tick and cross; its TUI's skipped and stopped), where a cache hit is a

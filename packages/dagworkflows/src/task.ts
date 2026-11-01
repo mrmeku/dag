@@ -15,7 +15,7 @@ import { isAbsolute } from "node:path";
 import { defineStep } from "./define-step.ts";
 import { errorMessage } from "./kernel/format.ts";
 import type { ExecOptions, ExecResult, Ports, WorkflowPorts } from "./ports.ts";
-import { warningLine, writeLog, type CommandCause } from "./step-records.ts";
+import { warningLine, type CommandCause } from "./step-records.ts";
 
 /** Each role of `deps` with its dep, leaving out a role whose dep is `undefined`. */
 export const depRoles = (deps: DepRecord | undefined) =>
@@ -133,7 +133,7 @@ export interface Tries {
 }
 
 /**
- * Runs `spec.action` with what a task gets, logging beside `outputDir`, then checks its outputs.
+ * Runs `spec.action` with what a task gets, then checks its outputs.
  * A failed try runs again after each of `retryDelaysMs` in turn, until one succeeds or a cancel.
  */
 async function runTask<D extends DepRecord, O extends string, I extends InputRecord<unknown>>(
@@ -145,16 +145,11 @@ async function runTask<D extends DepRecord, O extends string, I extends InputRec
   }: EngineContext<D, I>,
 ): Promise<Record<O, string>> {
   const { ports, outputDir, signal } = context;
-  let log = "";
-  const logLine = (line: string) => {
-    log += `${line}\n`;
-    output(`${line}\n`);
-  };
+  const logLine = (line: string) => output(`${line}\n`);
   let lastCommand: CommandCause | undefined;
   const failure = (message: string) => new Error(message, { cause: lastCommand });
   const exec = async (argv: string[], options: CommandOptions = {}) => {
     const result = await ports.exec.run(argv, { ...options, signal, onOutput: output });
-    log += result.output;
     lastCommand = { argv, cwd: options.cwd || ".", ended: result.ended, code: result.code };
     return result;
   };
@@ -193,31 +188,27 @@ async function runTask<D extends DepRecord, O extends string, I extends InputRec
       log: logLine,
       warn: (message) => logLine(warningLine(spec.name, message)),
     });
-  try {
-    for (let tried = 0; ; tried++)
-      try {
-        await tryAction();
-        break;
-      } catch (e) {
-        const delay = delays[tried];
-        if (delay === undefined || stopped()) throw e;
-        logLine(
-          `Try ${tried + 1} of ${delays.length + 1} failed: ${errorMessage(e)}. ` +
-            `Trying again in ${delay} ms.`,
-        );
-        await ports.clock.sleep(delay, signal);
-        if (stopped()) throw e;
-      }
-    for (const role in out)
-      if (!(await ports.fs.exists(out[role])))
-        throw failure(
-          `output "${role}" (${spec.outputs?.[role]}) was not written. Write it at ` +
-            `out.${role} before the action returns.`,
-        );
-    return out;
-  } finally {
-    await writeLog(ports.fs, outputDir, log);
-  }
+  for (let tried = 0; ; tried++)
+    try {
+      await tryAction();
+      break;
+    } catch (e) {
+      const delay = delays[tried];
+      if (delay === undefined || stopped()) throw e;
+      logLine(
+        `Try ${tried + 1} of ${delays.length + 1} failed: ${errorMessage(e)}. ` +
+          `Trying again in ${delay} ms.`,
+      );
+      await ports.clock.sleep(delay, signal);
+      if (stopped()) throw e;
+    }
+  for (const role in out)
+    if (!(await ports.fs.exists(out[role])))
+      throw failure(
+        `output "${role}" (${spec.outputs?.[role]}) was not written. Write it at ` +
+          `out.${role} before the action returns.`,
+      );
+  return out;
 }
 
 /**

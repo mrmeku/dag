@@ -2,10 +2,10 @@ import {
   execute,
   file,
   Graph,
-  MemCache,
   settled as settledDep,
   type ExecEvent,
   type JsonValue,
+  type MemoryDagFs,
   type Node,
   type Result,
 } from "@mrmeku/dagraph";
@@ -76,18 +76,32 @@ const printed = (n: Node, chunk: string): ExecEvent => ({
   occurredAt: 0,
 });
 const command = { argv: ["make", "b"], cwd: ".", ended: "exited", code: 2 };
+const BUILD_LOG_DIR = "/build-logs";
+const DURATIONS_FILE = "/durations/ci.ts.json";
+/** The last run's durations, and earlier builds' logs, which a hit shows and a failure never touches. */
 const files = {
-  "/cas/last-run.json": JSON.stringify({ durations: { a: 500, f: 1500 } }),
-  "/cas.logs/ka.log": "a out\npart",
-  "/cas.logs/kb.log": "::debug::walking\nb out\n",
-  "/cas.logs/kc.log": "c from an earlier run\n",
-  "/cas.logs/kp.log": "saved\n",
+  [DURATIONS_FILE]: JSON.stringify({ durations: { a: 500, f: 1500 } }),
+  [`${BUILD_LOG_DIR}/ka.log`]: "a from an earlier build\n",
+  [`${BUILD_LOG_DIR}/kb.log`]: "b from an earlier build\n",
+  [`${BUILD_LOG_DIR}/kc.log`]: "c from an earlier run\n",
+  [`${BUILD_LOG_DIR}/kf.log`]: "f from an earlier build\n",
 };
+const buildLogsOf = (fs: MemoryDagFs) =>
+  Object.fromEntries(
+    [...fs.files]
+      .filter(([path]) => path.startsWith(`${BUILD_LOG_DIR}/`))
+      .map(([path, file]) => [path, file.data]),
+  );
 
 /** A store, and its events as an engine stamps them: a second apart, what a node prints aside. */
-function storeOf(listeners: RunListener[], lastRunAtBegin = false) {
+function storeOf(listeners: RunListener[]) {
   const { fs } = createTestPorts({ files });
-  const store = createRunStore({ fs, casBaseDir: "/cas", listeners, lastRunAtBegin });
+  const store = createRunStore({
+    fs,
+    buildLogDir: BUILD_LOG_DIR,
+    durationsFile: DURATIONS_FILE,
+    listeners,
+  });
   const clock = steppingClock();
   return {
     fs,
@@ -103,47 +117,44 @@ function storeOf(listeners: RunListener[], lastRunAtBegin = false) {
  * What one listener hears of a run, then of a post pass begun while the run's settles are still
  * being read, re-running a node the run cancelled, its step running while they are told.
  */
-async function transcript(lastRunAtBegin: boolean) {
+async function transcript() {
   const main = { title: "main", nodes: [a, b, c, d, f, save] };
   const post = { title: "post", nodes: [save] };
   const heard: unknown[][] = [];
-  const { store, events } = storeOf(
-    [
-      {
-        begin: (pass, _run, first) => void heard.push(["begin", pass.title, first]),
-        start: (nodeState, run) =>
-          void heard.push([
-            "start",
-            nodeState.node.name,
-            nodeState.status,
-            run.lastRunDurations?.[nodeState.node.name],
-          ]),
-        settle: (nodeState, _run, log) =>
-          void heard.push([
-            "settle",
-            nodeState.node.name,
-            nodeState.status,
-            log,
-            (nodeState.status === "failed" && selectors.commandOf(nodeState.result.error)) ||
-              "no command",
-          ]),
-        finish: (pass, nodes) =>
-          void heard.push([
-            "finish",
-            pass.title,
-            nodes.map(
-              ({ node, result, duration }) => `${node.name} ${result.status} in ${duration}ms`,
-            ),
-          ]),
-        immediate: {
-          start: (nodeState) => void heard.push(["immediate.start", nodeState.node.name]),
-          output: (nodeState, lines) =>
-            void heard.push(["immediate.output", nodeState.node.name, lines]),
-        },
+  const { store, events } = storeOf([
+    {
+      begin: (pass, _run, first) => void heard.push(["begin", pass.title, first]),
+      start: (nodeState, run) =>
+        void heard.push([
+          "start",
+          nodeState.node.name,
+          nodeState.status,
+          run.lastRunDurations?.[nodeState.node.name],
+        ]),
+      settle: (nodeState, _run, log) =>
+        void heard.push([
+          "settle",
+          nodeState.node.name,
+          nodeState.status,
+          log,
+          (nodeState.status === "failed" && selectors.commandOf(nodeState.result.error)) ||
+            "no command",
+        ]),
+      finish: (pass, nodes) =>
+        void heard.push([
+          "finish",
+          pass.title,
+          nodes.map(
+            ({ node, result, duration }) => `${node.name} ${result.status} in ${duration}ms`,
+          ),
+        ]),
+      immediate: {
+        start: (nodeState) => void heard.push(["immediate.start", nodeState.node.name]),
+        output: (nodeState, lines) =>
+          void heard.push(["immediate.output", nodeState.node.name, lines]),
       },
-    ],
-    lastRunAtBegin,
-  );
+    },
+  ]);
   store.begin(main);
   events(...started(a), printed(a, "a out\npa"), printed(a, "rt"));
   events(...started(b), printed(b, "::debug::walking\nb out\n"));
@@ -191,11 +202,14 @@ async function failedRun() {
   store.begin(pass);
   events(
     ...started(a),
+    printed(a, "a out\npart"),
     built(a, "ka", 600),
     ...started(b),
+    printed(b, "::debug::walking\nb out\n"),
     failed(b, "kb", "make b exited 2", command),
     resultEvent(skippedByB),
     ...started(c),
+    printed(c, "c out\n"),
     resultEvent(cancelledRunning),
     ...started(save),
   );
@@ -204,7 +218,7 @@ async function failedRun() {
 
 describe("run store", () => {
   test("what a listener hears, then of a post pass begun while the run's settles are read", async () => {
-    assert.deepEqual(await transcript(false), [
+    assert.deepEqual(await transcript(), [
       ["immediate.start", "a"],
       ["immediate.output", "a", ["a out"]],
       ["immediate.start", "b"],
@@ -214,7 +228,8 @@ describe("run store", () => {
       ["immediate.start", "save"],
       ["immediate.start", "save"],
       ["begin", "main", true],
-      ["start", "a", "running", undefined],
+      // The last run is read as the pass begins.
+      ["start", "a", "running", 500],
       ["start", "b", "running", undefined],
       ["settle", "a", "done", ["a out", "part"], "no command"],
       ["start", "f", "running", 1500],
@@ -232,20 +247,7 @@ describe("run store", () => {
     ]);
   });
 
-  test("with lastRunAtBegin, the first start knows its last run", async () => {
-    assert.deepEqual(
-      (await transcript(true)).filter(([hook]) => hook === "start"),
-      [
-        ["start", "a", "running", 500],
-        ["start", "b", "running", undefined],
-        ["start", "f", "running", 1500],
-        ["start", "save", "running", undefined],
-        ["start", "save", "running", undefined],
-      ],
-    );
-  });
-
-  test("a pass of cache hits knows the last run by its report", async () => {
+  test("a cache hit's report runs from its dispatch to its result and carries its last run", async () => {
     const pass = { title: "main", nodes: [a] };
     const { store, events } = storeOf([]);
     store.begin(pass);
@@ -291,13 +293,19 @@ describe("run store", () => {
     ]);
   });
 
-  test("last-run.json: built and failed nodes over the last run, rewritten at the report", async () => {
-    const { fs, store, pass } = await failedRun();
-    fs.files.set("/cas/last-run.json", JSON.stringify({ durations: { a: 500 } }));
-    await store.report(pass);
-    assert.deepEqual(JSON.parse(await fs.readText("/cas/last-run.json")), {
-      durations: { a: 600, b: 1000, f: 1500 },
-    });
+  test("writeDurations alone writes built and failed nodes over the last run as it was read", async () => {
+    const { fs, store } = await failedRun();
+    const afterReport = await parsed(fs.readText(DURATIONS_FILE));
+    // As a restore that a cancel caught may leave it.
+    await fs.writeText(DURATIONS_FILE, JSON.stringify({ durations: { a: 500 } }));
+    await store.writeDurations();
+    assert.deepEqual(
+      { afterReport, written: await parsed(fs.readText(DURATIONS_FILE)) },
+      {
+        afterReport: { durations: { a: 500, f: 1500 } },
+        written: { durations: { a: 600, b: 1000, f: 1500 } },
+      },
+    );
   });
 
   test("whether a node's action ran is the engine's word: one whose key needs a missing file, and one whose start the store heard but whose record then failed, have no start, duration or last run", async () => {
@@ -309,13 +317,13 @@ describe("run store", () => {
       inputs: { "src/a.ts": file("src/a.ts") },
     });
     addCommand(graph, { name: "journal", cmd: ["journal"], deps: { hash: settledDep(hash) } });
-    const store = createRunStore({ fs, casBaseDir: "/cas", listeners: [] });
+    const store = createRunStore({ fs, durationsFile: DURATIONS_FILE, listeners: [] });
     const pass = { title: "main", nodes: graph.describe() };
     const [hashNode, journalNode] = pass.nodes;
     store.begin(pass);
     const [hashResult, journalResult] = await execute(
       graph,
-      { ports, cache: new MemCache(), fs, casBaseDir: "/cas", clock: steppingClock() },
+      { ports, fs, cacheDir: "/cache", clock: steppingClock() },
       {
         // Heard before a record of the start that fails.
         onEvent: (event) => {
@@ -324,11 +332,13 @@ describe("run store", () => {
         },
       },
     );
+    const reports = await store.report(pass);
+    await store.writeDurations();
     assert.deepEqual(
       {
         hash: store.getState().nodes.get("hash"),
-        reports: await store.report(pass),
-        lastRun: await fs.exists("/cas/last-run.json"),
+        reports,
+        durations: await fs.exists(DURATIONS_FILE),
       },
       {
         hash: {
@@ -346,89 +356,22 @@ describe("run store", () => {
           { node: hashNode, result: hashResult },
           { node: journalNode, result: journalResult },
         ],
-        lastRun: false,
+        durations: false,
       },
     );
   });
 
-  test("a node whose attempt could not be set up shows no log, though an earlier attempt left one under its key", async () => {
-    const output = "an earlier attempt\n";
-    const { ports, fs } = createTestPorts({
-      files: { "src/a.ts": "a" },
-      exec: {
-        run: async () => ({
-          ended: "exited",
-          code: 0,
-          stdout: output,
-          stderr: "",
-          output,
-          ok: true,
-        }),
-      },
-    });
-    const graph = new Graph<Ports>();
-    addCommand(graph, { name: "stage", cmd: ["stage"], inputs: { "src/a.ts": file("src/a.ts") } });
-    const [earlier] = await execute(graph, {
-      ports,
-      cache: new MemCache(),
-      fs,
-      casBaseDir: "/cas",
-      clock: Date,
-    });
-    const noAttemptDirectory = {
-      ...fs,
-      ensureDir: (path: string) =>
-        path.includes("/tmp-") ? Promise.reject(new Error("EACCES: mkdir")) : fs.ensureDir(path),
-    };
-    const store = createRunStore({ fs, casBaseDir: "/cas", listeners: [] });
-    const pass = { title: "main", nodes: graph.describe() };
-    store.begin(pass);
-    const [stage] = await execute(
-      graph,
-      {
-        ports,
-        cache: new MemCache(),
-        fs: noAttemptDirectory,
-        casBaseDir: "/cas",
-        clock: steppingClock(),
-      },
-      { onEvent: (event) => store.onEvent(event) },
-    );
-    await store.report(pass);
-    assert.deepEqual(
-      {
-        earlierLog: await fs.readText(`/cas.logs/${earlier?.actionKey ?? ""}.log`),
-        sameKey: stage?.actionKey === earlier?.actionKey,
-        stage: store.getState().nodes.get("stage"),
-      },
-      {
-        earlierLog: output,
-        sameKey: true,
-        stage: {
-          node: pass.nodes[0],
-          status: "failed",
-          result: stage,
-          endedAt: 1000,
-          unfinishedLine: "",
-          lastLine: "",
-          printed: false,
-          lineCount: 0,
-          log: [],
-        },
-      },
-    );
-  });
-
-  test("a last-run.json it cannot read is no last run", async () => {
+  test("a durations file it cannot read is no last run", async () => {
     const pass = { title: "main", nodes: [a] };
     const { fs, store, events } = storeOf([]);
-    fs.files.set("/cas/last-run.json", "{ durations");
+    await fs.writeText(DURATIONS_FILE, "{ durations");
     store.begin(pass);
     events(...started(a), built(a, "ka"));
+    await store.writeDurations();
     assert.deepEqual(
       {
         reports: await store.report(pass),
-        file: await parsed(fs.readText("/cas/last-run.json")),
+        file: await parsed(fs.readText(DURATIONS_FILE)),
       },
       {
         reports: [{ node: a, result: builtResult(a, "ka"), start: 1000, duration: 1000 }],
@@ -437,14 +380,92 @@ describe("run store", () => {
     );
   });
 
-  test("a node's log as its group prints it", async () => {
-    const { store } = await failedRun();
+  test("the durations a run writes are never its last run's, though a read before found none", async () => {
+    const pass = { title: "main", nodes: [a, b] };
+    const { fs, store, events } = storeOf([]);
+    fs.files.delete(DURATIONS_FILE);
+    store.begin(pass);
+    events(...started(a), built(a, "ka"));
+    await store.writeDurations();
+    events(...started(b), built(b, "kb"));
+    await store.writeDurations();
     assert.deepEqual(
-      { a: await store.log("a"), b: await store.log("b"), d: await store.log("d") },
+      {
+        previous: (await store.report(pass)).map((report) => report.previous),
+        file: await parsed(fs.readText(DURATIONS_FILE)),
+      },
+      { previous: [undefined, undefined], file: { durations: { a: 1000, b: 1000 } } },
+    );
+  });
+
+  test("a node's log as its group prints it: a built node's kept under its key, any other's only in the run", async () => {
+    const { fs, store } = await failedRun();
+    assert.deepEqual(
+      {
+        a: await store.log("a"),
+        b: await store.log("b"),
+        c: await store.log("c"),
+        d: await store.log("d"),
+        buildLogs: buildLogsOf(fs),
+      },
       {
         a: ["a out", "part"],
         b: ["b out", "── error ──", "make b exited 2"],
+        c: ["c out"],
         d: ["dependency b failed"],
+        buildLogs: {
+          [`${BUILD_LOG_DIR}/ka.log`]: "a out\npart",
+          [`${BUILD_LOG_DIR}/kb.log`]: "b from an earlier build\n",
+          [`${BUILD_LOG_DIR}/kc.log`]: "c from an earlier run\n",
+          [`${BUILD_LOG_DIR}/kf.log`]: "f from an earlier build\n",
+        },
+      },
+    );
+  });
+
+  test("an empty or unwritable build log leaves none, and a failed write or read warns", async () => {
+    const heard: Record<string, string[]> = {};
+    const { fs, store, events } = storeOf([
+      { settle: (nodeState, _run, log) => void (heard[nodeState.node.name] = log) },
+    ]);
+    const { writeText, readText } = fs;
+    fs.writeText = async (path, text) => {
+      if (text.includes("full")) throw new Error("ENOSPC: no space left on device, write");
+      return writeText(path, text);
+    };
+    fs.readText = async (path) => {
+      if (path.endsWith("/kc.log")) throw new Error(`EACCES: permission denied, open '${path}'`);
+      return readText(path);
+    };
+    const pass = { title: "main", nodes: [a, b, c] };
+    store.begin(pass);
+    events(...started(a), built(a, "ka"));
+    events(...started(b), printed(b, "b out\n"), printed(b, "disk full\n"), built(b, "kb"));
+    events(
+      { type: "dispatch", node: "c", occurredAt: 0 },
+      settled(c, {
+        actionKey: "kc",
+        status: "cached",
+        outputs: { out: "kc" },
+        contentHash: "h",
+        outputHashes: {},
+      }),
+    );
+    await store.report(pass);
+    const warning = (name: string, error: string) =>
+      `::warning title=${name}::its build log in ${BUILD_LOG_DIR} could not be written or read: ${error}`;
+    assert.deepEqual(
+      { heard, buildLogs: buildLogsOf(fs) },
+      {
+        heard: {
+          a: [],
+          b: ["b out", "disk full", warning("b", "ENOSPC: no space left on device, write")],
+          c: [warning("c", `EACCES: permission denied, open '${BUILD_LOG_DIR}/kc.log'`)],
+        },
+        buildLogs: {
+          [`${BUILD_LOG_DIR}/kc.log`]: "c from an earlier run\n",
+          [`${BUILD_LOG_DIR}/kf.log`]: "f from an earlier build\n",
+        },
       },
     );
   });
@@ -654,11 +675,11 @@ describe("run store", () => {
       cmd: ["publish"],
       deps: { upload, check: settledDep(check) },
     });
-    const store = createRunStore({ fs, casBaseDir: "/cas", listeners: [] });
+    const store = createRunStore({ fs, durationsFile: DURATIONS_FILE, listeners: [] });
     store.begin({ title: "main", nodes: graph.describe() });
     await execute(
       graph,
-      { ports, cache: new MemCache(), fs, casBaseDir: "/cas", clock: steppingClock() },
+      { ports, fs, cacheDir: "/cache", clock: steppingClock() },
       { onEvent: (event) => store.onEvent(event) },
     );
     const run = store.getState();

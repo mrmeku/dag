@@ -43,6 +43,7 @@ export function createExec(
   const sigintGraceMs = opts.sigintGraceMs ?? CHILD_SIGINT_GRACE_MS;
   const sigtermGraceMs = opts.sigtermGraceMs ?? CHILD_SIGTERM_GRACE_MS;
   const streamDrainGraceMs = opts.streamDrainGraceMs ?? STREAM_DRAIN_GRACE_MS;
+  const clock = systemClock();
   return {
     run: (cmd, runOpts) =>
       new Promise<ExecResult>((resolve) => {
@@ -85,8 +86,8 @@ export function createExec(
           for (const t of timers) clearTimeout(t);
           if (signal?.aborted && pid !== undefined && groupAlive(pid)) {
             kill("SIGTERM");
-            const deadline = Date.now() + sigtermGraceMs;
-            while (groupAlive(pid) && Date.now() < deadline)
+            const deadline = clock.now() + sigtermGraceMs;
+            while (groupAlive(pid) && clock.now() < deadline)
               await new Promise((r) => setTimeout(r, 20));
             kill("SIGKILL");
           }
@@ -149,6 +150,7 @@ export const syncFs: SyncFs = fs;
 
 export function systemClock(): Clock {
   return {
+    // eslint-disable-next-line no-restricted-syntax -- the real clock is what reads the wall clock
     now: () => Date.now(),
     sleep: (ms, signal) =>
       new Promise((resolve) => {

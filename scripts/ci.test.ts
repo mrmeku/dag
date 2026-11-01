@@ -6,12 +6,12 @@ import ci from "./ci.ts";
 import { processEach } from "./process-each.ts";
 
 describe("ci workflow", () => {
-  test("the CAS restore first, checks that order after it and read only their files, the CAS save on main only, after every check", async () => {
+  test("the cache restore first, checks that order after it and read only their files, the cache save on main only, after every check", async () => {
     const build = async (ref: string) => {
       const { ports } = createTestPorts({ context: { ref } });
       const graph = new Graph<Ports>();
       await createWorkflow(graph, ports, await ports.host.context()).compose(ci);
-      // The graph a run executes, where the save waits for every node that reads the CAS.
+      // The graph a run executes, where the save waits for every node that reads the cache dir.
       return { nodes: selectNodes(graph).describe(), processed: await processEach(graph, ports) };
     };
     const { nodes, processed } = await build("refs/pull/7/merge");
@@ -28,7 +28,7 @@ describe("ci workflow", () => {
       {
         names: nodes.map((n) => n.name).sort(),
         onlyOnMain: onMain.map((n) => n.name).filter((n) => !by(n)),
-        checksAfterRestore: checks.every((n) => n.deps.join() === "restore:cas"),
+        checksAfterRestore: checks.every((n) => n.deps.join() === "restore:cache"),
         typecheckReadsLintConfig: reads("typecheck", "eslint.config.ts"),
         engineTestsIgnoreRunner:
           reads("test:dagraph", "packages/dagraph/src/execute.ts") &&
@@ -37,7 +37,7 @@ describe("ci workflow", () => {
         nobodyReadsReadme: nodes.every((n) => !reads(n.name, "README.md")),
         requireAllDeps: by("require-all")?.deps.sort(),
         requireAllSettledDeps: by("require-all")?.settledDeps?.length,
-        saveCas: onMain.find((n) => n.name === "save:cas"),
+        saveCache: onMain.find((n) => n.name === "save:cache"),
         uncached: nodes.filter((n) => n.cacheable === false).map((n) => n.name),
         schedulerOptions: ci.schedulerOptions,
       },
@@ -47,12 +47,12 @@ describe("ci workflow", () => {
           "pack:dagraph",
           "pack:dagworkflows",
           "require-all",
-          "restore:cas",
+          "restore:cache",
           "test:dagraph",
           "test:dagworkflows",
           "typecheck",
         ],
-        onlyOnMain: ["save:cas"],
+        onlyOnMain: ["save:cache"],
         checksAfterRestore: true,
         typecheckReadsLintConfig: true,
         engineTestsIgnoreRunner: true,
@@ -67,12 +67,12 @@ describe("ci workflow", () => {
           "typecheck",
         ],
         requireAllSettledDeps: 6,
-        saveCas: {
-          name: "save:cas",
-          kind: "save:cas",
+        saveCache: {
+          name: "save:cache",
+          kind: "save:cache",
           cacheable: false,
           deps: [
-            "restore:cas",
+            "restore:cache",
             "pack:dagraph",
             "pack:dagworkflows",
             "typecheck",
@@ -82,7 +82,7 @@ describe("ci workflow", () => {
             "require-all",
           ],
           settledDeps: [
-            "restore:cas",
+            "restore:cache",
             "pack:dagraph",
             "pack:dagworkflows",
             "typecheck",
@@ -92,7 +92,7 @@ describe("ci workflow", () => {
             "require-all",
           ],
         },
-        uncached: ["restore:cas"],
+        uncached: ["restore:cache"],
         schedulerOptions: { maxParallelism: 4, concurrencyLimits: { test: 2 } },
       },
     );

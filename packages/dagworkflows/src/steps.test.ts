@@ -1,28 +1,23 @@
-import { execute, Graph, MemCache, namedOutput, settled } from "@mrmeku/dagraph";
+import { execute, Graph, namedOutput, settled, type ExecListener } from "@mrmeku/dagraph";
 import assert from "node:assert/strict";
 import { describe, test } from "node:test";
 import { addCommand } from "./commands.ts";
 import { errorMessage } from "./kernel/format.ts";
 import type { Ports } from "./ports.ts";
 import { createActionsArtifactStore, nullArtifactStore } from "./ports/artifact-store.ts";
-import { createTestPorts } from "./ports/memory.ts";
-import { logPath, uploadArtifact } from "./steps.ts";
+import { createOutputRecorder, createTestPorts } from "./ports/memory.ts";
+import { uploadArtifact } from "./steps.ts";
 
-const CAS = "/cas";
+const CACHE_DIR = "/cache";
 const newGraph = () => new Graph<Ports>();
 
 const parsed = async (fs: Ports["fs"], path: string): Promise<unknown> =>
   JSON.parse(await fs.readText(path));
-/** Executes `graph` under `ports`, on a cache of its own unless given one. */
-const executeUnder = (
-  graph: Graph<Ports>,
-  ports: Ports,
-  casBaseDir = CAS,
-  cache = new MemCache(),
-) => execute(graph, { ports, cache, fs: ports.fs, clock: Date, casBaseDir });
+const executeUnder = (graph: Graph<Ports>, ports: Ports, onEvent: ExecListener = () => {}) =>
+  execute(graph, { ports, fs: ports.fs, clock: Date, cacheDir: CACHE_DIR }, { onEvent });
 
 describe("uploadArtifact", () => {
-  test("dep outputs upload from the CAS rooted at their common directory; a taken name needs overwrite; a failed settled dep is undefined and left out; no service uploads nothing; the client's response is the output", async () => {
+  test("dep outputs upload from the cache dir rooted at their common directory; a taken name needs overwrite; a failed settled dep is undefined and left out; no service uploads nothing; the client's response is the output", async () => {
     const {
       ports: p,
       fs,
@@ -109,20 +104,15 @@ describe("uploadArtifact", () => {
         }),
       },
     });
-    const cache = new MemCache();
-    const results = await executeUnder(graph, p, CAS, cache);
-    const offlineResults = await executeUnder(
-      offline,
-      { ...p, artifactStore: nullArtifactStore },
-      CAS,
-      cache,
-    );
+    const output = createOutputRecorder();
+    const results = await executeUnder(graph, p, output.onEvent);
+    const offlineResults = await executeUnder(offline, { ...p, artifactStore: nullArtifactStore });
     // Both graphs have a pack node; graph's result wins over offline's.
     const byName = new Map([...offlineResults, ...results].map((r) => [r.name, r]));
     const out = (name: string) => {
       const r = byName.get(name);
       assert.ok(r, name);
-      return r.status === "done" && `${CAS}/${r.actionKey}/out-${r.contentHash}`;
+      return r.status === "done" && `${CACHE_DIR}/v1/${r.actionKey}/${r.contentHash}`;
     };
     const json = async (name: string): Promise<unknown> => {
       const r = byName.get(name);
@@ -130,11 +120,6 @@ describe("uploadArtifact", () => {
       return r.status === "done"
         ? parsed(fs, namedOutput(r.outputs, "response"))
         : r.status === "failed" && r.error.message;
-    };
-    const log = async (name: string) => {
-      const r = byName.get(name);
-      assert.ok(r, name);
-      return fs.readText(logPath(CAS, r.actionKey));
     };
     const names = [
       "upload:tarball",
@@ -151,7 +136,10 @@ describe("uploadArtifact", () => {
         outputs: Object.fromEntries(
           await Promise.all(names.map(async (n): Promise<[string, unknown]> => [n, await json(n)])),
         ),
-        logs: { tarball: await log("upload:tarball"), report: await log("upload:report") },
+        logs: {
+          tarball: output.printed.get("upload:tarball"),
+          report: output.printed.get("upload:report"),
+        },
         uploads: [...service.uploads],
         uncached: [...graph.describe(), ...offline.describe()]
           .filter((n) => n.cacheable === false)
@@ -179,7 +167,10 @@ describe("uploadArtifact", () => {
           ["tarball", { files: [`${out("pack")}/pkg.tgz`], rootDirectory: out("pack") }],
           [
             "both",
-            { files: [`${out("pack")}/pkg.tgz`, `${out("bundle")}/main.js`], rootDirectory: CAS },
+            {
+              files: [`${out("pack")}/pkg.tgz`, `${out("bundle")}/main.js`],
+              rootDirectory: `${CACHE_DIR}/v1`,
+            },
           ],
           ["partial", { files: [`${out("pack")}/pkg.tgz`], rootDirectory: out("pack") }],
         ],

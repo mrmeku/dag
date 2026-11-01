@@ -7,11 +7,11 @@ A CI job on GitHub starts on a fresh machine. Everything the last run built is g
 dagworkflows makes both of them nodes of the graph:
 
 - `workflow.cache(spec)` adds a **restore** node, `restore:<name>`, and returns a `save()` function that adds a **save** node, `save:<name>`. Tasks that need the cached files depend on the restore. The save runs after every other task of the run, whatever became of them.
-- `workflow.uploadArtifact(spec)` adds one node that uploads files as an artifact of the run. The files can be another node's outputs, straight from the CAS.
+- `workflow.uploadArtifact(spec)` adds one node that uploads files as an artifact of the run. The files can be another node's outputs, straight from the cache dir.
 
 Both talk to the outside world through two **ports** (swappable interfaces in the run's `Ports`): `cacheStore` and `artifactStore`. On GitHub they are the actions toolkit (`@actions/cache`, `@actions/artifact`). Locally the cache store copies files between git worktrees, and the artifact store does nothing. Tests use in-memory stores. So one workflow file runs unchanged on a laptop and on GitHub.
 
-The main use is **caching the CAS between runs**. The CAS (content-addressed store, the `--cas-dir` directory, `.dag/cas` by default) holds the outputs of every cached node, keyed by action key (see [dagraph-caching](dagraph-caching.md)). Restore the CAS directory before the tasks run, and every task whose inputs did not change is a cache hit (`cached`) on a fresh machine too.
+The main use is **caching the cache dir between runs**. The cache dir (dagraph's content-addressed store, the `--cache-dir` directory, `.dag/cache` by default) holds the outputs of every cached node, keyed by action key (see [dagraph-caching](dagraph-caching.md)). Restore it before the tasks run, and every task whose inputs did not change is a hit (`cached`) on a fresh machine too. In the dagworkflows semantics, dagraph's store is the cache dir, and a bare "cache" is a `workflow.cache`.
 
 Terms used on this page:
 
@@ -28,7 +28,7 @@ Terms used on this page:
 
 Where it lives: `packages/dagworkflows/src/cache.ts`, `src/steps.ts`, `src/ports.ts`, `src/ports/cache-store.ts`, `src/ports/artifact-store.ts`, `src/ports/local.ts`.
 
-## A worked example: caching the CAS
+## A worked example: caching the cache dir
 
 This is the pattern the repository's own CI uses (`scripts/ci.ts`):
 
@@ -37,9 +37,7 @@ import { defineWorkflow } from "@mrmeku/dagworkflows";
 
 export default defineWorkflow({
   implementation: async (workflow) => {
-    const cas = workflow.cache({
-      name: "cas",
-      path: [".dag/cas"],
+    const cache = workflow.cache({
       key: `ci-main-${workflow.ctx.sha}`,
       restoreKeys: ["ci-main-"],
     });
@@ -49,7 +47,7 @@ export default defineWorkflow({
       env: ({ out }) => ({ OUT: out.report }),
       outputs: { report: "report.txt" },
       inputs: { version: "build-v1" },
-      deps: { cas: cas.restore },
+      deps: { cache: cache.restore },
     });
     workflow.uploadArtifact({
       name: "upload:report",
@@ -57,44 +55,44 @@ export default defineWorkflow({
       deps: { build },
       path: ({ build }) => [build.report],
     });
-    if (workflow.ctx.ref === "refs/heads/main") cas.save();
+    if (workflow.ctx.ref === "refs/heads/main") cache.save();
   },
 });
 ```
 
 What happens on GitHub, run by the action:
 
-1. `restore:cas` runs first. It asks the cache service for `ci-main-<this sha>`. On a new commit there is no such entry, so it tries the prefix `ci-main-` and gets the newest entry whose key starts with it: the CAS that the last run on `main` saved. Its log says `Cache restored from: ci-main-<older sha>` and `Restored: .dag/cas`.
-2. `build` depends on `cas.restore`, so it starts only after the restore. Its inputs have not changed, so the restored CAS already holds its output and it is `cached`.
-3. `upload:report` uploads `report.txt` from the CAS as the artifact `report`.
-4. On `main`, `save:cas` runs after every other node. If all of them succeeded, it saves `.dag/cas` under `ci-main-<this sha>`. The next commit's run restores that entry through the `ci-main-` prefix.
+1. `restore:cache` runs first. It asks the cache service for `ci-main-<this sha>`. On a new commit there is no such entry, so it tries the prefix `ci-main-` and gets the newest entry whose key starts with it: the cache dir that the last run on `main` saved. Its log says `Cache restored from: ci-main-<older sha>` and `Restored: .dag/cache, .dag/durations`.
+2. `build` depends on `cache.restore`, so it starts only after the restore. Its inputs have not changed, so the restored cache dir already holds its output and it is `cached`.
+3. `upload:report` uploads `report.txt` from the cache dir as the artifact `report`.
+4. On `main`, `save:cache` runs after every other node. If all of them succeeded, it saves `.dag/cache` and `.dag/durations` under `ci-main-<this sha>`. The next commit's run restores that entry through the `ci-main-` prefix.
 
-On a pull request the save is not added, so a PR reads main's CAS and never writes one.
+On a pull request the save is not added, so a PR reads main's cache dir and never writes one.
 
 The same file run locally with `dag run ci.ts --output-style grouped`, in a fresh git repository on branch `main` with at least one commit and no earlier run, prints this (checked in a temporary directory; times will differ):
 
 ```
 ▶ ci.ts · ref=refs/heads/main · 4 nodes
-    restore:cas
+    restore:cache
     build
     upload:report
-    save:cas
-▷ restore:cas
-▶ ✔︎ restore:cas (9ms)
+    save:cache
+▷ restore:cache
+▶ ✔︎ restore:cache (9ms)
     Cache not found for input keys: ci-main-a3878d35683f452b305a2897d551961075d93d4f, ci-main-
 ▷ build
 ▶ ✔︎ build (7ms)
 ▷ upload:report
 ▶ ✔︎ upload:report (1ms)
     Artifact report not uploaded: no artifact service
-▷ save:cas
-▶ ✔︎ save:cas (1ms)
+▷ save:cache
+▶ ✔︎ save:cache (1ms)
     Cache not saved with key: ci-main-a3878d35683f452b305a2897d551961075d93d4f
 ```
 
 Locally `ctx.ref` is `refs/heads/<current branch>`, so the save is added only on a branch named `main`. On `master` the banner reads `3 nodes` and there is no save line. With no commit yet, `sha` is the literal `HEAD` (below), and the key is `ci-main-HEAD`.
 
-The second local run prints `Kept, already there: .dag/cas` under the restore's miss line, and `build` shows as `cached`. Locally the CAS never left the disk, so the save has nothing to do.
+The second local run prints `Kept, already there: .dag/cache, .dag/durations` under the restore's miss line, and `build` shows as `cached`. Locally the cache dir never left the disk, so the save has nothing to do.
 
 ## `workflow.cache`
 
@@ -103,24 +101,26 @@ The second local run prints `Kept, already there: .dag/cas` under the restore's 
 | Field         | Type     | Default   | Meaning                                                                    |
 | ------------- | -------- | --------- | -------------------------------------------------------------------------- |
 | `name`        | string   | `"cache"` | Names the two nodes, `restore:<name>` and `save:<name>`.                   |
-| `path`        | string[] | required  | What the cache holds, as `actions/cache`'s `path` input.                   |
+| `path`        | string[] | see below | What the cache holds, as `actions/cache`'s `path` input.                   |
 | `key`         | string   | required  | The entry to look for first, and the key a full save stores under.         |
 | `restoreKeys` | string[] | `[]`      | Prefixes to try in order after `key`, as `actions/cache`'s `restore-keys`. |
 
+Left out, `path` is the run's cache dir and durations dir, as its options name them: `--cache-dir` (the action's `cache-dir` input) and `RunOptions.durationsDir`, by default `[".dag/cache", ".dag/durations"]`.
+
 It adds the restore node at once. It returns an `ActionsCacheTasks`:
 
-- `restore`: the restore node's ref (`NodeRef<Record<never, string>>`, a ref with no outputs). Give it as a dep: `deps: { cas: cas.restore }`.
+- `restore`: the restore node's ref (`NodeRef<Record<never, string>>`, a ref with no outputs). Give it as a dep: `deps: { cache: cache.restore }`.
 - `save(saveSpec?)`: adds the save node and returns nothing. `saveSpec` is a `SaveSpec` with one field, `partial`, `"save"` (default) or `"skip"`.
 
 The exported types are `ActionsCacheSpec`, `ActionsCacheTasks` and `SaveSpec`.
 
-Two caches need two names. A second `workflow.cache` with the same name, or a second `save()` call on one cache, fails while the graph is built with the engine's error `Duplicate node name "restore:cas". Names are unique in a graph: …` (or `"save:cas"`). Several caches in one workflow are fine, for example one for the CAS and one for a package manager's directory.
+Two caches need two names. A second `workflow.cache` with the same name, or a second `save()` call on one cache, fails while the graph is built with the engine's error `Duplicate node name "restore:cache". Names are unique in a graph: …` (or `"save:cache"`). Several caches in one workflow are fine, for example one for the cache dir and one for a package manager's directory.
 
 Where it lives: `packages/dagworkflows/src/cache.ts`, `src/workflow.ts`.
 
 ## The restore
 
-The restore runs on every run. It is never cached (`cacheable: false`), so a CAS hit can never skip it.
+The restore runs on every run. It is never cached (`cacheable: false`), so a hit in the cache dir can never skip it.
 
 It calls the cache store with the `path`, the `key` and the `restoreKeys`. The store tries the exact `key` first, then the newest entry whose key starts with `key`, then each restore key in turn as a prefix (the exact rules depend on the store, below; the worktree store ignores keys). The partial-key sequence under _The save_ depends on the second step: run 102 finds `deps-1-partial-101` with no restore keys. It logs one of these:
 
@@ -128,9 +128,9 @@ It calls the cache store with the `path`, the `key` and the `restoreKeys`. The s
 - On a miss: `Cache not found for input keys: <key>, <restore keys…>`.
 - In both cases, if any entry of `path` already held something before the restore, a last line `Kept, already there: <those entries>`.
 
-"Holds something" means a file, or a directory with a file somewhere inside it. An empty directory holds nothing. This check follows symbolic links, so a link that leads nowhere holds nothing. The worktree store (below) does not follow them: to it, any link holds something, even one that leads nowhere. So a `path` entry that is a dangling link is neither filled by the worktree store nor listed under `Kept, already there:`. The run makes the CAS directory, empty, before any node starts, so a fresh machine's `.dag/cas` counts as holding nothing. A `path` entry that is a glob pattern, or that starts with `~`, is never listed in `Restored:` or `Kept, already there:`. The check reads the path literally, though the GitHub store may still restore it.
+"Holds something" means a file, or a directory with a file somewhere inside it. An empty directory holds nothing. This check follows symbolic links, so a link that leads nowhere holds nothing. The worktree store (below) does not follow them: to it, any link holds something, even one that leads nowhere. So a `path` entry that is a dangling link is neither filled by the worktree store nor listed under `Kept, already there:`. The run makes its cache dir, empty, before any node starts, so a fresh machine's `.dag/cache` counts as holding nothing. A `path` entry that is a glob pattern, or that starts with `~`, is never listed in `Restored:` or `Kept, already there:`. The check reads the path literally, though the GitHub store may still restore it.
 
-**The restore has no outputs.** Its dependents' action keys come from their deps' content hashes (see [dagraph-caching](dagraph-caching.md)), and a node with no outputs has the same content hash every time. So a hit and a miss key the dependents alike, and no task can tell which one happened. A restore only orders its dependents after it. What it restores (the CAS) is what makes them cache hits. A task that does not depend on the restore can start before the CAS is in place and miss a hit it would otherwise have had.
+**The restore has no outputs.** Its dependents' action keys come from their deps' content hashes (see [dagraph-caching](dagraph-caching.md)), and a node with no outputs has the same content hash every time. So a hit and a miss key the dependents alike, and no task can tell which one happened. A restore only orders its dependents after it. What it restores (the cache dir) is what makes them hits. A task that does not depend on the restore can start before the cache dir is in place and miss a hit it would otherwise have had.
 
 **Failure.** Caching is optional, as in the toolkit:
 
@@ -143,7 +143,7 @@ Where it lives: `packages/dagworkflows/src/cache.ts`.
 
 ## The save
 
-`cas.save()` adds `save:<name>`. These rules always hold:
+`cache.save()` adds `save:<name>`. These rules always hold:
 
 - **It waits for every other node of the run.** Its deps are settled deps (deps it runs after whatever they did) on every node of the run except post steps and other saves. That includes the restore and tasks that never used the cache. The full list is worked out when the run starts, so a node added after `save()` was called is still waited for. A save does not wait for post steps, and saves do not wait for each other.
 - **It is never cached.** It runs every time. The store decides whether anything is stored: a store saves only a key it does not hold yet. So a second run with the same key saves nothing, and an entry the service has evicted is saved again.
@@ -175,28 +175,28 @@ The test in `src/release.test.ts` pins this sequence. Key `deps-1`, no restore k
 
 **Cancel.** A save still waiting when the run is cancelled settles as `cancelled` without running, so a cancelled run saves nothing. A save already running when the cancel lands is reported `cancelled` too. The store call it started is not undone: in the test, the store holds the entry although the node shows `cancelled`.
 
-**`--only`.** A run with `--only <names>` runs the closure of those nodes (the nodes and everything they depend on). A save joins it when its restore is in that closure, and then waits only for the nodes of the selection. Example: lint and test both depend on `cas.restore`. `dag run ci.ts --only lint` runs `restore:cas`, `lint` and `save:cas`. The save comes after lint, and a green lint saves under the full key. Since a save depends on its restore, `--only save:cas` (or `--only restore:cas`) runs just the restore and the save: once the restore is green, the save stores `path` as it is on disk under the full `key`, though no task ran. A selection that does not reach the restore (`--only docs`, when docs does not depend on `cas.restore`) runs neither.
+**`--only`.** A run with `--only <names>` runs the closure of those nodes (the nodes and everything they depend on). A save joins it when its restore is in that closure, and then waits only for the nodes of the selection. Example: lint and test both depend on `cache.restore`. `dag run ci.ts --only lint` runs `restore:cache`, `lint` and `save:cache`. The save comes after lint, and a green lint saves under the full key. Since a save depends on its restore, `--only save:cache` (or `--only restore:cache`) runs just the restore and the save: once the restore is green, the save stores `path` as it is on disk under the full `key`, though no task ran. A selection that does not reach the restore (`--only docs`, when docs does not depend on `cache.restore`) runs neither.
 
 Where it lives: `packages/dagworkflows/src/cache.ts`, `src/select.ts`.
 
 ### A save of your own
 
-When the built-in save's rule (wait for everything, then save under the key or a partial key) is not what you want, write the save as an action task over the same port. Every action gets `ports.cacheStore` (it is part of `WorkflowPorts`), so `await ports.cacheStore.save(paths, key)` stores the paths under the key, and resolves `true` if it stored them and `false` if the store already held that key. `ports.cacheStore.restore(paths, key, restoreKeys)` is available the same way. For example, a save that stores the CAS only when `test` succeeded, and never a partial entry:
+When the built-in save's rule (wait for everything, then save under the key or a partial key) is not what you want, write the save as an action task over the same port. Every action gets `ports.cacheStore` (it is part of `WorkflowPorts`), so `await ports.cacheStore.save(paths, key)` stores the paths under the key, and resolves `true` if it stored them and `false` if the store already held that key. `ports.cacheStore.restore(paths, key, restoreKeys)` is available the same way. For example, a save that stores the cache dir only when `test` succeeded, and never a partial entry:
 
 ```ts
-const cas = workflow.cache({ name: "cas", path: [".dag/cas"], key: "cas-1" });
-const test = workflow.task({ name: "test", cmd: ["npm", "test"], deps: { cas: cas.restore } });
+const cache = workflow.cache({ path: [".dag/cache"], key: "cache-1" });
+const test = workflow.task({ name: "test", cmd: ["npm", "test"], deps: { cache: cache.restore } });
 workflow.task({
   name: "save:green",
   deps: { test },
   action: async ({ ports, log }) => {
-    const saved = await ports.cacheStore.save([".dag/cas"], "cas-1");
+    const saved = await ports.cacheStore.save([".dag/cache"], "cache-1");
     log(saved ? "saved" : "already there");
   },
 });
 ```
 
-Verified with `createTestPorts` and a memory cache store: a run where `test` fails leaves `save:green` `dep-failed` and the store empty; a green run makes it `done` and the store holds `cas-1`.
+Verified with `createTestPorts` and a memory cache store: a run where `test` fails leaves `save:green` `dep-failed` and the store empty; a green run makes it `done` and the store holds `cache-1`.
 
 A save written this way is an ordinary task, so it differs from `save()` in each of these ways:
 
@@ -237,9 +237,9 @@ workflow.uploadArtifact({
 
 The types make you write `tests?.report` for a settled dep: `tests.report` does not compile. A function can mix both kinds of item: `path: ({ pack }) => ["reports/**", pack.tarball]`.
 
-Globs are matched when the upload runs, not when the graph is built. They are matched by `@actions/glob`'s rules, relative to the process's working directory, and give files only. Directories named in `DEFAULT_EXCLUDES` (`.git`, `node_modules`, `.dag`) are left out, at any depth, so a nested `node_modules` is skipped too. So a glob stays out of the CAS while the CAS sits under a directory named `.dag`, as the default `.dag/cas` does. With a `--cas-dir` elsewhere, a glob such as `**/*.tgz` can match files in the CAS. To upload a node's output, use a dep's handle. A handle is the file the dep produced, in the CAS, so `path: ({ pack }) => [pack.tarball]` uploads a tarball straight from the CAS. The files are the sorted glob matches, as paths relative to the working directory, followed by the handles' files, whose paths are always absolute (whatever `--cas-dir` is).
+Globs are matched when the upload runs, not when the graph is built. They are matched by `@actions/glob`'s rules, relative to the process's working directory, and give files only. Directories named in `DEFAULT_EXCLUDES` (`.git`, `node_modules`, `.dag`) are left out, at any depth, so a nested `node_modules` is skipped too. So a glob stays out of the cache dir while it sits under a directory named `.dag`, as the default `.dag/cache` does. With a `--cache-dir` elsewhere, a glob such as `**/*.tgz` can match files in the cache dir. To upload a node's output, use a dep's handle. A handle is the file the dep produced, in the cache dir, so `path: ({ pack }) => [pack.tarball]` uploads a tarball straight from the cache dir. The files are the sorted glob matches, as paths relative to the working directory, followed by the handles' files, whose paths are always absolute (whatever `--cache-dir` is).
 
-**Archive layout.** Files are archived relative to the deepest directory that holds all of them, as `actions/upload-artifact` does. The paths are compared as strings, segment by segment. One file, or one node's outputs, sit at the top of the artifact. Files of two nodes are under their two CAS directories, relative to the CAS root. When the files share no directory, the root is `.`, which `@actions/artifact` takes as the working directory. Because glob matches are relative and handles absolute, any `path` that mixes the two (`["reports/**", pack.tarball]`) gets the root `.`, even when every file sits in one directory. A handle's file then sits deep in the artifact, at its path from the working directory (`.dag/cas/…`). A `path` of handles only, from a CAS outside the working directory, gets that CAS's deepest shared directory as its root and uploads without error. A file outside the working directory makes the upload fail only when the root falls back to `.`: with a `path` that mixes globs and handles, or with files that share only `/`. The error is `@actions/artifact`'s `The rootDirectory: … is not a parent directory of the file: …`.
+**Archive layout.** Files are archived relative to the deepest directory that holds all of them, as `actions/upload-artifact` does. The paths are compared as strings, segment by segment. One file, or one node's outputs, sit at the top of the artifact. Files of two nodes are under their two content directories, relative to the cache dir's `v1/`. When the files share no directory, the root is `.`, which `@actions/artifact` takes as the working directory. Because glob matches are relative and handles absolute, any `path` that mixes the two (`["reports/**", pack.tarball]`) gets the root `.`, even when every file sits in one directory. A handle's file then sits deep in the artifact, at its path from the working directory (`.dag/cache/…`). A `path` of handles only, from a cache dir outside the working directory, gets that cache dir's deepest shared directory as its root and uploads without error. A file outside the working directory makes the upload fail only when the root falls back to `.`: with a `path` that mixes globs and handles, or with files that share only `/`. The error is `@actions/artifact`'s `The rootDirectory: … is not a parent directory of the file: …`.
 
 **What happens.**
 
@@ -281,10 +281,10 @@ The toolkit catches most of its own errors. Its restore logs `Failed to restore:
 
 1. Asks git for the main checkout (the first `worktree` of `git worktree list --porcelain`), this checkout's top level, and the current directory's path within the repository. Outside git, or in the main checkout itself, it resolves `undefined`: a miss.
 2. For each entry of `paths` that is relative (not absolute, and not starting with `~`), it makes the entry's parent directory. It takes a lock on the entry, the lock file `<entry>.lock`. If another restore holds that lock, it waits until the lock is released, or goes stale about 10 s after a kill.
-3. Under the lock, if the entry holds nothing here and the same place in the main checkout holds something (a file, any link, or a directory with one of these inside), it copies it over. The copy is recursive, keeps symbolic links as they are (a link that leads nowhere is copied too), and keeps timestamps.
+3. Under the lock, if the entry holds nothing here and the same place in the main checkout holds something (a file, any link, or a directory with one of these inside), it copies it over. The copy is recursive, keeps symbolic links as they are (a link that leads nowhere is copied too), and keeps timestamps, so the worktree's hits in the cache dir hash no output ([dagraph-caching](dagraph-caching.md), "Output verification").
 4. It resolves to the main checkout's path if it copied anything, else `undefined`.
 
-It never overwrites what the worktree has, and never touches a path outside it. So a new worktree starts from the main checkout's CAS and then keeps its own. In the CLI test, three runs give `Cache not found…` in the main checkout, `Cache restored from: <main checkout>` and `Restored: .dag/cas` in a new worktree (where `build` is then `cached`), and `Cache not found…` plus `Kept, already there: .dag/cas` on the worktree's next run.
+It never overwrites what the worktree has, and never touches a path outside it. So a new worktree starts from the main checkout's cache dir and then keeps its own. In the CLI test, three runs give `Cache not found…` in the main checkout, `Cache restored from: <main checkout>` and `Restored: .dag/cache` in a new worktree (where `build` is then `cached`), and `Cache not found…` plus `Kept, already there: .dag/cache` on the worktree's next run.
 
 **`createMemoryCacheStore(initialKeys = [])`** returns a `MemoryCacheStore`, a `CacheStore` with `entries`: a `Map` from each saved key, in order, to the paths it holds. The initial keys hold `[]`. A restore returns `key` if it is held. Otherwise, for `key` and then each restore key, it returns the newest entry whose key starts with it. A save of a held key returns `false`, and otherwise records the key and returns `true`. Deleting from `entries` is an eviction. It moves no files.
 
@@ -332,27 +332,27 @@ When a service is off, a notice titled `dag` says so:
 What differs for a workflow author:
 
 - **Keys only matter on GitHub.** Locally the worktree store ignores them. The restore logs the key it asked for, and every save logs `Cache not saved with key: …`. Locally the run id is `0`, so a local partial key reads `<key>-partial-0`.
-- **The local "cache" is the disk.** In the main checkout a restore always misses, and the CAS from last time is simply still there (`Kept, already there:`). A fresh worktree is filled from the main checkout.
+- **The local "cache" is the disk.** In the main checkout a restore always misses, and the cache dir from last time is simply still there (`Kept, already there:`). A fresh worktree is filled from the main checkout.
 - **Key validation is the toolkit's.** A bad key (a comma, say) fails the restore and save only where `createActionsCacheStore` is in use: the action, when the cache service is reachable. Locally, in a `run:` step on GitHub, or in any job with no cache service, the store is the worktree store or `nullCacheStore`, which never throw, and the bad key goes through unnoticed.
 - **No artifacts locally.** Every upload logs `… not uploaded: no artifact service`, and `artifact.json` holds `null`.
 - **`ctx.sha` and `ctx.ref` come from git locally** (see [dagworkflows-workflows](dagworkflows-workflows.md)). `sha` is the stdout of `git rev-parse HEAD`, taken even when that command fails. So in a repository with no commit, `sha` is the literal `HEAD` and a key like `ci-main-${sha}` reads `ci-main-HEAD`. Only with no git repository at all is `sha` `""`. A key like `ci-main-${sha}` then equals the restore key `ci-main-`, and the miss line reads `Cache not found for input keys: ci-main-, ci-main-`.
 
 Where it lives: `packages/dagworkflows/src/services.ts`, `src/cli.ts`, `src/action/env.ts`, `src/action/main.ts`, `action/action.yml`.
 
-## Things to get right when caching the CAS
+## Things to get right when caching the cache dir
 
-- **`path` and `--cas-dir` must agree.** The cache's `path` is just a path. The run's CAS directory is the `--cas-dir` option (the action's `cas-dir` input), default `.dag/cas` (`DEFAULT_CAS_DIR`). If you change one, change the other.
-- **Depend on the restore.** Only tasks with `deps: { cas: cas.restore }` are sure to start after the CAS is in place.
+- **Leave `path` out.** Every workflow's cache then has the same paths in the same order, which `@actions/cache` needs to restore one workflow's entry in another, as a release restores CI's through `dag-main-`. A `path` given is just a path: if you change `--cache-dir`, change it too, in every workflow.
+- **Depend on the restore.** Only tasks with `deps: { cache: cache.restore }` are sure to start after the cache dir is in place.
 - **Save on one branch.** The repository saves only when `workflow.ctx.ref === "refs/heads/main"`, with a per-commit key and a shared prefix as restore key. Each main commit adds an entry, and every run restores the newest.
 - **A key is written once.** A store never overwrites an entry. If a key's content must change, change the key, for example by putting `workflow.ctx.sha` or a `workflow.hash(...)` of the lockfile in it.
-- **The CAS directory carries more than outputs.** The previous run's node durations are kept in `last-run.json` inside the CAS directory, so main's cache entry carries them ([dagworkflows-output](dagworkflows-output.md)). Node logs are written beside the CAS, under `<cas-dir>.logs/`, not inside it ([dagworkflows-output](dagworkflows-output.md)).
+- **The cache dir holds only outputs.** Each workflow's last-run durations are kept in `.dag/durations`, written as each save starts ([dagworkflows-lifecycle](dagworkflows-lifecycle.md)). Build logs are kept outside both, in `.dag/build-logs` ([dagworkflows-output](dagworkflows-output.md)).
 
 ## Open questions
 
-- `--only` on `main` saves under the full key once the selection is green, though only the selection ran. Since a key is written once, that entry stays for that commit even if a later full run on the same commit would have added more. The code and tests pin this as intended (`runner.test.ts`, "saves the CAS after lint alone"); whether docs should warn about it is open.
+- `--only` on `main` saves under the full key once the selection is green, though only the selection ran. Since a key is written once, that entry stays for that commit even if a later full run on the same commit would have added more. The code and tests pin this as intended (`runner.test.ts`, "saves the cache after lint alone"); whether docs should warn about it is open.
 - A save that the cancel reaches while it is running reports `cancelled`, though the store may have saved the entry. A reader of the summary cannot tell.
 - `createActionsArtifactStore` resolves `undefined` when the client returns no id, and the node then logs `not uploaded: no artifact service`, which names the wrong cause.
-- A `path` that mixes globs and handles always gets the root `.` (see _Archive layout_), so the handle's file lands deep in the artifact, and a CAS outside the working directory fails the upload. A `path` of handles only does not have this problem. Whether the root should be computed from absolute paths is open.
+- A `path` that mixes globs and handles always gets the root `.` (see _Archive layout_), so the handle's file lands deep in the artifact, and a cache dir outside the working directory fails the upload. A `path` of handles only does not have this problem. Whether the root should be computed from absolute paths is open.
 - A file both matched by a glob and named by a handle is listed twice. Globs are deduplicated among themselves, not against handles, and a glob match is relative where a handle is absolute.
 - The toolkit's own messages (`Cache restored successfully`, `Failed to save: …`, the 5xx error annotation) go to the job output through `@actions/core`, outside the node's log group. A 5xx on restore or save raises an error annotation although the node succeeds and the run can be green.
-- Nodes cached on a fresh machine have no logs after a restore, because `<cas-dir>.logs/` is not under `.dag/cas` unless `path` lists it too. Each such hit shows an empty log group. Whether that is intended is for [dagworkflows-output](dagworkflows-output.md) to settle, and it lists the question among its own.
+- Nodes cached on a fresh machine have no logs after a restore, because a cache of `.dag/cache` does not carry `.dag/build-logs`. Each such hit shows an empty log group. Whether that is intended is for [dagworkflows-output](dagworkflows-output.md) to settle, and it lists the question among its own.

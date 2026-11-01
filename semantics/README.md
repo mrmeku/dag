@@ -24,9 +24,9 @@ How a graph is walked. Orchestration decides when a node runs and does no I/O; p
 
 What makes a second run cheap. A node's action key hashes its kind, its inputs and its deps' content by role; a verified entry under that key is a hit and the action does not run. Outputs live in a content-addressed store, and early cutoff stops a rerun that produced the same bytes from spreading.
 
-- Concepts: action key and exactly what joins it, version inputs, keys across dagraph versions, content hash, early cutoff, output hashes and roles keyed by the outputs they read, output verification, the CAS layout, nodes that share a key, reading part of a dependency, `cacheable: false`, forcing through a cache whose reads miss, what is never cached, finding out why a node reran, the `DagFs` port.
-- Public names: `Cache`, `CacheEntry`, `FsCache`, `MemCache`, `forcedCache`, `DagFs`, `createMemoryDagFs`; `@mrmeku/dagraph/fs` (`createBunDagFs`), `@mrmeku/dagraph/fs/node` (`createNodeDagFs`).
-- Read it when a node reruns or fails to rerun unexpectedly, when changing the key, the CAS or a cache implementation, or when an action reads something it has not declared.
+- Concepts: action key and exactly what joins it, version inputs, keys across dagraph versions, content hash, early cutoff, output hashes and roles keyed by the outputs they read, output verification by size and mtime, read-only outputs that are regular files, the cache layout, pruning by last use, nodes that share a key, reading part of a dependency, `cacheable: false`, forcing (`forcedKeys`), what is never cached, finding out why a node reran, the `DagFs` port.
+- Public names: `CacheEntry`, `DagFs`, `createMemoryDagFs`, `pruneCache`, `PruneOptions`; `ExecutionContext`'s `cacheDir` and `forcedKeys`; `@mrmeku/dagraph/fs` (`createBunDagFs`), `@mrmeku/dagraph/fs/node` (`createNodeDagFs`).
+- Read it when a node reruns or fails to rerun unexpectedly, when changing the key, the cache or its entries, or when an action reads something it has not declared.
 
 ## dagworkflows
 
@@ -35,22 +35,22 @@ What makes a second run cheap. A node's action key hashes its kind, its inputs a
 How a workflow file is written: it default-exports `defineWorkflow({ implementation })`, and the `workflow` object adds tasks and other nodes to a dagraph graph. A task is an `action`, a `cmd` or a `shell`, cached on what it declares and never on its code.
 
 - Concepts: type-checking a workflow file, task and command, choosing an action or a command, deps by role, inputs, outputs, when a task runs, the receipt pattern for side effects, a task's cache key, scheduler options and concurrency groups, helpers and composition, the required check, `post` fields, `--only` selection, the `@actions` toolkit, testing a workflow.
-- Public names: `defineWorkflow`, `createWorkflow`, `workflow.task`, `workflow.glob`, `workflow.hash`, `workflow.compose`, `workflow.requireAll`, `workflow.ctx`, `workflow.ports`, `selectNodes`, `postNodes`, `TaskSpec`, `PostSpec`, `CiContext`, `Ports`, `DEFAULT_EXCLUDES`, `DEFAULT_CAS_DIR`, and the test doubles (`createTestPorts`, `okExec`, `clockAt`, `steppingClock`).
+- Public names: `defineWorkflow`, `createWorkflow`, `workflow.task`, `workflow.glob`, `workflow.hash`, `workflow.compose`, `workflow.requireAll`, `workflow.ctx`, `workflow.ports`, `selectNodes`, `postNodes`, `TaskSpec`, `PostSpec`, `CiContext`, `Ports`, `DEFAULT_EXCLUDES`, `DEFAULT_CACHE_DIR`, and the test doubles (`createTestPorts`, `okExec`, `clockAt`, `steppingClock`).
 - Read it when writing or changing a workflow, a task spec, selection, or the public surface of the package.
 
 ### [dagworkflows-lifecycle](dagworkflows-lifecycle.md)
 
 The life of one run, from building the graph to its outcome. Post steps are obligations: owed once their task starts, recorded before any effect, and paid by a later run before any task if left unpaid. The page also covers services, run history and its lock, cancellation and signals, timeouts, exit codes, and the run store and its kernel.
 
-- Concepts: main and post, owed, pass and post pass, run history, services kept up across runs, cancel, node states holding dagraph's `Result` as it is and its event times, start recorded (the history's, which decides what is owed) apart from action ran (dagraph's `elapsed`), and the run's lifecycle, the run store and its listeners, ports (`ExecResult.ended`) and step records (`CommandCause.ended`).
-- Public names: `runWorkflow`, `runJob`, `runPost`, `RunOptions`, `RunOutcome`, `createRunHistory`, `readRunHistory`, `runHistoryLive`, `RunHistory`, `DEFAULT_HISTORY_DIR`, `RunState`, `RunLifecycle`, `RunAction`, `NodeAction`, `Pass`, `NodeState` and its cases, `selectors`, `createRunStore`, `RunStore`, `RunListener`.
+- Concepts: main and post, owed, pass and post pass, run history, services kept up across runs, cancel, node states holding dagraph's `Result` as it is and its event times, start recorded (the history's, which decides what is owed) apart from action ran (dagraph's `elapsed`), and the run's lifecycle, the run store and its listeners, the last run's durations, ports (`ExecResult.ended`) and step records (`CommandCause.ended`).
+- Public names: `runWorkflow`, `runJob`, `runPost`, `RunOptions`, `RunOutcome`, `createRunHistory`, `readRunHistory`, `runHistoryLive`, `RunHistory`, `DEFAULT_HISTORY_DIR`, `DEFAULT_DURATIONS_DIR`, `RunState`, `RunLifecycle`, `RunAction`, `NodeAction`, `Pass`, `NodeState` and its cases, `selectors`, `createRunStore`, `RunStore`, `RunListener`.
 - Read it when touching post steps, cancellation, history, exit codes, the run store or the kernel's reducers and state types.
 
 ### [dagworkflows-cache-artifacts](dagworkflows-cache-artifacts.md)
 
-The cache and artifacts as nodes of the graph. `workflow.cache` adds a restore node and returns a `save()` that adds a save node run after every other task; `workflow.uploadArtifact` uploads files, including other nodes' outputs straight from the CAS. Both go through ports, so one workflow runs unchanged locally, on GitHub and in tests.
+The cache and artifacts as nodes of the graph. `workflow.cache` adds a restore node and returns a `save()` that adds a save node run after every other task; `workflow.uploadArtifact` uploads files, including other nodes' outputs straight from the cache dir. Both go through ports, so one workflow runs unchanged locally, on GitHub and in tests.
 
-- Concepts: cache entry, key and restore keys, hit and miss, partial saves, artifacts, caching the CAS between runs, local worktree restore versus GitHub.
+- Concepts: cache entry, key and restore keys, hit and miss, partial saves, artifacts, caching the cache dir between runs, local worktree restore versus GitHub.
 - Public names: `workflow.cache`, `workflow.uploadArtifact`, `ActionsCacheSpec`, `SaveSpec`, `UploadArtifactSpec`, `CacheStore`, `ArtifactStore`, `createActionsCacheStore`, `createActionsArtifactStore`, `artifactServiceAvailable`, `createMemoryCacheStore`, `createMemoryArtifactStore`, `nullCacheStore`, `nullArtifactStore`.
 - Read it when changing restores, saves, artifact uploads or the cache and artifact store ports.
 
@@ -58,8 +58,8 @@ The cache and artifacts as nodes of the graph. `workflow.cache` adds a restore n
 
 What a run shows. Every output is a listener on the run store: the terminal in the `live`, `failures` or `grouped` style, per-node log files, the failures report, GitHub's log groups and check runs; the step summary is rendered from the store's report at the end of each pass.
 
-- Concepts: which failure is the cause (every failed node is named; a skipped one only under its causes, dagraph's `rootCauses`), durations (dagraph's `elapsed`, a cache hit's lookup), the recap, log files and the CAS log, `failures.md`, check runs, the step summary and its renderers, warnings, secrets and masking, hosts.
-- Public names: `createReporter`, `SummaryRenderer`, `RunReport`, `NodeReport`, `DEFAULT_SUMMARY_RENDERERS`, `renderStatus`, `renderTimeline`, `renderCriticalPath`, `renderDag`, `renderFailures`, `renderTable`, `formatDuration`, `failureMessage`, `Host`, `CommandCause`, `createLocalHost`, `nullHost`, `createRecordingHost`, `logPath`, `DEFAULT_SUMMARY_PATH`; `@mrmeku/dagworkflows/github` (`createGithubHost`).
+- Concepts: which failure is the cause (every failed node is named; a skipped one only under its causes, dagraph's `rootCauses`), durations (dagraph's `elapsed`, a cache hit's lookup), the recap, log files and the build log, `failures.md`, check runs, the step summary and its renderers, warnings, secrets and masking, hosts.
+- Public names: `createReporter`, `SummaryRenderer`, `RunReport`, `NodeReport`, `DEFAULT_SUMMARY_RENDERERS`, `renderStatus`, `renderTimeline`, `renderCriticalPath`, `renderDag`, `renderFailures`, `renderTable`, `formatDuration`, `failureMessage`, `Host`, `CommandCause`, `createLocalHost`, `nullHost`, `createRecordingHost`, `DEFAULT_BUILD_LOG_DIR`, `DEFAULT_SUMMARY_PATH`; `@mrmeku/dagworkflows/github` (`createGithubHost`).
 - Read it when changing anything a run prints or writes for a reader, which failure counts as the cause, or a host.
 
 ### [dagworkflows-cli-action-release](dagworkflows-cli-action-release.md)
@@ -67,5 +67,5 @@ What a run shows. Every output is a listener on the run store: the terminal in t
 The two forms of the runner and how the repository ships them. It covers the `dag` CLI (commands, options, local and GitHub mode, exit codes, environment variables, the files a run writes), the GitHub Action and its inputs, and the dag repository's layout, CI, packing, release and docs check.
 
 - Concepts: workflow file, local mode and GitHub mode, `dag run` step by step, `dag post`, fixed values, how the action maps to the CLI, which Node runs the action and which its tasks find, `v*` releases and dist-tags, the versions a first release can take, the npm description, issues and pull requests on the action repository.
-- Public names: `dag run`, `dag post`, `--force`, `--only`, `--cas-dir`, `--output-style`, `--log-dir`, `--failures-report-file`, `--history-dir`, `--summary-file`; the action inputs `workflow`, `cas-dir`, `history-dir`, `force`, `only`.
+- Public names: `dag run`, `dag post`, `--force`, `--only`, `--cache-dir`, `--output-style`, `--log-dir`, `--failures-report-file`, `--history-dir`, `--summary-file`; the action inputs `workflow`, `cache-dir`, `history-dir`, `force`, `only`.
 - Read it when changing the CLI or the action, the files a run writes, or the repository's CI, packing or release.

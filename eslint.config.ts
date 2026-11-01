@@ -70,6 +70,15 @@ export default defineConfig(
         { argsIgnorePattern: "^_", varsIgnorePattern: "^_" },
       ],
       "@typescript-eslint/consistent-type-assertions": ["error", { assertionStyle: "never" }],
+      "no-restricted-syntax": [
+        "error",
+        {
+          selector:
+            "MemberExpression[object.name='Date'][property.name='now'], NewExpression[callee.name='Date'][arguments.length=0]",
+          message:
+            "Read the time from a clock: a clock port, ExecutionContext.clock or a value passed in",
+        },
+      ],
       "@typescript-eslint/no-floating-promises": [
         "error",
         {

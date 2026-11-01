@@ -1,8 +1,6 @@
 import {
   closure,
   execute,
-  forcedCache,
-  FsCache,
   Graph,
   orchestrate,
   runNode,
@@ -10,8 +8,8 @@ import {
   type ExecuteOptions,
   type Result,
 } from "@mrmeku/dagraph";
-import { resolve } from "node:path";
-import { DEFAULT_HISTORY_DIR, RERUN_COMMAND } from "./config.ts";
+import { relative, resolve } from "node:path";
+import { DEFAULT_DURATIONS_DIR, DEFAULT_HISTORY_DIR, RERUN_COMMAND } from "./config.ts";
 import { createGithubStore } from "./github/renderer.ts";
 import {
   createRunHistory,
@@ -25,7 +23,7 @@ import type { RunStore } from "./kernel/store.ts";
 import type { CiContext, Ports } from "./ports.ts";
 import { finishPass } from "./reporter.ts";
 import { selectNodes } from "./select.ts";
-import { postNodes } from "./steps.ts";
+import { postNodes, savesOf } from "./steps.ts";
 import type { WorkflowDef } from "./workflow.ts";
 
 /** An implementation adds nodes to the graph; the ref/event come in `ctx` for conditionals. */
@@ -33,6 +31,7 @@ export type Implementation<R = unknown> = (
   graph: Graph<Ports>,
   ports: Ports,
   ctx: CiContext,
+  runDataPaths?: RunDataPaths,
 ) => Promise<R>;
 
 /**
@@ -46,7 +45,11 @@ export type RunOptions = Pick<ExecuteOptions, "signal"> &
     /** The workflow file as given: named in the summary's heading and in the log's reproduce line. */
     workflowFile?: string;
     ports: Ports;
-    casBaseDir: string;
+    cacheDir: string;
+    /** Where each built node's log is kept, by action key: DEFAULT_BUILD_LOG_DIR unless given. */
+    buildLogDir?: string;
+    /** Where each workflow's last run's durations are kept: DEFAULT_DURATIONS_DIR unless given. */
+    durationsDir?: string;
     /** The directory where each run writes its history; the post pass reads them. */
     historyDir?: string;
     only?: string[];
@@ -57,6 +60,9 @@ export type RunOptions = Pick<ExecuteOptions, "signal"> &
   };
 
 type PostOptions = Omit<RunOptions, "force" | "signal">;
+
+/** The run's cache and durations dirs, for a `workflow.cache` with no `path`. */
+export type RunDataPaths = Pick<RunOptions, "cacheDir" | "durationsDir">;
 
 export interface RunOutcome {
   results: Result[];
@@ -76,10 +82,21 @@ const runOutcomeOf = (outcome: Omit<RunOutcome, "exitCode">): RunOutcome => ({
 const workflowOf = (opts: { workflowFile?: string }) =>
   opts.workflowFile ? resolve(opts.workflowFile) : "";
 
-async function buildGraph(opts: { implementation: Implementation; ports: Ports }) {
+/**
+ * The file a run keeps its workflow's durations in, named by the workflow file's path from the
+ * working directory, a `..` in it encoded so the file stays in the durations dir.
+ */
+export function durationsFileOf(opts: Pick<RunOptions, "workflowFile" | "durationsDir">): string {
+  const workflow = opts.workflowFile
+    ? relative(".", opts.workflowFile).replaceAll("..", "%2E%2E")
+    : titleOf(undefined);
+  return `${opts.durationsDir ?? DEFAULT_DURATIONS_DIR}/${workflow}.json`;
+}
+
+async function buildGraph(opts: PostOptions) {
   const ctx = await opts.ports.host.context();
   const full = new Graph<Ports>();
-  await opts.implementation(full, opts.ports, ctx);
+  await opts.implementation(full, opts.ports, ctx, opts);
   return { ctx, full };
 }
 
@@ -170,7 +187,8 @@ async function settle(
 }
 
 export async function runWorkflow(opts: RunOptions): Promise<RunOutcome> {
-  const store = opts.store ?? createGithubStore(opts.ports, opts.casBaseDir);
+  const store =
+    opts.store ?? createGithubStore(opts.ports, { ...opts, durationsFile: durationsFileOf(opts) });
   opts.signal?.addEventListener("abort", store.cancel, { once: true });
   const { ports } = opts;
   const { ctx, full } = await buildGraph(opts);
@@ -215,7 +233,7 @@ export async function runWorkflow(opts: RunOptions): Promise<RunOutcome> {
     ...(rerunCommand && { rerunCommand }),
   };
   store.begin(pass);
-  await ports.fs.ensureDir(opts.casBaseDir);
+  await ports.fs.ensureDir(opts.cacheDir);
   const history = await createRunHistory(
     ports.fs,
     ports.lockfile,
@@ -227,7 +245,7 @@ export async function runWorkflow(opts: RunOptions): Promise<RunOutcome> {
       results: {},
     },
   );
-  const stored = new FsCache(opts.casBaseDir, ports.fs);
+  const saves = savesOf(graph);
   let results: Result[];
   try {
     await history.begin();
@@ -235,15 +253,18 @@ export async function runWorkflow(opts: RunOptions): Promise<RunOutcome> {
       graph,
       {
         ports,
-        cache: opts.force ? forcedCache(stored) : stored,
         fs: ports.fs,
-        casBaseDir: opts.casBaseDir,
+        cacheDir: opts.cacheDir,
         clock: ports.clock,
+        ...(opts.force && { forcedKeys: "all" }),
       },
       {
         scheduler: throttledScheduler(opts.schedulerOptions),
         onEvent: (event) => {
           store.onEvent(event);
+          // A save carries this run's durations: they are written before its action starts.
+          if (event.type === "start" && saves.has(event.node))
+            return Promise.all([history.onEvent(event), store.writeDurations()]);
           return history.onEvent(event);
         },
         ...(opts.signal && { signal: opts.signal }),
@@ -255,6 +276,8 @@ export async function runWorkflow(opts: RunOptions): Promise<RunOutcome> {
   } finally {
     await history.close();
   }
+  // Only the run's own pass writes them: a debt's pass comes before the restore that may bring them.
+  await store.writeDurations();
   const { failed, markdown } = await finishPass(ports, store, pass, results, opts.summary);
   return runOutcomeOf({ results, failed, markdown, cancelled: opts.signal?.aborted ?? false });
 }
@@ -271,7 +294,8 @@ function replay(name: string, recorded: Result | undefined): Result {
  * and leaves no history, so nothing runs after it.
  */
 export async function runPost(opts: PostOptions): Promise<RunOutcome> {
-  const store = opts.store ?? createGithubStore(opts.ports, opts.casBaseDir);
+  const store =
+    opts.store ?? createGithubStore(opts.ports, { ...opts, durationsFile: durationsFileOf(opts) });
   const { full } = await buildGraph(opts);
   const outcomes = await settle(opts, full, store);
   // Owing nothing, the pass prints nothing: every job has a post step, most owe none.
@@ -315,9 +339,8 @@ async function postPass(
   const replayed = closure(graph, owed);
   const executionContext = {
     ports,
-    cache: new FsCache(opts.casBaseDir, ports.fs),
     fs: ports.fs,
-    casBaseDir: opts.casBaseDir,
+    cacheDir: opts.cacheDir,
     clock: ports.clock,
   };
   const runOwed = runNode(replayed, executionContext, {

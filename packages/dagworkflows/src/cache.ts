@@ -11,7 +11,8 @@ import { addTask } from "./task.ts";
  */
 export interface ActionsCacheSpec {
   name?: string;
-  path: string[];
+  /** The run's cache dir and durations dir unless given. */
+  path?: string[];
   key: string;
   restoreKeys?: string[];
 }
@@ -34,8 +35,8 @@ export interface ActionsCacheTasks {
    * The restore, `restore:<name>`, which runs every time. It tries `key`, then each prefix in
    * `restoreKeys`, and logs what it found, with which paths of `path` it restored and which were
    * there already. A restore that fails warns and misses, as the toolkit's does; an invalid key
-   * fails it. It has no outputs, so a hit and a miss key its dependents alike: `deps: { cas:
-   * cas.restore }` orders a task after it, and no task can tell a hit from a miss.
+   * fails it. It has no outputs, so a hit and a miss key its dependents alike: `deps: { cache:
+   * cache.restore }` orders a task after it, and no task can tell a hit from a miss.
    */
   restore: NodeRef<Record<never, string>>;
   /**
@@ -75,7 +76,7 @@ async function presentPaths(fs: Ports["fs"], path: string[]): Promise<string[]> 
 /** `actions/cache` as two tasks over the `cacheStore` port: see `ActionsCacheTasks`. */
 export function cache(
   graph: Graph<Ports>,
-  spec: ActionsCacheSpec,
+  spec: ActionsCacheSpec & { path: string[] },
   ctx: CiContext,
 ): ActionsCacheTasks {
   const name = spec.name ?? "cache";

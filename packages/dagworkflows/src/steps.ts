@@ -10,7 +10,7 @@ import {
 import type { ArtifactUploadOptions, Ports } from "./ports.ts";
 import { addTask, type TaskContext } from "./task.ts";
 
-export { logPath, type CommandCause } from "./step-records.ts";
+export type { CommandCause } from "./step-records.ts";
 
 /**
  * `workflow.glob` and `workflow.hash`, which load `@actions/glob` on first use: it brings half the
@@ -153,7 +153,7 @@ function commonDir(files: string[]): string {
  * time, never from the cache, and its `response`, `artifact.json`, holds the artifact's id and
  * size, or `null` when nothing went up. `path` names the files when it
  * runs: a glob is matched then, and a dep's handle is the file it produced, so `path: ({ pack })
- * => [pack.tarball]` uploads a tarball straight from the CAS. The archive is rooted at the
+ * => [pack.tarball]` uploads a tarball straight from the cache dir. The archive is rooted at the
  * deepest directory holding every file, as the action roots it, so one node's outputs sit at the
  * top. An upload the service refuses fails the node, as the action fails its step; without a
  * service, locally or in a `run:` step, nothing is uploaded and the log says so.

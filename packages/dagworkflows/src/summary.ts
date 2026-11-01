@@ -17,7 +17,7 @@ type Status = Result["status"];
 export interface RunReport {
   /** In graph order, which is topological. */
   nodes: NodeReport[];
-  /** A node's log as its group printed it, read back from the CAS: stdout, stderr, then a failure's error. */
+  /** A node's log as its group printed it: stdout, stderr, then a failure's error. */
   log: (name: string) => Promise<string[]>;
 }
 

@@ -1,11 +1,11 @@
 import { describe, expect, test } from "bun:test";
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { cp, mkdir, mkdtemp, realpath, rm } from "node:fs/promises";
+import { cp, mkdir, mkdtemp, realpath, rm, symlink } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join, relative } from "node:path";
 
-import { forcedCache, FsCache, MemCache, type Cache, type DagFs } from "./cache.ts";
+import { commitEntry, lookupEntry, newStagingDir, pruneCache, type DagFs } from "./cache.ts";
 import { actionsFor } from "./define-action.ts";
 import { execute } from "./execute.ts";
 import { fileHandle } from "./file-handle.ts";
@@ -33,9 +33,9 @@ import {
   type SettledOutputRef,
 } from "./graph/index.ts";
 import { createBunDagFs } from "./ports/fs.ts";
-import { createMemoryDagFs, type MemoryDagFs } from "./ports/memory-fs.ts";
+import { createMemoryDagFs } from "./ports/memory-fs.ts";
 import { createNodeDagFs } from "./ports/node-fs.ts";
-import { processNode, type RunActionOptions } from "./process-node.ts";
+import { lookupNode, processNode, type RunActionOptions } from "./process-node.ts";
 import { throttledScheduler } from "./schedulers.ts";
 import {
   countResultsByStatus,
@@ -97,10 +97,9 @@ function task<Meta, D extends DepRecord = Record<never, never>>(
   });
 }
 
-function setup(cacheOf: (fs: MemoryDagFs) => Cache = () => new MemCache()) {
+function setup() {
   const fs = createMemoryDagFs();
-  const cache = cacheOf(fs);
-  return { fs, cache, ctx: { ports: { fs }, cache, fs, casBaseDir: "/cas", clock: Date } };
+  return { fs, ctx: { ports: { fs }, fs, cacheDir: "/cache", clock: Date } };
 }
 
 const matching = (re: RegExp): unknown => expect.stringMatching(re);
@@ -242,7 +241,7 @@ describe("execute", () => {
     task(g, "bottom", { deps: { left, right } });
 
     const results = await execute(g, ctx);
-    // A node that ran keeps the key of the CAS dir it wrote to; one held back never computed one.
+    // A node that ran keeps the key of its dir in the cache; one held back never computed one.
     expect(
       Object.fromEntries(
         results.map((r) => [
@@ -303,7 +302,7 @@ describe("execute", () => {
     expect({ peak, counts: counts(results) }).toEqual({ peak: 2, counts: { ran: 6, hit: 0 } });
   });
 
-  test("a cache whose reads miss runs every node, and its writes are the next run's entries", async () => {
+  test("forcing every key runs every node, and their writes are the next run's entries", async () => {
     const { ctx } = setup();
     const build = () => {
       const g = new Graph<Ports>();
@@ -313,7 +312,7 @@ describe("execute", () => {
     };
     expect([
       counts(await execute(build(), ctx)),
-      counts(await execute(build(), { ...ctx, cache: forcedCache(ctx.cache) })),
+      counts(await execute(build(), { ...ctx, forcedKeys: "all" })),
       counts(await execute(build(), ctx)),
     ]).toEqual([
       { ran: 2, hit: 0 },
@@ -836,9 +835,9 @@ describe("file handles", () => {
   });
 });
 
-describe("the CAS", () => {
-  test("an action writes into a private dir, renamed to {key}/out-{contentHash} beside the manifest when it succeeds, so an output named manifest.json still caches, and removed when it fails", async () => {
-    const { ctx, fs } = setup((fs) => new FsCache("/cas", fs));
+describe("the cache", () => {
+  test("an attempt stages in tmp and commits to v1/{key}/{contentHash}, so an output named manifest.json still caches", async () => {
+    const { ctx, fs } = setup();
     const seen: string[] = [];
     const build = () => {
       const g = new Graph<Ports>();
@@ -859,7 +858,7 @@ describe("the CAS", () => {
     };
     const m = succeeded((await execute(build(), ctx)).find((r) => r.name === "m"));
     const second = await execute(build(), ctx);
-    const dir = `/cas/${m.actionKey}`;
+    const dir = `/cache/v1/${m.actionKey}`;
     const [outputDir] = seen;
     assert.ok(outputDir, "the action saw its output dir");
     expect({
@@ -868,10 +867,10 @@ describe("the CAS", () => {
       second: statuses(second),
       files: [...fs.files.keys()].sort(),
     }).toEqual({
-      outputDir: `${dir}/tmp-<uuid>`,
-      outputs: `${dir}/out-${m.contentHash}/manifest.json`,
+      outputDir: "/cache/tmp/<uuid>",
+      outputs: `${dir}/${m.contentHash}/manifest.json`,
       second: { m: "cached", broken: "failed" },
-      files: [`${dir}/manifest.json`, `${dir}/out-${m.contentHash}/manifest.json`],
+      files: [`${dir}/${m.contentHash}/manifest.json`, `${dir}/manifest.json`],
     });
   });
 
@@ -904,19 +903,21 @@ describe("the CAS", () => {
     });
   });
 
-  test("FsCache: a manifest whose outputs are no record, as a bare path or a list once stored, reads as a miss", async () => {
+  test("a manifest whose outputs are no record, as a bare path or a list once stored, reads as a miss", async () => {
     const fs = createMemoryDagFs();
-    const cache = new FsCache("/cas", fs);
-    const stored = { bare: "/cas/bare/out-1/f", list: ["/cas/list/out-1/f"] };
+    const stored = { bare: "f", list: ["f"] };
     for (const [key, outputs] of Object.entries(stored))
       await fs.writeText(
-        `/cas/${key}/manifest.json`,
+        `/cache/v1/${key}/manifest.json`,
         JSON.stringify({ outputs, contentHash: "1", outputHashes: {} }),
       );
-    expect([await cache.get("bare"), await cache.get("list")]).toEqual([undefined, undefined]);
+    expect([
+      await lookupEntry(fs, "/cache", "bare", Date),
+      await lookupEntry(fs, "/cache", "list", Date),
+    ]).toEqual([undefined, undefined]);
   });
 
-  test("FsCache: a get while a put is half written sees the old entry, then the new one", async () => {
+  test("a read while a manifest is half written sees the old entry, then the new one", async () => {
     const base = createMemoryDagFs();
     const halfWritten = Promise.withResolvers<void>();
     const resume = Promise.withResolvers<void>();
@@ -929,20 +930,33 @@ describe("the CAS", () => {
         await base.writeText(path, content);
       },
     };
-    const old = { outputs: { out: "/cas/k/out-1/f" }, contentHash: "1", outputHashes: {} };
-    const next = { outputs: { out: "/cas/k/out-2/f" }, contentHash: "2", outputHashes: {} };
-    await new FsCache("/cas", base).put("k", old);
-    const cache = new FsCache("/cas", fs);
-    const putting = cache.put("k", next);
+    const commit = async (commitFs: DagFs, content: string) => {
+      const stagingDir = newStagingDir(base, "/cache");
+      await base.writeText(`${stagingDir}/f`, content);
+      return commitEntry(
+        commitFs,
+        "/cache",
+        "k",
+        stagingDir,
+        { out: `${stagingDir}/f` },
+        true,
+        Date,
+      );
+    };
+    const old = await commit(base, "old");
+    const writing = commit(fs, "new");
     await halfWritten.promise;
-    const during = await cache.get("k");
+    const during = await lookupEntry(base, "/cache", "k", Date);
     resume.resolve();
-    await putting;
-    expect({ during, after: await cache.get("k") }).toEqual({ during: old, after: next });
+    const next = await writing;
+    expect({ during, after: await lookupEntry(base, "/cache", "k", Date) }).toEqual({
+      during: old,
+      after: next,
+    });
   });
 
-  test("two attempts of one key both keep their published files, and a key's older directories stay after a new attempt publishes", async () => {
-    const { ctx, fs, cache } = setup((fs) => new FsCache("/cas", fs));
+  test("two attempts of one key both keep their content dirs, and a key's older content dirs stay after a new attempt commits", async () => {
+    const { ctx, fs } = setup();
     let calls = 0;
     const chapters = defineActionWithPorts({
       kind: "chapters",
@@ -975,7 +989,7 @@ describe("the CAS", () => {
     const both = (node: string) => [first[`v1:${node}`], first[`v2:${node}`]].map(outputsOf);
     const cleaned = first["v1:clean_description"];
     assert.ok(cleaned, "v1:clean_description settles");
-    const entry = await cache.get(cleaned.actionKey);
+    const entry = await lookupEntry(fs, "/cache", cleaned.actionKey, Date);
     const together = {
       statuses: Object.values(first).map((r) => r.status),
       chapters: new Set(both("chapters")).size,
@@ -983,13 +997,12 @@ describe("the CAS", () => {
       entry: both("clean_description").includes(depPath(entry?.outputs)),
       uploaded: await Promise.all(both("upload").map((p) => fs.exists(p))),
     };
-    const next = by(await execute(build(["v1"]), { ...ctx, cache: forcedCache(cache) }));
+    const next = by(await execute(build(["v1"]), { ...ctx, forcedKeys: "all" }));
     const dirsOf = async (node: string) => {
       const r = succeeded(next[`v1:${node}`]);
-      const dirs = await fs.readdir(`/cas/${r.actionKey}`);
-      const own = `out-${r.contentHash}`;
+      const dirs = await fs.readdir(`/cache/v1/${r.actionKey}`);
       return dirs
-        .map((d) => (d === own ? "out-<its own>" : d.startsWith("out-") ? "out-<earlier>" : d))
+        .map((d) => (d === r.contentHash ? "<its own>" : d === "manifest.json" ? d : "<earlier>"))
         .sort();
     };
     expect({
@@ -1005,60 +1018,38 @@ describe("the CAS", () => {
         entry: true,
         uploaded: [true, true],
       },
-      chapters: ["manifest.json", "out-<its own>"],
-      clean: ["manifest.json", "out-<earlier>", "out-<earlier>", "out-<its own>"],
-      upload: ["out-<earlier>", "out-<earlier>", "out-<its own>"],
+      chapters: ["<its own>", "manifest.json"],
+      clean: ["<earlier>", "<earlier>", "<its own>", "manifest.json"],
+      upload: ["<earlier>", "<earlier>", "<its own>"],
     });
   });
 
-  test("a casBaseDir with a trailing slash is the same directory", async () => {
+  test("a cacheDir with a trailing slash is the same directory", async () => {
     const { ctx } = setup();
-    const run = async (casBaseDir: string) => {
+    const run = async (cacheDir: string) => {
       const g = new Graph<Ports>();
       task(g, "a");
-      const [r] = await execute(g, { ...ctx, casBaseDir });
+      const [r] = await execute(g, { ...ctx, cacheDir });
       assert.ok(r, "the node settles");
-      return [r.status, outputsOf(r).startsWith(`/cas/${r.actionKey}/out-`)];
+      return [r.status, outputsOf(r).startsWith(`/cache/v1/${r.actionKey}/`)];
     };
-    expect([await run("/cas/"), await run("/cas")]).toEqual([
+    expect([await run("/cache/"), await run("/cache")]).toEqual([
       ["done", true],
       ["cached", true],
     ]);
   });
 
-  test("a cache whose get rejects is a miss, never a failure", async () => {
-    const { ctx } = setup();
-    const memory = new MemCache();
-    const unreachable: Cache = {
-      get: async () => {
-        throw new Error("remote unreachable");
-      },
-      put: (key, entry) => memory.put(key, entry),
-    };
-    const g = new Graph<Ports>();
-    task(g, "a");
-    const [r] = await execute(g, { ...ctx, cache: unreachable });
-    assert.ok(r, "the node settles");
-    expect([r.status, (await memory.get(r.actionKey))?.outputs["out"] === outputsOf(r)]).toEqual([
-      "done",
-      true,
-    ]);
-  });
-
-  test("under a relative casBaseDir, the action sees absolute paths, the manifest and the result hold relative ones in either form it returned, and the CAS restored under another working directory still hits", async () => {
+  test("a cache hits under a relative or absolute cacheDir and wherever it is copied: manifests hold paths relative to their content dir, results absolute ones", async () => {
     const fs = createNodeDagFs();
     const tmp = await realpath(await mkdtemp(join(tmpdir(), "dagraph-")));
     const home = process.cwd();
-    const casBaseDir = "cas";
-    const c = { ports: { fs }, cache: new FsCache(casBaseDir, fs), fs, casBaseDir, clock: Date };
-    type Written = { joined: string; relative: string };
-    const seen: { outputDir?: string; handle?: string } = {};
+    const seen: string[] = [];
     const build = () => {
       const g = new Graph<Ports>();
-      const written = defineActionWithPorts({
+      defineActionWithPorts({
         kind: "written",
         action: async (c) => {
-          seen.outputDir = c.outputDir;
+          seen.push(c.outputDir);
           const joined = join(c.outputDir, "srt");
           const relativePath = relative(process.cwd(), join(c.outputDir, "b"));
           await c.ports.fs.writeText(joined, "subtitles");
@@ -1066,52 +1057,48 @@ describe("the CAS", () => {
           return { joined, relative: relativePath };
         },
       }).addNode(g, {});
-      defineActionWithPorts({
-        kind: "reader",
-        deps: { written: dep<Written> },
-        action: async (c) => {
-          seen.handle = c.depOutputs.written.joined.path;
-          return { out: await write(c, "out", await c.depOutputs.written.joined.text()) };
-        },
-      }).addNode(g, { deps: { written } });
       return g;
     };
-    const runIn = async (dir: string) => {
+    const runIn = async (dir: string, cacheDir: string) => {
       await mkdir(dir, { recursive: true });
       process.chdir(dir);
       try {
-        return await execute(build(), c);
+        const [r] = await execute(build(), { ports: { fs }, fs, cacheDir, clock: Date });
+        return succeeded(r);
       } finally {
         process.chdir(home);
       }
     };
     try {
-      const first = await runIn(`${tmp}/first`);
-      const w = succeeded(first.find((r) => r.name === "written"));
-      const keyDir = join(casBaseDir, w.actionKey);
+      const first = await runIn(`${tmp}/first`, "cache");
+      const absolute = await runIn(tmp, `${tmp}/first/cache`);
+      const keyDir = `cache/v1/${first.actionKey}`;
       const manifest: unknown = JSON.parse(
         await fs.readText(`${tmp}/first/${keyDir}/manifest.json`),
       );
       // Only the copy is left, so an entry that named the first tree's files would miss.
       await cp(`${tmp}/first`, `${tmp}/restored`, { recursive: true });
       await rm(`${tmp}/first`, { recursive: true });
-      const restored = await runIn(`${tmp}/restored`);
-      const dir = `${keyDir}/out-${w.contentHash}`;
-      const outputs = { joined: `${dir}/srt`, relative: `${dir}/b` };
+      const restored = await runIn(`${tmp}/restored`, "cache");
+      const outputsIn = (tree: string) => {
+        const dir = `${tmp}/${tree}/${keyDir}/${first.contentHash}`;
+        return { joined: `${dir}/srt`, relative: `${dir}/b` };
+      };
       expect({
-        first: statuses(first),
-        restored: statuses(restored),
-        outputDir: seen.outputDir?.replace(/[0-9a-f-]{36}$/, "<uuid>"),
-        handle: seen.handle,
+        statuses: [first.status, absolute.status, restored.status],
+        outputDir: seen.map((d) => d.replace(/[0-9a-f-]{36}$/, "<uuid>")),
         manifest,
-        result: w.outputs,
+        outputs: [first.outputs, absolute.outputs, restored.outputs],
       }).toEqual({
-        first: { written: "done", reader: "done" },
-        restored: { written: "cached", reader: "cached" },
-        outputDir: `${tmp}/first/${keyDir}/tmp-<uuid>`,
-        handle: `${tmp}/first/${dir}/srt`,
-        manifest: { outputs, contentHash: w.contentHash, outputHashes: w.outputHashes },
-        result: outputs,
+        statuses: ["done", "cached", "cached"],
+        outputDir: [`${tmp}/first/cache/tmp/<uuid>`],
+        manifest: {
+          outputs: { joined: "srt", relative: "b" },
+          contentHash: first.contentHash,
+          outputHashes: first.outputHashes,
+          fileStats: { srt: { size: 9, mtimeMs: anyNumber }, b: { size: 1, mtimeMs: anyNumber } },
+        },
+        outputs: [outputsIn("first"), outputsIn("first"), outputsIn("restored")],
       });
     } finally {
       await rm(tmp, { recursive: true, force: true });
@@ -1126,8 +1113,8 @@ describe("the CAS", () => {
   for (const [label, createFs] of filesystems)
     test(`${label} fs: a concurrent run that rewrites its output while another run's dependent reads it never poisons that dependent's entry`, async () => {
       const fs = createFs();
-      const casBaseDir = `${await mkdtemp(join(tmpdir(), "dagraph-"))}/cas`;
-      const c = { ports: { fs }, cache: new FsCache(casBaseDir, fs), fs, casBaseDir, clock: Date };
+      const cacheDir = `${await mkdtemp(join(tmpdir(), "dagraph-"))}/cache`;
+      const c = { ports: { fs }, fs, cacheDir, clock: Date };
       const aInDouble = Promise.withResolvers<void>();
       const bTruncated = Promise.withResolvers<void>();
       const bMayFinish = Promise.withResolvers<void>();
@@ -1163,10 +1150,43 @@ describe("the CAS", () => {
       const third = await execute(graph("C"), c);
       const double = third.find((r) => r.name === "double");
       const read = double?.status === "cached" && (await fs.readText(outputsOf(double)));
-      await rm(dirname(casBaseDir), { recursive: true, force: true });
+      await rm(dirname(cacheDir), { recursive: true, force: true });
       expect({ statuses: statuses(third), double: read }).toEqual({
         statuses: { count: "cached", double: "cached" },
         double: "84",
+      });
+    });
+
+  for (const [label, createFs] of filesystems)
+    test(`${label} fs: a damaged content dir is replaced when two nodes of one key rerun over it, and then hits`, async () => {
+      const fs = createFs();
+      const cacheDir = `${await mkdtemp(join(tmpdir(), "dagraph-"))}/cache`;
+      const ctx = { ports: { fs }, fs, cacheDir, clock: Date };
+      const build = () => {
+        const g = new Graph<Ports>();
+        const same = defineActionWithPorts({
+          kind: "same",
+          action: async (c) => ({ out: await write(c, "out", "original") }),
+        });
+        same.addNode(g, { name: "first" });
+        same.addNode(g, { name: "second" });
+        return g;
+      };
+      const out = outputsOf((await execute(build(), ctx))[0]);
+      await fs.remove(out);
+      await fs.writeText(out, "damaged");
+      const rerun = async () =>
+        Object.fromEntries(
+          (await execute(build(), ctx)).map((r) => [r.name, [r.status, outputsOf(r)]]),
+        );
+      const again = await rerun();
+      const third = await rerun();
+      const left = { content: await fs.readText(out), tmp: await fs.readdir(`${cacheDir}/tmp`) };
+      await rm(dirname(cacheDir), { recursive: true, force: true });
+      expect({ again, third, left }).toEqual({
+        again: { first: ["done", out], second: ["done", out] },
+        third: { first: ["cached", out], second: ["cached", out] },
+        left: { content: "original", tmp: [] },
       });
     });
 
@@ -1177,8 +1197,8 @@ describe("the CAS", () => {
   for (const [label, createFs] of filesystems)
     test(`${label} fs: a returned path with no file fails its node, naming the output and its file, and the failure is never cached`, async () => {
       const fs = createFs();
-      const casBaseDir = `${await mkdtemp(join(tmpdir(), "dagraph-"))}/cas`;
-      const c = { ports: { fs }, cache: new FsCache(casBaseDir, fs), fs, casBaseDir, clock: Date };
+      const cacheDir = `${await mkdtemp(join(tmpdir(), "dagraph-"))}/cache`;
+      const c = { ports: { fs }, fs, cacheDir, clock: Date };
       const build = () => {
         const g = new Graph<Ports>();
         defineActionWithPorts({
@@ -1198,45 +1218,249 @@ describe("the CAS", () => {
       };
       const first = await execute(build(), c);
       const second = await execute(build(), c);
-      const entries = await Promise.all(second.map((r) => c.cache.get(r.actionKey)));
-      await rm(dirname(casBaseDir), { recursive: true, force: true });
+      const stored = await Promise.all(
+        second.map((r) => fs.exists(`${cacheDir}/v1/${r.actionKey}/manifest.json`)),
+      );
+      await rm(dirname(cacheDir), { recursive: true, force: true });
       const fix = (file: string) =>
         `Write it at \`\${outputDir}/${file}\` before the action returns.`;
       const failed = {
         download: `output "thumb" (audio.jpg) was not written. ${fix("audio.jpg")}`,
         thumbnail: `output "art" (art/audio.jpg) was not written. ${fix("art/audio.jpg")}`,
       };
-      expect({ first: errors(first), second: errors(second), entries }).toEqual({
+      expect({ first: errors(first), second: errors(second), stored }).toEqual({
         first: failed,
         second: failed,
-        entries: [undefined, undefined],
+        stored: [false, false],
       });
     });
 
   for (const [label, createFs] of filesystems.filter(([label]) => label !== "memory"))
-    test(`${label} fs: a returned path that cannot be read for another reason keeps its own error`, async () => {
+    test(`${label} fs: a returned directory or symbolic link fails its node, and a path that cannot be looked at keeps its own error`, async () => {
       const fs = createFs();
-      const casBaseDir = `${await mkdtemp(join(tmpdir(), "dagraph-"))}/cas`;
-      const c = { ports: { fs }, cache: new FsCache(casBaseDir, fs), fs, casBaseDir, clock: Date };
+      const cacheDir = `${await mkdtemp(join(tmpdir(), "dagraph-"))}/cache`;
+      const outside = `${dirname(cacheDir)}/outside`;
+      await fs.writeText(outside, "x");
+      const g = new Graph<Ports>();
+      const returning = (kind: string, path: (c: ActionContext<Ports>) => Promise<string>) =>
+        defineActionWithPorts({
+          kind,
+          action: async (c) => ({ out: await path(c) }),
+        }).addNode(g, {});
+      returning("frames", async (c) => {
+        await c.ports.fs.ensureDir(`${c.outputDir}/frames`);
+        return `${c.outputDir}/frames`;
+      });
+      returning("escape", async (c) => {
+        await symlink(outside, `${c.outputDir}/escape`);
+        return `${c.outputDir}/escape`;
+      });
+      returning("under", async (c) => `${await write(c, "file", "x")}/inner`);
+      const results = await execute(g, { ports: { fs }, fs, cacheDir, clock: Date });
+      const outsideWritable = ((await fs.lstat(outside)).mode & 0o200) !== 0;
+      await rm(dirname(cacheDir), { recursive: true, force: true });
+      const refused = (path: string) =>
+        `output "out" (${path}) is not a regular file. ` +
+        "Return files only, never a directory or a symbolic link.";
+      expect({
+        errors: Object.fromEntries(
+          results.map((r) => [r.name, r.status === "failed" && r.error.message.split(":")[0]]),
+        ),
+        outsideWritable,
+      }).toEqual({
+        errors: { frames: refused("frames"), escape: refused("escape"), under: "ENOTDIR" },
+        outsideWritable: true,
+      });
+    });
+
+  for (const [label, createFs] of filesystems)
+    test(`${label} fs: a committed output loses its write bits alone, so a write to it fails`, async () => {
+      const fs = createFs();
+      const cacheDir = `${await mkdtemp(join(tmpdir(), "dagraph-"))}/cache`;
       const g = new Graph<Ports>();
       defineActionWithPorts({
-        kind: "frames",
+        kind: "script",
         action: async (c) => {
-          await c.ports.fs.ensureDir(`${c.outputDir}/frames`);
-          return { frames: `${c.outputDir}/frames` };
+          const out = await write(c, "run.sh", "echo hi");
+          await c.ports.fs.chmod(out, 0o755);
+          return { out };
         },
       }).addNode(g, {});
-      const results = await execute(g, c);
-      await rm(dirname(casBaseDir), { recursive: true, force: true });
-      expect(results.map((r) => r.status === "failed" && r.error.message.split(":")[0])).toEqual([
-        "EISDIR",
-      ]);
+      const out = outputsOf((await execute(g, { ports: { fs }, fs, cacheDir, clock: Date }))[0]);
+      const mode = (await fs.lstat(out)).mode & 0o777;
+      const rewrite = await fs.writeText(out, "echo bye").then(
+        () => "done",
+        (e: unknown) => (e instanceof Error && "code" in e ? e.code : e),
+      );
+      await rm(dirname(cacheDir), { recursive: true, force: true });
+      expect({ mode, rewrite }).toEqual({ mode: 0o555, rewrite: "EACCES" });
+    });
+
+  for (const [label, createFs] of filesystems)
+    test(`${label} fs: a hit hashes its files only when a size or mtime changed, and a manifest without stats is a miss`, async () => {
+      const disk = createFs();
+      const cacheDir = `${await mkdtemp(join(tmpdir(), "dagraph-"))}/cache`;
+      const hashed: string[] = [];
+      const counting: DagFs = {
+        ...disk,
+        hashFile: async (path) => (hashed.push(path), disk.hashFile(path)),
+      };
+      const ctx = { ports: { fs: disk }, fs: counting, cacheDir, clock: Date };
+      const build = () => {
+        const g = new Graph<Ports>();
+        task(g, "a", { run: () => "original" });
+        return g;
+      };
+      const lookup = async () => {
+        hashed.length = 0;
+        return [(await lookupNode(build(), "a", {}, ctx)).status, hashed.length];
+      };
+      const first = succeeded((await execute(build(), ctx))[0]);
+      const out = outputsOf(first);
+      const hit = await lookup();
+      await execute(build(), { ...ctx, forcedKeys: "all" });
+      const afterForced = await lookup();
+      const manifestFile = `${cacheDir}/v1/${first.actionKey}/manifest.json`;
+      const recorded = await disk.readText(manifestFile);
+      const { contentHash, outputHashes } = first;
+      await disk.writeText(
+        manifestFile,
+        JSON.stringify({ outputs: { out: "out" }, contentHash, outputHashes }),
+      );
+      const unrecorded = await lookup();
+      await disk.writeText(manifestFile, recorded);
+      // Past the filesystem's timestamp resolution and the hit's millisecond.
+      await Bun.sleep(20);
+      await disk.chmod(out, 0o644);
+      await disk.writeText(out, "tampered");
+      const changed = await lookup();
+      await disk.remove(out);
+      const gone = await lookup();
+      await rm(dirname(cacheDir), { recursive: true, force: true });
+      expect({ hit, afterForced, unrecorded, changed, gone }).toEqual({
+        hit: ["cached", 0],
+        afterForced: ["cached", 0],
+        unrecorded: ["missed", 0],
+        changed: ["missed", 1],
+        gone: ["missed", 1],
+      });
+    });
+
+  test("a commit whose rename keeps failing fails its node with the rename's own error", async () => {
+    const { ctx, fs } = setup();
+    const refusing: DagFs = {
+      ...fs,
+      rename: async () => {
+        throw new Error("EACCES: refused");
+      },
+    };
+    const g = new Graph<Ports>();
+    task(g, "a");
+    expect(errors(await execute(g, { ...ctx, fs: refusing }))).toEqual({ a: "EACCES: refused" });
+  });
+
+  for (const [label, createFs] of filesystems)
+    test(`${label} fs: a hit stamps its manifest's last use by the clock, and a commit its content dir's, kept copy or not`, async () => {
+      const fs = createFs();
+      const cacheDir = `${await mkdtemp(join(tmpdir(), "dagraph-"))}/cache`;
+      const committedAt = Date.parse("2026-10-01");
+      const hitAt = Date.parse("2026-10-02");
+      const keptAt = Date.parse("2026-10-03");
+      let now = committedAt;
+      const ctx = { ports: { fs }, fs, cacheDir, clock: { now: () => now } };
+      const build = () => {
+        const g = new Graph<Ports>();
+        task(g, "a");
+        return g;
+      };
+      const { actionKey, contentHash } = succeeded((await execute(build(), ctx))[0]);
+      const keyDir = `${cacheDir}/v1/${actionKey}`;
+      const lastUses = async () => ({
+        manifest: (await fs.lstat(`${keyDir}/manifest.json`)).mtimeMs,
+        contentDir: (await fs.lstat(`${keyDir}/${contentHash}`)).mtimeMs,
+      });
+      const committed = await lastUses();
+      now = hitAt;
+      await lookupNode(build(), "a", {}, ctx);
+      const hit = await lastUses();
+      now = keptAt;
+      await execute(build(), { ...ctx, forcedKeys: "all" });
+      const kept = await lastUses();
+      await rm(dirname(cacheDir), { recursive: true, force: true });
+      expect({ committed: committed.contentDir, hit, kept: kept.contentDir }).toEqual({
+        committed: committedAt,
+        hit: { manifest: hitAt, contentDir: committedAt },
+        kept: keptAt,
+      });
+    });
+
+  for (const [label, createFs] of filesystems)
+    test(`${label} fs: a prune removes key dirs, content dirs no manifest names and tmp entries last used before its time`, async () => {
+      const fs = createFs();
+      const cacheDir = `${await mkdtemp(join(tmpdir(), "dagraph-"))}/cache`;
+      const [v1, tmp] = [`${cacheDir}/v1`, `${cacheDir}/tmp`];
+      const manifestNaming = (contentHash: string) =>
+        JSON.stringify({ outputs: { out: "out" }, contentHash, outputHashes: {}, fileStats: {} });
+      const files = {
+        [`${v1}/stale/manifest.json`]: manifestNaming("a"),
+        [`${v1}/stale/a/out`]: "",
+        [`${v1}/hit/manifest.json`]: manifestNaming("b"),
+        [`${v1}/hit/a/out`]: "",
+        [`${v1}/hit/b/out`]: "",
+        [`${v1}/committing/manifest.json`]: manifestNaming("a"),
+        [`${v1}/committing/a/out`]: "",
+        [`${v1}/committing/b/out`]: "",
+        [`${v1}/uncacheable/a/out`]: "",
+        [`${v1}/uncacheable/b/out`]: "",
+        [`${v1}/.DS_Store`]: "",
+        [`${tmp}/killed/out`]: "",
+        [`${tmp}/running/out`]: "",
+      };
+      for (const [path, content] of Object.entries(files)) await fs.writeText(path, content);
+      const [old, fresh] = [new Date("2026-09-01"), new Date("2026-10-15")];
+      const lastUses = {
+        [`${v1}/stale/manifest.json`]: old,
+        [`${v1}/stale/a`]: old,
+        [`${v1}/hit/manifest.json`]: fresh,
+        [`${v1}/hit/a`]: old,
+        [`${v1}/hit/b`]: old,
+        [`${v1}/committing/manifest.json`]: old,
+        [`${v1}/committing/a`]: old,
+        [`${v1}/committing/b`]: fresh,
+        [`${v1}/uncacheable/a`]: old,
+        [`${v1}/uncacheable/b`]: fresh,
+        [`${v1}/.DS_Store`]: old,
+        [`${tmp}/killed`]: old,
+        [`${tmp}/running`]: fresh,
+      };
+      for (const [path, time] of Object.entries(lastUses)) await fs.utimes(path, time, time);
+      const unusedSince = Date.parse("2026-10-01");
+      const pruned = await pruneCache(fs, cacheDir, { unusedSince });
+      const sorted = async (dir: string) => (await fs.readdir(dir)).sort();
+      const left = {
+        v1: await sorted(v1),
+        hit: await sorted(`${v1}/hit`),
+        committing: await sorted(`${v1}/committing`),
+        uncacheable: await sorted(`${v1}/uncacheable`),
+        tmp: await sorted(tmp),
+      };
+      await rm(dirname(cacheDir), { recursive: true, force: true });
+      expect({ pruned, left }).toEqual({
+        pruned: [`${tmp}/killed`, `${v1}/hit/a`, `${v1}/stale`, `${v1}/uncacheable/a`],
+        left: {
+          v1: [".DS_Store", "committing", "hit", "uncacheable"],
+          hit: ["b", "manifest.json"],
+          committing: ["a", "b", "manifest.json"],
+          uncacheable: ["b"],
+          tmp: ["running"],
+        },
+      });
     });
 });
 
 describe("cacheable: false", () => {
   test("runs every time, never stores an entry, and downstream still caches by content", async () => {
-    const { ctx, cache } = setup();
+    const { ctx, fs } = setup();
     const build = () => {
       const g = new Graph<Ports>();
       const probe = task(g, "probe", { cacheable: false, run: () => "same-every-time" });
@@ -1249,8 +1473,8 @@ describe("cacheable: false", () => {
     assert.ok(probe, "probe settles");
     expect({
       second: statuses(second),
-      stored: await cache.get(probe.actionKey),
-    }).toEqual({ second: { probe: "done", report: "cached" }, stored: undefined });
+      stored: await fs.exists(`/cache/v1/${probe.actionKey}/manifest.json`),
+    }).toEqual({ second: { probe: "done", report: "cached" }, stored: false });
   });
 });
 
@@ -1333,7 +1557,7 @@ describe("events", () => {
           name: "grouped",
           actionKey: anyHash,
           status: "done",
-          outputs: { out: matching(/^\/cas\/[0-9a-f]{64}\/out-[0-9a-f]{64}\/out$/) },
+          outputs: { out: matching(/^\/cache\/v1\/[0-9a-f]{64}\/[0-9a-f]{64}\/out$/) },
           contentHash: anyHash,
           outputHashes: { out: anyHash },
           elapsed: 247,
@@ -1642,51 +1866,6 @@ describe("a result is plain data", () => {
   });
 });
 
-describe("verify outputs on a cache hit", () => {
-  test("a deleted or changed output re-runs the node", async () => {
-    const { ctx, fs } = setup();
-    const run = async () => {
-      const g = new Graph<Ports>();
-      task(g, "a", { run: () => "original" });
-      const [r] = await execute(g, ctx);
-      assert.ok(r, "the node settles");
-      return r;
-    };
-    const first = await run();
-    await fs.remove(outputsOf(first));
-    const deleted = await run();
-    await fs.writeText(outputsOf(deleted), "tampered");
-    const changed = await run();
-    expect([first.status, deleted.status, changed.status, (await run()).status]).toEqual([
-      "done",
-      "done",
-      "done",
-      "cached",
-    ]);
-  });
-
-  test("a damaged copy in the CAS re-runs the node, whose own copy then stands in for it", async () => {
-    const { ctx, fs } = setup();
-    const seen: string[] = [];
-    const run = async () => {
-      const g = new Graph<Ports>();
-      task(g, "a", { run: (c) => (seen.push(c.outputDir), "original") });
-      const [r] = await execute(g, ctx);
-      assert.ok(r, "the node settles");
-      return [r.status, outputsOf(r)] as const;
-    };
-    const [, path] = await run();
-    await fs.writeText(path, "x");
-    const second = await run();
-    const third = await run();
-    expect({ second, third, content: await fs.readText(`${seen[1]}/out`) }).toEqual({
-      second: ["done", `${seen[1]}/out`],
-      third: ["cached", `${seen[1]}/out`],
-      content: "original",
-    });
-  });
-});
-
 test("a listener's promise for a start holds the action back until it resolves, and one that rejects fails the node without running it", async () => {
   const { ctx } = setup();
   const ran: string[] = [];
@@ -1934,7 +2113,7 @@ test("a node two roles name is one dep: the dependent runs once with it in both 
     both.addNode(g, { deps: { main: ref, after: settled(ref) } });
     return {
       described: g.describe().find((n) => n.name === "both")?.deps,
-      statuses: statuses(await execute(g, { ...ctx, cache: new MemCache() })),
+      statuses: statuses(await execute(g, { ...ctx, forcedKeys: "all" })),
     };
   };
   const ok = await run();

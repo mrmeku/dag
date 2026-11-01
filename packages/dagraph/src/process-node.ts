@@ -1,12 +1,14 @@
-import { join, normalize } from "pathe";
-import type { Cache, CacheEntry, DagFs } from "./cache.ts";
 import {
-  collectPaths,
+  commitEntry,
+  discard,
+  lookupEntry,
+  newStagingDir,
+  type CacheEntry,
+  type DagFs,
+} from "./cache.ts";
+import {
   computeActionKey,
-  hashOutputFiles,
   mapPaths,
-  verifyOutputs,
-  type EntryHashes,
   type HashFileFn,
   type KeyedDep,
   type KeyedInput,
@@ -23,10 +25,12 @@ import { errorOf } from "./utils.ts";
  * tools, which the engine passes through; a graph whose actions need none takes no `ports`.
  */
 export type ExecutionContext<Ports = unknown> = {
-  cache: Cache;
   fs: DagFs;
-  casBaseDir: string;
+  /** The cache's directory, relative or absolute; results name its files by absolute path. */
+  cacheDir: string;
   clock: Clock;
+  /** Action keys whose lookups miss, or `"all"`: their nodes run again and write new entries. */
+  forcedKeys?: ReadonlySet<string> | "all";
 } & (unknown extends Ports ? { ports?: Ports } : { ports: Ports });
 
 export interface RunActionOptions<Meta> {
@@ -46,33 +50,6 @@ export type Lookup = Extract<Result, { status: "cached" | "failed" | "dep-failed
 const ignoreRejection = (returned: unknown) => {
   if (returned instanceof Promise) returned.catch(() => {});
 };
-
-/** Removes an attempt's directory, best effort: whether it is gone never changes a result. */
-const discard = (fs: DagFs, dir: string) => fs.remove(dir).catch(() => {});
-
-/**
- * Move an attempt's directory to `published`, the key's directory for its content, which
- * nothing writes again, and return the outputs at their new paths. When a concurrent attempt
- * published the same content first, its copy is used and this one dropped. When that copy no
- * longer hashes to the content, the attempt's directory stays where it is and keeps the outputs.
- */
-async function publish(
-  fs: DagFs,
-  keyDir: string,
-  staging: string,
-  outputs: Outputs,
-  hashes: EntryHashes,
-): Promise<Outputs> {
-  const published = `${keyDir}/out-${hashes.contentHash}`;
-  const moved = mapPaths(outputs, (path) => published + normalize(path).slice(staging.length));
-  try {
-    await fs.rename(staging, published);
-  } catch {
-    if (!(await verifyOutputs({ outputs: moved, ...hashes }, fs.hashFile, keyDir))) return outputs;
-    await discard(fs, staging);
-  }
-  return moved;
-}
 
 /** The node's action key, from its kind, its inputs by name and its deps by role. */
 async function actionKeyOf(
@@ -129,7 +106,7 @@ export async function lookupNode<Ports, Meta>(
   executionContext: ExecutionContext<NoInfer<Ports>>,
 ): Promise<Lookup> {
   const found = nodeNamed(graph, name);
-  const { cache, fs, casBaseDir }: ExecutionContext = executionContext;
+  const { fs, cacheDir, clock, forcedKeys }: ExecutionContext = executionContext;
   const { node } = found;
   const entryOf = (dep: string) => (Object.hasOwn(depEntries, dep) ? depEntries[dep] : undefined);
   const missing = requiredDeps(node).find((dep) => !entryOf(dep));
@@ -141,12 +118,9 @@ export async function lookupNode<Ports, Meta>(
   } catch (e) {
     return { name, actionKey: "", status: "failed", error: errorOf(e) };
   }
-  if (node.cacheable !== false) {
-    // An entry that cannot be read, the cache's own failure included, is a miss.
-    const cached = await Promise.resolve()
-      .then(() => cache.get(actionKey))
-      .catch(() => undefined);
-    if (cached && (await verifyOutputs(cached, fs.hashFile, join(casBaseDir, actionKey)))) {
+  if (node.cacheable !== false && forcedKeys !== "all" && !forcedKeys?.has(actionKey)) {
+    const cached = await lookupEntry(fs, cacheDir, actionKey, clock);
+    if (cached) {
       const { outputs, contentHash, outputHashes } = cached;
       return { name, actionKey, status: "cached", outputs, contentHash, outputHashes };
     }
@@ -166,25 +140,23 @@ export async function runAction<Ports, Meta>(
   options: RunActionOptions<Meta> = {},
 ): Promise<Result> {
   const found = nodeNamed(graph, name);
-  const { cache, fs, casBaseDir, ports, clock }: ExecutionContext = executionContext;
+  const { fs, cacheDir, ports, clock }: ExecutionContext = executionContext;
   const { node, spec, roles } = found;
   const meta = node.meta === undefined ? {} : { meta: node.meta };
   const entryOf = (dep: string) => (Object.hasOwn(depEntries, dep) ? depEntries[dep] : undefined);
   const handle = (path: string) => fileHandle(fs, path);
-  const keyDir = join(casBaseDir, actionKey);
   const notRun = (e: unknown): Result => ({ name, actionKey, status: "failed", error: errorOf(e) });
 
   const cancel = options.signal;
   const cancelled: Result = { name, actionKey, status: "cancelled" };
   if (cancel?.aborted) return cancelled;
-  const staging = `${keyDir}/tmp-${crypto.randomUUID()}`;
-  const outputDir = fs.resolve(staging);
+  const outputDir = newStagingDir(fs, cacheDir);
   const dropped = async (result: Result) => {
-    await discard(fs, staging);
+    await discard(fs, outputDir);
     return result;
   };
   try {
-    await fs.ensureDir(staging);
+    await fs.ensureDir(outputDir);
   } catch (e) {
     return dropped(notRun(e));
   }
@@ -267,21 +239,10 @@ export async function runAction<Ports, Meta>(
         `the action returned ${JSON.stringify(settled.outputs)}, not a record of outputs: ` +
           "return { <name>: path }",
       );
-    // A returned path, absolute or not, is stored under the staging dir as casBaseDir gives it.
-    const under = `${normalize(outputDir)}/`;
-    const outside = collectPaths(settled.outputs).find(
-      (p) => !normalize(fs.resolve(p)).startsWith(under),
-    );
-    if (outside !== undefined)
-      throw new Error(`output not under the output dir: ${outside} is not under ${outputDir}`);
-    const returned = mapPaths(
-      settled.outputs,
-      (p) => `${staging}/${normalize(fs.resolve(p)).slice(under.length)}`,
-    );
-    const hashes = await hashOutputFiles(returned, fs.hashFile, keyDir);
-    const outputs = await publish(fs, keyDir, staging, returned, hashes);
-    if (node.cacheable !== false) await cache.put(actionKey, { outputs, ...hashes });
-    return { name, actionKey, status: "done", outputs, ...hashes, elapsed: elapsed() };
+    const cacheable = node.cacheable !== false;
+    const { outputs } = settled;
+    const entry = await commitEntry(fs, cacheDir, actionKey, outputDir, outputs, cacheable, clock);
+    return { name, actionKey, status: "done", ...entry, elapsed: elapsed() };
   } catch (e) {
     return await dropped(failed(errorOf(e)));
   } finally {

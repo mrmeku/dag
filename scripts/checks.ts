@@ -11,7 +11,7 @@ const ENGINE = "packages/dagraph/src/**";
 /** Each package packed as a release packs it, so a change that breaks packing fails CI. */
 export async function addPackChecks(
   workflow: Workflow<"test">,
-  casRestore: NodeRef,
+  cacheRestore: NodeRef,
 ): Promise<Record<string, NodeRef>> {
   const sources = await workflow.glob(
     "packages/*/src/**",
@@ -27,18 +27,18 @@ export async function addPackChecks(
       cmd: ({ outputDir }) => ["bun", "scripts/pack.ts", pkg, PACK_VERSION, outputDir],
       outputs: { tarball: `mrmeku-${pkg}-${PACK_VERSION}.tgz` },
       inputs: sources,
-      deps: { cas: casRestore },
+      deps: { cache: cacheRestore },
     });
   return { "pack:dagraph": pack("dagraph"), "pack:dagworkflows": pack("dagworkflows") };
 }
 
 export async function addChecks(
   workflow: Workflow<"test">,
-  casRestore: NodeRef,
+  cacheRestore: NodeRef,
   others: Record<string, NodeRef> = {},
 ): Promise<NodeRef> {
-  // Each check orders after the CAS restore.
-  const afterRestore = { deps: { cas: casRestore } };
+  // Each check orders after the cache restore.
+  const afterRestore = { deps: { cache: cacheRestore } };
   const [all, engine, runner] = await Promise.all([
     workflow.glob("packages/*/src/**", "scripts/**", "eslint.config.ts", ...TOOLCHAIN),
     workflow.glob(ENGINE, ...TOOLCHAIN),

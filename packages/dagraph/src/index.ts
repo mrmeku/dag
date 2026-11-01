@@ -1,13 +1,6 @@
 // The API reference's name for this entry point: TypeDoc names the "." export "".
 /** @module index */
-export {
-  FsCache,
-  MemCache,
-  forcedCache,
-  type Cache,
-  type CacheEntry,
-  type DagFs,
-} from "./cache.ts";
+export { pruneCache, type CacheEntry, type DagFs, type PruneOptions } from "./cache.ts";
 export {
   actionsFor,
   defineAction,

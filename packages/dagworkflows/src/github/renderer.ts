@@ -141,5 +141,13 @@ export function createGithubRenderer(host: Host): RunListener {
   };
 }
 
-export const createGithubStore = (ports: Pick<Ports, "host" | "fs">, casBaseDir: string) =>
-  createRunStore({ fs: ports.fs, casBaseDir, listeners: [createGithubRenderer(ports.host)] });
+export const createGithubStore = (
+  ports: Pick<Ports, "host" | "fs">,
+  { buildLogDir, durationsFile }: { buildLogDir?: string | undefined; durationsFile: string },
+) =>
+  createRunStore({
+    fs: ports.fs,
+    buildLogDir,
+    durationsFile,
+    listeners: [createGithubRenderer(ports.host)],
+  });

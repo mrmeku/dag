@@ -18,7 +18,7 @@ import { createRunStore, type RunListener, type RunStore } from "../kernel/store
 import type { Host, SyncFs } from "../ports.ts";
 import { createLocalHost } from "../ports/local.ts";
 import { syncFs as nodeSyncFs } from "../ports/real.ts";
-import type { RunOptions } from "../runner.ts";
+import { durationsFileOf, type RunOptions } from "../runner.ts";
 import { createFailuresReport } from "./recorders/failures-report.ts";
 import { createLogFiles } from "./recorders/log-files.ts";
 import { createAgentRenderer } from "./terminal/agent.ts";
@@ -104,8 +104,8 @@ export function createLocalSession(
   const host = createLocalHost({ exec, fs, summaryPath: summaryFile, write: writeLine });
   const store = createRunStore({
     fs,
-    casBaseDir: runOptions.casBaseDir,
-    lastRunAtBegin: true,
+    buildLogDir: runOptions.buildLogDir,
+    durationsFile: durationsFileOf(runOptions),
     listeners: [
       terminalRenderer ?? createGroupedRenderer(host),
       createFailuresReport(localContext, syncFs, warn),

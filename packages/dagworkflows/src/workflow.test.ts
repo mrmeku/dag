@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { describe, test } from "node:test";
-import { logPath, runWorkflow, settled, type OutputRef } from "./index.ts";
+import { runWorkflow, settled, type OutputRef } from "./index.ts";
 import type { Ports } from "./ports.ts";
 import { createTestPorts } from "./ports/memory.ts";
 import type { PostSpec } from "./post.ts";
@@ -134,8 +134,9 @@ describe("two of every node the facade adds", () => {
     // A command prints its last argument, so its log shows which command ran.
     const { ports, fs, cacheStore } = createTestPorts({
       exec: {
-        run: async (argv) => {
+        run: async (argv, opts) => {
           const output = `${argv.at(-1) ?? ""}\n`;
+          opts?.onOutput?.(output);
           return { ended: "exited", code: 0, stdout: output, stderr: "", output, ok: true };
         },
       },
@@ -182,8 +183,9 @@ describe("two of every node the facade adds", () => {
     const { results } = await runWorkflow({
       implementation,
       ports,
-      casBaseDir: "/cas",
+      cacheDir: "/cache",
       historyDir: "/state/history",
+      buildLogDir: "/state/build-logs",
     });
     const read = async (outputs: Outputs): Promise<unknown> =>
       typeof outputs === "string"
@@ -199,7 +201,7 @@ describe("two of every node the facade adds", () => {
     const nodes = Object.fromEntries(
       await Promise.all(
         results.map(async (result): Promise<[string, unknown]> => {
-          const log = logPath("/cas", result.actionKey);
+          const log = `/state/build-logs/${result.actionKey}.log`;
           return [
             result.name,
             {
@@ -228,7 +230,8 @@ describe("two of every node the facade adds", () => {
         `Artifact ${x} has been successfully uploaded! Final size is 1 bytes. Artifact ID is ${id}\n`,
         { response: JSON.stringify({ id, size: 1 }, null, 2) },
       ),
-      [`require:${x}`]: node("", {
+      // It printed nothing, so it keeps no log.
+      [`require:${x}`]: node(null, {
         outcome: JSON.stringify({ present: [x], missing: [] }, null, 2),
       }),
       [`up:${x}`]: node(`up ${x}\n`, {}),

@@ -1,3 +1,4 @@
+import { actionsFor, execute, Graph, type DagFs } from "@mrmeku/dagraph";
 import { createNodeDagFs } from "@mrmeku/dagraph/fs/node";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
@@ -11,6 +12,7 @@ import {
   realpathSync,
   rmSync,
   symlinkSync,
+  utimesSync,
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
@@ -34,7 +36,7 @@ test("the local summary across processes and passes, without escape codes", asyn
   await host.summary("## run\n\x1b[31merror\x1b[0m\n");
   await host.summary("## post\n");
   assert.deepEqual(
-    { file: fs.files.get("s.md"), lines },
+    { file: fs.files.get("s.md")?.data, lines },
     { file: "## run\nerror\n## post\n", lines: ["summary: s.md", "summary: s.md"] },
   );
 });
@@ -144,7 +146,7 @@ describe("the local cache store, what each checkout holds on disk", () => {
     });
     const inMain = await from(main, () => store.restore(["out", "kept"], "k-1", []));
     const inWorktree = await from(worktree, async () => {
-      // The run makes the CAS directory, empty, before its restore.
+      // The run makes its cache dir, empty, before its restore.
       mkdirSync("out/empty", { recursive: true });
       writeFile("kept/own.txt", "the worktree's");
       const source = await store.restore(["out", "kept", "absent", "~/.npm"], "k-1", []);
@@ -164,6 +166,35 @@ describe("the local cache store, what each checkout holds on disk", () => {
         },
       },
     );
+  });
+
+  test("a worktree restore keeps cache hits stat-only", async () => {
+    const checkout = checkouts("worktree");
+    const graph = new Graph<{ fs: DagFs }>();
+    actionsFor<{ fs: DagFs }>()({
+      kind: "written",
+      action: async ({ outputDir, ports }) => {
+        const out = `${outputDir}/out`;
+        await ports.fs.writeText(out, "x");
+        // Past the half millisecond, so Node's copy rounds it up and Bun's truncates it.
+        utimesSync(out, 1_700_000_000.0007, 1_700_000_000.0007);
+        return { out };
+      },
+    }).addNode(graph, {});
+    const disk = createNodeDagFs();
+    const hashed: string[] = [];
+    const counting: DagFs = {
+      ...disk,
+      hashFile: async (path) => (hashed.push(path), disk.hashFile(path)),
+    };
+    const run = (fs: DagFs) =>
+      execute(graph, { ports: { fs }, fs, cacheDir: "cache", clock: Date });
+    await from(checkout("main"), () => run(disk));
+    const statuses = await from(checkout("worktree"), async () => {
+      await worktreeStore().restore(["cache/v1"], "k-1", []);
+      return (await run(counting)).map((result) => result.status);
+    });
+    assert.deepEqual({ statuses, hashed }, { statuses: ["cached"], hashed: [] });
   });
 
   test("a restore waits for another's lock on the path, and copies nothing once the holder filled it", async () => {

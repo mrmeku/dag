@@ -3,7 +3,6 @@ import {
   createMemoryCacheStore,
   createTestPorts,
   createWorkflow,
-  logPath,
   okExec,
   selectNodes,
   type Ports,
@@ -11,15 +10,15 @@ import {
 import assert from "node:assert/strict";
 import { basename } from "node:path";
 import { describe, test } from "node:test";
-import { CAS, processEach } from "./process-each.ts";
+import { processEach } from "./process-each.ts";
 import release from "./release.ts";
 
 const BASH = ["bash", "--noprofile", "--norc", "-eo", "pipefail", "-c"];
 
 describe("release workflow", () => {
-  test("a version tag releases its version and saves its CAS, any other ref dry-runs and saves none; packs are outputs, publishes are receipts after require-all, the engine before the runner", async () => {
+  test("a version tag releases its version and saves its cache, any other ref dry-runs and saves none; packs are outputs, publishes are receipts after require-all, the engine before the runner", async () => {
     const build = async (ref: string) => {
-      // An earlier attempt of this release, and main's CAS before it.
+      // An earlier attempt of this release, and main's cache before it.
       const cacheStore = createMemoryCacheStore(["dag-release-1.2.3-0", "dag-main-1"]);
       // The $TARBALL each shell line got.
       const tarballs = new Map<string | undefined, string | undefined>();
@@ -44,19 +43,18 @@ describe("release workflow", () => {
       const out = await createWorkflow(graph, ports, await ports.host.context()).compose(release);
       const processed = await processEach(graph, ports);
       const resultOf = (name: string) => processed.get(name)?.result;
-      // What a step ran, its deps' outputs resolved to their paths in the CAS.
+      // What a step ran, its deps' outputs resolved to their paths in the cache dir.
       const ran = (name: string) =>
         processed
           .get(name)
-          ?.commands[0]?.map((arg) => arg.replace(/^\/cas\/\w+\/tmp-[\w-]+$/, "<outputDir>"));
+          ?.commands[0]?.map((arg) => arg.replace(/^\/cache\/tmp\/[\w-]+$/, "<outputDir>"));
       const output = (name: string, key: string) => {
         const result = resultOf(name);
         assert.ok(result?.status === "done", `${name} is done`);
         return namedOutput(result.outputs, key);
       };
-      const restored = resultOf("restore:cas");
       return {
-        // The graph a run executes, where the save waits for every node that reads the CAS.
+        // The graph a run executes, where the save waits for every node that reads the cache dir.
         nodes: selectNodes(graph).describe(),
         ...out,
         processed,
@@ -64,8 +62,7 @@ describe("release workflow", () => {
         ran,
         tarballOf: (name: string) => tarballs.get(ran(name)?.at(-1)),
         output,
-        restored:
-          restored?.status === "done" && (await fs.readText(logPath(CAS, restored.actionKey))),
+        restored: processed.get("restore:cache")?.log,
         saved: [...cacheStore.entries].slice(2),
         uploads: [...artifactStore.uploads].map(([name, { files }]) => [
           name,
@@ -109,13 +106,13 @@ describe("release workflow", () => {
         uploads: tagged.uploads,
         uploadDeps: ["upload:dagraph", "upload:action"].map((n) => by(n).deps),
         saveDeps: {
-          deps: by("save:cas").deps.sort(),
-          settled: by("save:cas").settledDeps?.sort(),
+          deps: by("save:cache").deps.sort(),
+          settled: by("save:cache").settledDeps?.sort(),
         },
         uncached: tagged.nodes.filter((n) => n.cacheable === false).map((n) => n.name),
         checksAfterRestore: tagged.nodes
           .filter((n) => /^(typecheck|lint|test:)/.test(n.name))
-          .every((n) => n.deps.join() === "restore:cas"),
+          .every((n) => n.deps.join() === "restore:cache"),
       },
       {
         versions: ["1.2.3", false, "0.0.0-dev.abc1234", true],
@@ -130,8 +127,8 @@ describe("release workflow", () => {
           "release",
           "release:action",
           "require-all",
-          "restore:cas",
-          "save:cas",
+          "restore:cache",
+          "save:cache",
           "test:dagraph",
           "test:dagworkflows",
           "typecheck",
@@ -145,7 +142,7 @@ describe("release workflow", () => {
           "Cache restored from: dag-main-1\n",
         ],
         // A release saves its attempt; a dry run saves nothing.
-        saved: [[["dag-release-1.2.3-abc1234def", [".dag/cas"]]], [], []],
+        saved: [[["dag-release-1.2.3-abc1234def", [".dag/cache", ".dag/durations"]]], [], []],
         packCmd: ["bun", "scripts/pack.ts", "dagraph", "1.2.3", "<outputDir>"],
         packOutputs: [["tarball", "mrmeku-dagworkflows-1.2.3.tgz"]],
         packInputs: true,
@@ -190,7 +187,7 @@ describe("release workflow", () => {
             "release",
             "release:action",
             "require-all",
-            "restore:cas",
+            "restore:cache",
             "test:dagraph",
             "test:dagworkflows",
             "typecheck",
@@ -209,7 +206,7 @@ describe("release workflow", () => {
             "release",
             "release:action",
             "require-all",
-            "restore:cas",
+            "restore:cache",
             "test:dagraph",
             "test:dagworkflows",
             "typecheck",
@@ -219,11 +216,11 @@ describe("release workflow", () => {
           ],
         },
         uncached: [
-          "restore:cas",
+          "restore:cache",
           "upload:dagraph",
           "upload:dagworkflows",
           "upload:action",
-          "save:cas",
+          "save:cache",
         ],
         checksAfterRestore: true,
       },

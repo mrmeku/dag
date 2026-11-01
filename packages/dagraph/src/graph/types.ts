@@ -67,7 +67,7 @@ export type AnyNodeRef<T extends Outputs = Outputs> = NodeRef<T> | SettledRef<T>
 /**
  * A ref to one output of a required dep, which a node's `inputs` function receives by the dep's
  * role: `inputs: ({ pack }) => ({ argv: ["npm", "publish", pack.tarball] })`. In a value input it
- * resolves to a handle on that output's published file, or a list of handles, and keys as the
+ * resolves to a handle on that output's committed file, or a list of handles, and keys as the
  * role it points through and the output's name. `S` is the scope of the call that received it:
  * the ref goes only in what that call returns, so another node's ref does not compile.
  */

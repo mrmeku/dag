@@ -1,10 +1,10 @@
 /**
  * The release as a dagworkflows workflow, run by .github/workflows/release.yml on a `v*` tag.
  * `bun run release` runs it locally as a dry run: real tarballs and the action bundle land in the
- * CAS, nothing is published.
+ * cache dir, nothing is published.
  *
  * - version: a `v1.2.3` tag releases 1.2.3; any other ref is a dry run of `0.0.0-dev.<sha>`.
- * - cache: the CAS restored from this release's own earlier attempt first, then main's, and on a
+ * - cache: the cache dir restored from this release's earlier attempt first, then main's, and on a
  *   release tag saved after every other task, under the release key, or the partial key after a
  *   failure, which the restore finds as a prefix. So a re-run after a partial failure finds the
  *   receipts of what already published and skips it. A dry run saves nothing.
@@ -40,13 +40,11 @@ export default defineWorkflow({
     const version = tagged ?? `0.0.0-dev.${workflow.ctx.sha.slice(0, 7) || "local"}`;
     const dryRun = tagged === undefined;
 
-    const cas = workflow.cache({
-      name: "cas",
-      path: [".dag/cas"],
+    const cache = workflow.cache({
       key: `dag-release-${version}-${workflow.ctx.sha}`,
       restoreKeys: [`dag-release-${version}-`, "dag-main-"],
     });
-    const afterCas = { deps: { cas: cas.restore } };
+    const afterRestore = { deps: { cache: cache.restore } };
     const docs = workflow.task({
       name: "docs",
       cmd: ["node", "scripts/docs.ts", "--check"],
@@ -62,9 +60,9 @@ export default defineWorkflow({
         ".prettierrc",
         ...TOOLCHAIN,
       ),
-      ...afterCas,
+      ...afterRestore,
     });
-    const requireAll = await addChecks(workflow, cas.restore, { docs });
+    const requireAll = await addChecks(workflow, cache.restore, { docs });
 
     const sources = await workflow.glob(
       "packages/*/src/**",
@@ -78,7 +76,7 @@ export default defineWorkflow({
         cmd: ({ outputDir }) => ["bun", "scripts/pack.ts", pkg, version, outputDir],
         outputs: { tarball: `mrmeku-${pkg}-${version}.tgz` },
         inputs: sources,
-        ...afterCas,
+        ...afterRestore,
       });
       workflow.uploadArtifact({
         name: `upload:${pkg}`,
@@ -103,7 +101,7 @@ export default defineWorkflow({
       ],
       outputs: { main: "main.js", post: "post.js" },
       inputs: sources,
-      ...afterCas,
+      ...afterRestore,
     });
 
     workflow.uploadArtifact({
@@ -143,7 +141,7 @@ export default defineWorkflow({
     });
 
     const release = workflow.requireAll({ name: "release", deps: { ...published, action } });
-    if (!dryRun) cas.save();
+    if (!dryRun) cache.save();
     return { version, dryRun, release };
   },
 });

@@ -10,7 +10,7 @@ import { runPost, runWorkflow } from "./runner.ts";
 import { selectNodes } from "./select.ts";
 import { defineWorkflow, type WorkflowDef } from "./workflow.ts";
 
-const CAS = "/cas";
+const CACHE_DIR = "/cache";
 const HISTORY_DIR = "/state/history";
 const exited = (code: number): ExecResult => ({
   ended: "exited",
@@ -25,7 +25,7 @@ const optionsOf = (def: WorkflowDef, ports: Ports) => ({
   implementation: def.implementation,
   ...(def.schedulerOptions && { schedulerOptions: def.schedulerOptions }),
   ports,
-  casBaseDir: CAS,
+  cacheDir: CACHE_DIR,
   historyDir: HISTORY_DIR,
 });
 /** The lines of the first logged group whose title starts with `title`. */
@@ -234,7 +234,7 @@ describe("a release", () => {
     ports.fs = {
       ...fs,
       ensureDir: async (path) => {
-        if (path.includes("/tmp-")) controller.abort();
+        if (path.startsWith(`${CACHE_DIR}/tmp/`)) controller.abort();
         return fs.ensureDir(path);
       },
     };

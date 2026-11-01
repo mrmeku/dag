@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test";
 import assert from "node:assert/strict";
 import { getEventListeners } from "node:events";
 
-import { MemCache, type DagFs } from "./cache.ts";
+import type { DagFs } from "./cache.ts";
 import { actionsFor } from "./define-action.ts";
 import { runNode } from "./execute.ts";
 import { Graph, nodeInputs, type Node } from "./graph/index.ts";
@@ -276,7 +276,7 @@ describe("orchestrate", () => {
 
   test("with runNode given no signal, a cancel still ends a pending miss's wait: it settles cancelled", async () => {
     const fs = createMemoryDagFs();
-    const ctx = { ports: { fs }, cache: new MemCache(), fs, casBaseDir: "/cas", clock: Date };
+    const ctx = { ports: { fs }, fs, cacheDir: "/cache", clock: Date };
     const controller = new AbortController();
     const defineActionWithPorts = actionsFor<{ fs: DagFs }, "heavy">();
     const heavy = defineActionWithPorts({

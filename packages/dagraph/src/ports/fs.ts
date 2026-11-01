@@ -3,7 +3,7 @@
  * index: it imports node:fs, and the index is bundled into Temporal's V8 workflow sandbox,
  * which admits no I/O modules (lint refuses them elsewhere, eslint.config.ts).
  */
-import { mkdir, readdir, rename, rm } from "node:fs/promises";
+import { chmod, lstat, mkdir, open, readdir, rename, rm, utimes } from "node:fs/promises";
 import { resolve } from "node:path";
 import type { DagFs } from "../cache.ts";
 import { isMissingFileError } from "../utils.ts";
@@ -26,6 +26,17 @@ export function createBunDagFs(): DagFs {
     },
     rename,
     remove: (path) => rm(path, { recursive: true, force: true }),
+    lstat,
+    chmod,
+    fsync: async (path) => {
+      const file = await open(path, "r");
+      try {
+        await file.sync();
+      } finally {
+        await file.close();
+      }
+    },
+    utimes,
     readdir: (dir) =>
       readdir(dir).catch((e: unknown) => {
         if (isMissingFileError(e)) return [];

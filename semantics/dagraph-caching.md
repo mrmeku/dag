@@ -8,17 +8,17 @@ Some actions are slow or cost money: a download, a long computation, a model cal
 
 - every node gets an **action key**, a hash of what defines its work;
 - every successful run stores a **cache entry** under that key: the output paths and a hash of their contents;
-- the output files live in a **CAS** (content-addressed store), a directory tree named by those hashes.
+- the output files live in the **cache**, a directory tree named by those hashes.
 
-Core idea: a node's key is built from its action's kind, its inputs and the content hashes of its deps. If a stored entry exists for that key and its files still hash to the stored content hash, the node is a **hit** (`cached`) and its action does not run. Otherwise it is a **miss**: the action runs in a fresh private directory, the directory is published into the CAS, and the entry is written. Dependents key on content, not on keys, so a node that reruns and produces the same bytes stops the change from spreading further. This is **early cutoff**.
+Core idea: a node's key is built from its action's kind, its inputs and the content hashes of its deps. If a stored entry exists for that key and its files are unchanged, by the size and mtime they were committed with or else by their hash, the node is a **hit** (`cached`) and its action does not run. Otherwise it is a **miss**: the action runs in a fresh private directory, its files are made read-only, the directory is committed into the cache, and the entry is written. Dependents key on content, not on keys, so a node that reruns and produces the same bytes stops the change from spreading further. This is **early cutoff**.
 
 ## Terms
 
-- **Action key** (`actionKey` on a result): a 64-character lowercase SHA-256 hex string. It names the node's work and its directory in the CAS. It is `""` on a result when the node never got one: a required dep did not succeed, the key could not be computed, or the execution was cancelled before the node was processed.
-- **Cache entry** (type `CacheEntry`): `{ outputs, contentHash, outputHashes }`. `outputs` holds the file paths the action returned, as it returned them: a record whose values are a path or a list of paths. `contentHash` is the hash of those files, and `outputHashes` holds each output's own hash, by name (see below). Results with status `done` or `cached` carry these same three fields.
+- **Action key** (`actionKey` on a result): a 64-character lowercase SHA-256 hex string. It names the node's work and its directory in the cache. It is `""` on a result when the node never got one: a required dep did not succeed, the key could not be computed, or the execution was cancelled before the node was processed.
+- **Cache entry** (type `CacheEntry`): `{ outputs, contentHash, outputHashes }`. `outputs` holds the files the action returned, in the record it returned: each value a path or a list of paths. `contentHash` is the hash of those files, and `outputHashes` holds each output's own hash, by name (see below). Results with status `done` or `cached` carry these same three fields.
 - **Content hash**: a SHA-256 hex string over each output's name, each file's path relative to its output directory, and each file's bytes.
-- **CAS base directory** (`casBaseDir`): the root under which every key gets a directory.
-- **Cache**: the store of entries by key (interface `Cache`). It holds only the small manifest. The files themselves are in the CAS, read and written through the context's `DagFs`: usually the local disk (`createNodeDagFs`, `createBunDagFs`), but possibly memory (`createMemoryDagFs`).
+- **Cache directory** (`cacheDir` in the execution context): the root of the cache. Its `v1/` holds a directory per key, with the key's entry as `manifest.json` and each entry's files in a **content directory** named by its content hash; its `tmp/` holds what is not committed yet. The engine reads and writes all of it through the context's `DagFs`: usually the local disk (`createNodeDagFs`, `createBunDagFs`), but possibly memory (`createMemoryDagFs`).
+- **Last use**: the mtime a prune judges by ("Pruning"). A hit sets its manifest's, and a commit its content directory's, to the context's `clock` time, best effort: a stamp that fails changes no result.
 - **DagFs**: the filesystem port the engine does all its file I/O through.
 
 ## Where caching sits in processing a node
@@ -29,13 +29,13 @@ When the engine processes a node, these steps happen in this order. `execute` ca
 
 1. **Required deps.** `lookupNode` repeats the check for executors that call it directly. If a required dep (any dep not marked `settled`) has no entry in the `depEntries` it was given, the node settles `dep-failed` with `dep` set to that dep's name and `actionKey: ""`. Nothing is hashed.
 2. **Key.** The engine hashes every file input, then builds the key. If a file cannot be read, the node settles `failed` with `actionKey: ""` and no `elapsed`. The message is the file system's, such as `ENOENT: /missing.ts`.
-3. **Lookup.** This step is skipped when the node is `cacheable: false`. The engine reads the entry for the key. A `get` that rejects counts as a miss and is not an error. Otherwise the engine trusts the entry's shape (parsing and shape checks belong to `FsCache`, see below). If an entry exists, the engine re-hashes its files (this is **verification**). If they match `contentHash`, the node settles `cached` with the stored `outputs` and `contentHash`. A cached node has no `elapsed` and emits no `start` event. Otherwise the lookup is a miss, `{ name, actionKey, status: "missed" }`, which is not a result: it is what `runAction` runs.
-4. **Run.** The engine creates `<casBaseDir>/<actionKey>/tmp-<uuid>`, emits `start`, and calls the action with `outputDir` set to the absolute form of that directory. If the directory cannot be created, or a `start` listener's promise rejects, the node fails with that error and no `elapsed`, and the action never runs.
-5. **Publish.** The engine checks that the returned paths are under `outputDir`, hashes them, renames the directory to `<casBaseDir>/<actionKey>/out-<contentHash>`, and writes the entry. This last write is skipped for `cacheable: false`. The node settles `done` with `outputs`, `contentHash` and `elapsed`.
+3. **Lookup.** This step is skipped when the node is `cacheable: false` or its key is forced. The engine reads the key's `manifest.json`. One that is missing, cannot be read, is not JSON, or is not `{ outputs, contentHash, outputHashes }` with outputs that are a record and hashes that are strings, or has no `fileStats` of sizes and mtimes, counts as a miss and is not an error. If an entry exists, the engine checks the files it names in its content directory (this is **verification**, see "Output verification"). If they are unchanged, the engine stamps the manifest's last use and the node settles `cached` with the entry, its paths absolute. A cached node has no `elapsed` and emits no `start` event. Otherwise the lookup is a miss, `{ name, actionKey, status: "missed" }`, which is not a result: it is what `runAction` runs.
+4. **Run.** The engine creates a staging directory, `<cacheDir>/tmp/<uuid>`, emits `start`, and calls the action with `outputDir` set to its absolute form. If the directory cannot be created, or a `start` listener's promise rejects, the node fails with that error and no `elapsed`, and the action never runs.
+5. **Commit.** The engine checks that the returned paths are under `outputDir` and name regular files, records each file's size and mtime and makes it read-only, hashes them relative to it, renames the directory to the content directory `<cacheDir>/v1/<actionKey>/<contentHash>`, stamps that directory's last use, and writes the entry with those sizes and mtimes. This last write is skipped for `cacheable: false`. The node settles `done` with the entry, its paths absolute, and `elapsed`.
 
-When the action throws, times out, is cancelled, misses an output or returns a path outside `outputDir`, the attempt directory is removed and no entry is written. When the entry write (`cache.put`) rejects, the node fails too, but its outputs are already published at `out-<contentHash>/` and are not removed. A tiered cache may already hold the local entry, so the next run can be `cached`. Publishing itself never fails: a rename that does not work falls back as described under "A damaged published copy".
+When the action throws, times out, is cancelled, misses an output, returns a path outside `outputDir` or one that is not a regular file, or the staging directory cannot be renamed into place (see "A damaged content directory"), the staging directory is removed and no entry is written. When the entry write fails, the node fails too, but its outputs are already committed to their content directory and are not removed.
 
-Where it lives: `packages/dagraph/src/process-node.ts`, `packages/dagraph/src/orchestrate.ts`, `packages/dagraph/src/execute.ts`.
+Where it lives: `packages/dagraph/src/process-node.ts`, `packages/dagraph/src/cache.ts`, `packages/dagraph/src/orchestrate.ts`, `packages/dagraph/src/execute.ts`.
 
 ## The action key: exactly what is hashed
 
@@ -77,15 +77,15 @@ Where it lives: `packages/dagraph/src/content-addressing.ts`, `packages/dagraph/
 
 The action's code is not in its key, so editing an action's logic does not invalidate anything by itself. The convention is a value input in the action's own `inputs`, such as `inputs: { version: 1 }`, bumped whenever the logic changes. The bump gives every node of the action a new key. Dependents rerun only if the new output differs (early cutoff). dagraph treats `version` as an ordinary input. The name has no special meaning to it.
 
-Entries are never deleted, so rolling an input back to an earlier value hits that value's earlier entry. A test pins this on a chain `fetch -> parse -> summarize` in which only `summarize` carries the `version` input: run with `version: "v2"` (3 ran), then `"v3"` (1 ran, 2 hit), then `"v2"` again (0 ran, 3 hit).
+Rolling an input back to an earlier value hits that value's earlier entry, unless a prune removed it. A test pins this on a chain `fetch -> parse -> summarize` in which only `summarize` carries the `version` input: run with `version: "v2"` (3 ran), then `"v3"` (1 ran, 2 hit), then `"v2"` again (0 ran, 3 hit).
 
 ## Keys across dagraph versions
 
-The key holds no dagraph version, format tag or salt: only the kind, the inputs and the deps, as above. So a dagraph release that builds keys and content hashes the same way gives every node the same key, and upgrading to it reruns nothing. Both constructions count: dependents key on the content hash, and verification compares it. A test pins two keys as literal hex strings (in `dag.test.ts`, "a ref from the inputs function keys as the same ref written from its node did"), so a change to how those two are built fails the tests. No other test of dagraph pins a literal key or content hash.
+The key holds no dagraph version, format tag or salt: only the kind, the inputs and the deps, as above. So a dagraph release that builds keys and content hashes the same way gives every node the same key, and upgrading to it reruns nothing unless it changes the cache's on-disk format ("The cache directory layout"). Both constructions count: dependents key on the content hash, and a hit that hashes compares it. A hit whose sizes and mtimes match compares nothing, so a release that changes how content hashes are built must also bump `CACHE_FORMAT_VERSION`, or its stat-matched hits keep handing dependents the old hashes. A test pins two keys as literal hex strings (in `dag.test.ts`, "a ref from the inputs function keys as the same ref written from its node did"), so a change to how those two are built fails the tests. No other test of dagraph pins a literal key or content hash.
 
-The construction has changed once already. The latest version on npm, `@mrmeku/dagraph` `0.3.0` (`latest`, published 2026-10-16, checked with `npm view` on 2026-10-26), builds its key differently. It feeds into one SHA-256, in order, the node's name, a `config` string, each dep's node name and content hash (sorted by name), and each input file's path and hash. Its content hash is the SHA-256 of the number of output files followed by their hashes, sorted by path, with no names or relative paths. This was read from `src/content-addressing.js` in the published tarball. The current code keys the kind, the inputs and the roles instead, so no key that `0.3.0` computed matches one it computes. Upgrading from `0.3.0` to a release of the current code therefore reruns every node once. The entries `0.3.0` wrote are never read again, and their directories stay, since nothing is garbage-collected.
+The construction has changed once already. The latest version on npm, `@mrmeku/dagraph` `0.3.0` (`latest`, published 2026-10-16, checked with `npm view` on 2026-10-26), builds its key differently. It feeds into one SHA-256, in order, the node's name, a `config` string, each dep's node name and content hash (sorted by name), and each input file's path and hash. Its content hash is the SHA-256 of the number of output files followed by their hashes, sorted by path, with no names or relative paths. This was read from `src/content-addressing.js` in the published tarball. The current code keys the kind, the inputs and the roles instead, so no key that `0.3.0` computed matches one it computes. Upgrading from `0.3.0` to a release of the current code therefore reruns every node once. The entries `0.3.0` wrote are never read again, and their directories stay, since a prune removes only from `v1/` and `tmp/`.
 
-Outputs then became a record only. An action that returned a record keeps its content hash, so its dependents keep their keys. One that returned a bare path or a list now returns a record, which hashes differently, so its dependents rerun once. Its own key does not change, but the entry it wrote holds a bare path or a list, which `FsCache` no longer reads as an entry: it misses and the node runs once (pinned in `dag.test.ts`). Then `invalidateOn` was removed, and a role came to key on the hashes of the outputs it reads instead of its dep's content hash. Every node with a dep gets a new key, and an entry without `outputHashes` is no longer read as an entry, so every node runs once. Whether a later release may change the construction again is not settled (see Open questions).
+Outputs then became a record only. An action that returned a record keeps its content hash, so its dependents keep their keys. One that returned a bare path or a list now returns a record, which hashes differently, so its dependents rerun once. Its own key does not change, but the entry it wrote holds a bare path or a list, which the lookup no longer reads as an entry: it misses and the node runs once (pinned in `dag.test.ts`). Then `invalidateOn` was removed, and a role came to key on the hashes of the outputs it reads instead of its dep's content hash. Every node with a dep gets a new key, and an entry without `outputHashes` is no longer read as an entry, so every node runs once. Whether a later release may change the construction again is not settled (see Open questions).
 
 Where it lives: `packages/dagraph/src/content-addressing.ts`, `packages/dagraph/src/dag.test.ts`.
 
@@ -117,7 +117,7 @@ A two-node graph: `count` counts the words of its input, `report` writes a sente
 import { mkdtemp, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { defineAction, execute, FsCache, Graph, nodeInputs } from "@mrmeku/dagraph";
+import { defineAction, execute, Graph, nodeInputs } from "@mrmeku/dagraph";
 import { createNodeDagFs } from "@mrmeku/dagraph/fs/node";
 
 const count = defineAction({
@@ -140,9 +140,9 @@ const report = defineAction({
   },
 });
 
-const casBaseDir = join(await mkdtemp(join(tmpdir(), "quick-")), "cas");
+const cacheDir = join(await mkdtemp(join(tmpdir(), "quick-")), "cache");
 const fs = createNodeDagFs();
-const context = { cache: new FsCache(casBaseDir, fs), fs, casBaseDir };
+const context = { fs, cacheDir, clock: Date };
 async function run(text: string) {
   const graph = new Graph();
   report.addNode(graph, { deps: { count: count.addNode(graph, { inputs: { text } }) } });
@@ -170,56 +170,75 @@ Where it lives: `packages/dagraph/src/content-addressing.ts`.
 
 ## Output verification
 
-On every hit the engine re-hashes every file the entry names, streaming each one, and compares the result to `contentHash`. If a file was deleted, a file changed, or anything fails to read, the entry counts as a miss and the node reruns. A node is never `cached` with outputs that are not exactly what was stored. This costs a full read of every cached output on every run.
+A hit is a stat check. The engine `lstat`s each file the entry names and compares its `size` and `mtimeMs` with what the manifest's `fileStats` records for it. When every file matches, no output is hashed. When one differs or is gone, the engine re-hashes every file the entry names and compares the result to `contentHash`: a match is a hit, and anything else (a file deleted or changed, or one that fails to read) is a miss and the node reruns. So a file changed in place that kept its size and mtime is served `cached`; forcing its key is the way to distrust it.
 
-**A damaged published copy.** Say `out-<hash>/` was edited in place. The rerun usually produces the original content and so the same `out-<hash>` name. The rename onto it fails because that directory exists and is not empty. The engine then checks the existing copy, finds it does not match, and keeps the new attempt's `tmp-<uuid>/` directory where it is. The new entry and result point into `tmp-<uuid>/`, and later runs hit it. The damaged `out-<hash>/` is left in place. A rename that fails for any other reason (permissions, a cross-device move, a filesystem that cannot rename directories) is handled the same way: if no verified `out-<contentHash>/` exists, the attempt's `tmp-<uuid>/` stays where it is and the entry and result point into it. This is silent: the node is still `done`.
+Two mtimes less than a millisecond apart match: a copy that keeps timestamps, such as dagworkflows' worktree cache store, keeps them only to the millisecond, since `fs.cp` with `preserveTimestamps` truncates them under Bun and rounds them under Node.
 
-**Missing outputs.** A returned path with no file fails the node, and the failure is never cached. The message is ``output "<name>" (<file>) was not written. Write it at `${outputDir}/<file>` before the action returns.``, where `<name>` is the output's name and `<file>` the returned path relative to the attempt's output directory. For example: `output "thumb" (audio.jpg) was not written. Write it at \`${outputDir}/audio.jpg\` before the action returns.` (`${outputDir}`appears literally in the message.) A path that exists but cannot be read for another reason keeps its own error. For example, returning a directory fails with an`EISDIR` message on the Bun and Node filesystems. Outputs must be files.
+**A damaged content directory.** Say `<actionKey>/<contentHash>/` was made writable and edited in place. The lookup misses, and the rerun usually produces the original content, so the same content hash. The rename onto that directory fails because it exists and is not empty. The engine then checks the copy there as a commit checks its own files, and hashes them. A copy that passes (another attempt committed the same content first) is kept, the staging directory removed, and the manifest records the copy's sizes and mtimes, so its hits stay stat checks. A damaged one is moved into `tmp/`, the staging directory is renamed in its place, and the damaged copy is removed (pinned by a test). A commit tries the rename five times, since attempts of one key racing over a damaged copy may each move away what another put there. Then, as when the rename fails for any other reason (permissions, a cross-device move), the node fails with the rename's own error.
+
+**Missing outputs.** A returned path with no file fails the node, and the failure is never cached. The message is ``output "<name>" (<file>) was not written. Write it at `${outputDir}/<file>` before the action returns.``, where `<name>` is the output's name and `<file>` the returned path relative to the attempt's output directory. For example: `output "thumb" (audio.jpg) was not written. Write it at \`${outputDir}/audio.jpg\` before the action returns.` (`${outputDir}`appears literally in the message.)
+
+**Outputs are regular files.** A returned path that is a directory or a symbolic link fails the node with `output "<name>" (<file>) is not a regular file. Return files only, never a directory or a symbolic link.`, since a link could lead out of the entry. Each path is checked before its mode changes, so the file a link leads to is left as it was. A path that cannot be looked at for another reason keeps its own error: one under a file fails with `ENOTDIR` on the Bun and Node filesystems.
+
+**Read-only outputs.** A commit makes each returned file read-only, as `chmod a-w` does: the write bits go and the others stay. It then flushes the file to disk with `fsync`, before recording its stats, so a crash cannot leave a file whose stats match the manifest but whose data was lost. A write to a committed file then fails with `EACCES`, so nothing rewrites a cache entry in place, nor a file hard-linked to one, which is the same file. Removing or renaming one still works, since that takes its directory's write permission.
 
 **Outputs outside the directory.** A returned path, absolute or relative (a relative path is resolved against the working directory), that does not resolve under `outputDir` fails with `output not under the output dir: <path> is not under <outputDir>`. `../sibling` and `/elsewhere` are both refused.
 
-Where it lives: `packages/dagraph/src/content-addressing.ts`, `packages/dagraph/src/process-node.ts`.
+Where it lives: `packages/dagraph/src/content-addressing.ts`, `packages/dagraph/src/cache.ts`.
 
-## The CAS directory layout
+## The cache directory layout
 
-    <casBaseDir>/
-      <actionKey>/
-        manifest.json           the entry, when the FsCache's base directory is casBaseDir
-        manifest.json.<uuid>    an entry being written (left behind if its rename fails)
-        tmp-<uuid>/             an attempt in progress (or one kept, see verification)
-        out-<contentHash>/      published outputs, never written again
+    <cacheDir>/
+      v1/                       the on-disk format: a new format gets a new directory
+        <actionKey>/
+          manifest.json         the entry, its paths relative to its content directory
+          <contentHash>/        the entry's files, read-only, never written again
+      tmp/
+        <uuid>/                 an attempt in progress, or a directory being removed
+        <uuid>.json             an entry being written (left behind if its rename fails)
 
 Rules that always hold:
 
-- **Each attempt gets a fresh, empty, private directory.** `outputDir` is the absolute path of `tmp-<uuid>/`, and only that attempt writes to it. Two concurrent runs of the same node therefore never touch each other's files. A test pins that a concurrent run rewriting its own output never corrupts another run's dependent.
-- **A successful attempt is renamed to `out-<contentHash>/`.** If another attempt already published the same content there and that copy still verifies, it is reused and the new attempt's directory is deleted. Outputs keep their path relative to the directory: `tmp-X/a/b.txt` becomes `out-<hash>/a/b.txt`.
-- **A failed, timed-out or cancelled attempt's directory is removed**, best effort. A process killed mid-action leaves its `tmp-<uuid>/` behind, and nothing cleans it up later. Likewise a `manifest.json.<uuid>` whose rename failed, or whose process was killed, stays.
-- **Nothing is ever garbage-collected.** Older `out-*` directories of a key stay after a newer attempt publishes. A forced rerun to different content adds another `out-*` directory and repoints the manifest. `cacheable: false` nodes publish a new `out-*` directory on every run whose content differs, and they never have a manifest.
-- **An output named `manifest.json` is fine.** It lives inside `out-*/`, not beside the entry.
-- **Path forms.** The action always sees absolute paths, in `outputDir` and in file handles' `.path`. The entry and the result store paths relative or absolute as `casBaseDir` is, normalized: the key directory is the pathe `join` of `casBaseDir` and the key, which drops a leading `./`, duplicate slashes and a trailing slash. So `cas`, `./cas` and `cas/` name the same thing, and under any of them the manifest holds `cas/<key>/out-<hash>/srt`, whichever form the action returned. A test pins that a CAS written under a relative `casBaseDir` and restored under another working directory still hits there.
-- **On disk, switching among `cas`, `./cas` and `cas/` hits.** With the Node or Bun `DagFs`, and the same string given to `casBaseDir` and to `FsCache`, running `cas`, `./cas`, `cas/`, `cas`, `./cas` over one CAS gives done, then cached four times (confirmed by running it). The manifest `FsCache` reads under `./cas` or `cas/` is the same file on disk. Only a switch between relative and absolute misses there (next rule).
-- **On the memory filesystem, every new string misses once.** `FsCache` builds its manifest path by string, not with pathe, so `cas/<key>/manifest.json`, `./cas/<key>/manifest.json` and `cas//<key>/manifest.json` are three keys of the memory filesystem's map. The same series therefore gives done, done, done, cached, cached, for every node, with outputs or without, since the lookup finds no entry at all. Each rerun reuses the existing `out-<contentHash>/` and writes a manifest of its own under the new string, so each string hits from its second use on. The CAS directory itself is normalized, so with `MemCache`, or with an `FsCache` whose base directory stays one string while `casBaseDir` changes, the memory filesystem hits too (confirmed by running it). See Open questions.
-- **A stored entry hits only in the form it was written in**, relative or absolute. Verification takes each stored path relative to the current key directory, and a path that does not start with it hashes differently. So if `casBaseDir` switches between relative and absolute, or a CAS written under an absolute `casBaseDir` moves, every node with outputs misses once and reruns. Its publish then finds and reuses the existing `out-<contentHash>/` and rewrites the entry in the new form. That rewritten entry then misses for any process still using the old form. So mixing forms over one shared CAS causes repeated misses, not a single one: absolute, absolute, relative, relative, absolute over one `FsCache` gives done, cached, done, cached, done. A node with no output paths still hits.
+- **Each attempt gets a fresh, empty, private directory.** `outputDir` is the absolute path of `tmp/<uuid>/`, and only that attempt writes to it. Two concurrent runs of the same node therefore never touch each other's files. A test pins that a concurrent run rewriting its own output never corrupts another run's dependent.
+- **A successful attempt is renamed to `v1/<actionKey>/<contentHash>/`.** If another attempt already committed the same content there and that copy still verifies, it is reused and the new attempt's directory is deleted; a damaged copy is replaced (see "A damaged content directory"). Outputs keep their path relative to the directory: `tmp/X/a/b.txt` becomes `<contentHash>/a/b.txt`.
+- **A failed, timed-out or cancelled attempt's directory is removed**, best effort. A process killed mid-action leaves its `tmp/<uuid>/` behind until a prune removes it. Likewise a `tmp/<uuid>.json` whose rename failed, or whose process was killed, stays.
+- **Only a prune removes a content directory that verifies.** Older content directories of a key stay after a newer attempt commits. A forced rerun to different content adds another content directory and repoints the manifest. `cacheable: false` nodes commit a new content directory on every run whose content differs, and they never have a manifest.
+- **An output named `manifest.json` is fine.** It lives inside `<contentHash>/`, not beside the entry.
+- **An entry is written whole.** The engine writes `tmp/<uuid>.json`, then renames it over the key's `manifest.json`, so a concurrent lookup finds the whole last entry or the whole new one, never half of either (pinned by a test).
+- **Paths.** The action always sees absolute paths, in `outputDir` and in file handles' `.path`. The manifest holds each path relative to its content directory, normalized, whichever form the action returned. Each process resolves `cacheDir` with its `DagFs`'s `resolve` when it looks an entry up or commits one, so results and `depEntries` hold absolute paths, into the cache where that process found it. So a relative `cacheDir`, its other spellings (`cache`, `./cache`, `cache/`) and the absolute directory it resolves to are one cache, and a cache copied or restored to another directory hits there, its results naming the copy's files (pinned by a test). A relative `cacheDir` that resolves to another directory, under another working directory, is another cache.
 
-Example manifest (FsCache writes it with two-space indentation):
+Example manifest (written with two-space indentation):
 
     {
-      "outputs": { "page": "cas/df18.../out-bf27.../page.json" },
-      "contentHash": "bf27..."
+      "outputs": { "page": "page.json" },
+      "contentHash": "bf27...",
+      "fileStats": { "page.json": { "size": 17, "mtimeMs": 1793208241958.45 } }
     }
 
 Where it lives: `packages/dagraph/src/process-node.ts`, `packages/dagraph/src/cache.ts`.
 
+## Pruning
+
+`pruneCache(fs, cacheDir, { unusedSince })`, from the package index, removes what no run used since `unusedSince`, a time in ms since the epoch such as a run's start, and resolves to the paths it removed, absolute and sorted. It reads no clock, and the engine never calls it. It removes:
+
+- a key directory whose newest last use, of its manifest and its content directories, is before `unusedSince`: a commit that has placed new content but not yet written its manifest keeps its key;
+- in a key directory that stays, each content directory that its manifest does not name and that was last used before `unusedSince`;
+- each entry of `tmp/` whose mtime is before `unusedSince`, such as a killed attempt's directory.
+
+A key or content directory is renamed into `tmp/` before it is removed, so a lookup finds it whole or gone. A file beside the key directories, such as a Finder `.DS_Store`, is left alone. A prune is not locked against a run on the same cache: a run that uses a directory the prune read as unused, as it removes it, loses those files, and its node, or the prune, can fail.
+
+Where it lives: `packages/dagraph/src/cache.ts`.
+
 ## Nodes that share a key
 
-The key depends only on kind, inputs and dep content. So two nodes declared the same way share one key, one CAS directory and one entry, even under different names, in different graphs, or with different `meta`, timeouts or groups. A test pins this: node `a` in one graph runs, then a node named `v:b` in another graph, with the same kind and inputs but a different group and timeout, is `cached` with `a`'s output.
+The key depends only on kind, inputs and dep content. So two nodes declared the same way share one key, one directory in the cache and one entry, even under different names, in different graphs, or with different `meta`, timeouts or groups. A test pins this: node `a` in one graph runs, then a node named `v:b` in another graph, with the same kind and inputs but a different group and timeout, is `cached` with `a`'s output.
 
 For the same reason `lookupNode`, `runAction` and `processNode` can be given any graph that declares the node the same way; [dagraph-execution](dagraph-execution.md) covers its graph argument and the error when the node is missing.
 
-Within one execution, nodes that share a key are **not** deduplicated. If both miss, both run, each in its own `tmp-<uuid>/`:
+Within one execution, nodes that share a key are **not** deduplicated. If both miss, both run, each in its own `tmp/<uuid>/`:
 
-- With identical content, both publish to the same `out-<hash>/`. The second finds the first's copy, verifies it, uses it and drops its own. Both results name the same files.
-- With different content (a nondeterministic action), each publishes its own `out-<hash>/` and both results' files exist. The manifest names whichever wrote last.
+- With identical content, both commit to the same content directory. The second finds the first's copy, verifies it, uses it and drops its own. Both results name the same files.
+- With different content (a nondeterministic action), each commits its own content directory and both results' files exist. The manifest names whichever wrote last.
 
 Tests that need nodes to stay apart give each node a distinguishing input, such as its name as an `id`.
 
@@ -229,7 +248,7 @@ A role keys on the outputs it reads, as Bazel keys an action on the files it tak
 
 A node that reads only part of one file, such as a few fields of a JSON file, still keys on the whole file. Two things bound that. Early cutoff: a node that writes the same bytes when its part is unchanged keeps its hashes, so its own dependents stay `cached`. And a projection: a cheap node that reads the file and writes the part as outputs of its own, which consumers pick. It reruns on any change to the file, and writes the same bytes when the part is unchanged, so its consumers stay `cached`.
 
-An action whose work is too costly to repeat can also skip it itself: it keeps its results in a store of its own, outside the CAS, named by what it reads, and links a stored result back on a run whose part is unchanged.
+An action whose work is too costly to repeat can also skip it itself: it keeps its results in a store of its own, outside the cache, named by what it reads, and links a stored result back on a run whose part is unchanged.
 
 Where it lives: `packages/dagraph/src/process-node.ts`, `packages/dagraph/src/content-addressing.ts`, `packages/dagraph/src/graph/types.ts` (`pick`).
 
@@ -238,8 +257,8 @@ Where it lives: `packages/dagraph/src/process-node.ts`, `packages/dagraph/src/co
 An action defined with `cacheable: false` has an entry that is never read or written, so its node runs in every execution. `describe()` shows `cacheable: false` on the node. The node still:
 
 - gets a key and a key directory;
-- runs in a private `tmp-<uuid>/`;
-- publishes to `out-<contentHash>/`;
+- runs in a private `tmp/<uuid>/`;
+- commits to its content directory, `<contentHash>/`;
 - reports a content hash.
 
 Its dependents key on that content hash, so they cache normally. For example, a probe that always writes the same bytes runs every time while the report built from it stays `cached`. Its lookup is always a miss. `cacheable` is not in the key. Changing an action from `false` to `true` finds an entry only if one was written before the flag was set to `false`.
@@ -247,11 +266,11 @@ Its dependents key on that content hash, so they cache normally. For example, a 
 ## Running again and forcing
 
 - **Plain rerun.** Every node whose key and files are unchanged is `cached`. Failures are never cached. A rerun after a partial failure therefore resumes: succeeded nodes hit, and the failed node and the nodes it held back run. A test pins `a cached, b done, c done, d done`, with `start` events only for b, c and d.
-- **Forcing is a cache whose reads miss.** The engine has no `force` option. `forcedCache(cache, keys?)` wraps a `Cache`: every read of one of `keys`, or of every key without them, misses, and every other read and every write goes to `cache`. Execute with it to run nodes whose entries are good. Each forced node runs and writes its new entry, which the next plain run hits:
+- **Forcing.** The execution context's `forcedKeys` is `"all"` or a `ReadonlySet<string>` of action keys. The lookup of every key, or of each key in the set, misses, so those nodes run though their entries are good, and each writes its new entry, which the next plain run hits:
 
-      await execute(graph, { ...ctx, cache: forcedCache(ctx.cache) });
+      await execute(graph, { ...ctx, forcedKeys: "all" });
 
-  With `keys`, only the nodes of those keys run, for example the keys of results you saved (a result is plain JSON with its `actionKey`). The dependents of a forced node are not forced. They key on its new content, so they rerun only if that changed.
+  With a set, only the nodes of those keys run, for example the keys of results you saved (a result is plain JSON with its `actionKey`). The dependents of a forced node are not forced. They key on its new content, so they rerun only if that changed.
 
 - **Looking up without running.** `lookupNode` computes the key and checks the entry, and runs nothing: with a verified entry the node is `cached`, otherwise its lookup is a miss.
 
@@ -262,14 +281,14 @@ These fail or stop without writing an entry, and their attempt directory is remo
 - a node whose action threw;
 - a node that timed out (`timedOut: true`, `error.name` is `"TimeoutError"`, message `timed out after <ms> ms`), whatever its action returned;
 - a node that was cancelled, whatever its action returned;
-- a node with a missing output, or an output outside its directory;
+- a node with a missing output, an output outside its directory, or one that is not a regular file;
 - a node whose output ref names an output its dep did not produce (`"<node>" has no output "<output>"`);
-- a node whose attempt directory could not be created;
+- a node whose attempt directory could not be created, or renamed into its content directory;
 - a node whose `start` event listener rejected (it fails with the listener's message and never runs).
 
 These never write an entry and never create an attempt directory: a node whose key could not be computed, a `dep-failed` node, and a miss that was never run.
 
-A `cacheable: false` node never writes an entry either, but a successful run publishes and keeps its `out-<contentHash>/` directory. A node whose entry write rejected also keeps its published directory (see above).
+A `cacheable: false` node never writes an entry either, but a successful run commits and keeps its content directory. A node whose entry write rejected also keeps its content directory (see above).
 
 Tests pin that a failed node fails again on the next run, rather than being served from a stale entry. A timed-out node also keeps failing until it finishes in time. `timeoutMs` is not in the key, so changing the timeout of a node that succeeded earlier still hits.
 
@@ -277,7 +296,7 @@ Tests pin that a failed node fails again on the next run, rather than being serv
 
 dagraph keeps only the key, never what went into it. A result carries `actionKey`. The `start` event carries no key. The entry holds only `outputs` and `contentHash`. `describe()` lists neither a node's inputs nor its roles. The code that builds the key is not exported, and the package's `exports` map refuses a deep import of it: `ERR_PACKAGE_PATH_NOT_EXPORTED` under Node, `ERR_MODULE_NOT_FOUND` under Bun. No option prints the key's parts. What a reader can do:
 
-1. **Compare the node's `actionKey` across the two executions.** A result is plain JSON, so save each execution's results to compare later. If the key is the same and the node is `done` the second time, the key did not cause the rerun. The node was forced, is `cacheable: false`, had no entry (an earlier run failed, the cache is a different one, or its `get` rejected), or its entry failed verification (a file was deleted or edited, or `casBaseDir` switched between relative and absolute form). On the memory filesystem, a changed `FsCache` base string such as `./cas` for `cas` also finds no entry. With `FsCache`, `<casBaseDir>/<actionKey>/manifest.json` shows whether the entry exists and which files it names. If the key differs, one of its parts changed, or the dagraph version did (see "Keys across dagraph versions").
+1. **Compare the node's `actionKey` across the two executions.** A result is plain JSON, so save each execution's results to compare later. If the key is the same and the node is `done` the second time, the key did not cause the rerun. The node was forced, is `cacheable: false`, had no entry (an earlier run failed, or the cache directory is a different one), or its entry failed verification (a file was deleted or edited). `<cacheDir>/v1/<actionKey>/manifest.json` shows whether the entry exists and which files it names. If the key differs, one of its parts changed, or the dagraph version did (see "Keys across dagraph versions").
 2. **Compare the parts the reader can see.** The kind and the inputs come from the reader's own code. A role is the `outputHashes` of the outputs it reads, on that dep's result. A file input is its path as given plus the SHA-256 of its bytes.
 3. **Rebuild the whole preimage and diff it.** Built by hand from "The action key: exactly what is hashed", the preimage reproduces the engine's key exactly. `canonical` is `JSON.stringify` of the value with object keys sorted at every level, so a string `"v1"` keys as `"\"v1\""` and `1` as `"1"`. Inputs and roles are sorted with the default `sort()`. The hash is the SHA-256 hex of `JSON.stringify(preimage)`, the same from `node:crypto` (`createHash("sha256").update(text).digest("hex")`) as from `js-sha256`. Print one preimage per execution and diff the two to name the part that changed.
 
@@ -293,49 +312,40 @@ An output ref inside a value input appears in its `canonical` string as `#ref(<J
 
 Where it lives: `packages/dagraph/src/content-addressing.ts`, `packages/dagraph/src/process-node.ts`, `packages/dagraph/src/graph/inputs.ts`, `packages/dagraph/package.json` (`exports`).
 
-## Cache implementations
-
-All are exported from `@mrmeku/dagraph`. The interface is:
-
-- `Cache`: `get(key)` resolves to a `CacheEntry` or `undefined`; `put(key, entry)` resolves when stored.
-
-The engine treats a rejected `get` as a miss, but a rejected `put` fails the node (see Open questions).
-
-- **`new FsCache(baseDir, fs)`**: stores each entry as JSON at `<baseDir>/<key>/manifest.json`, through the given `DagFs`. A put writes `manifest.json.<uuid>` beside the target, then renames it into place. A concurrent `get` therefore sees the whole old entry or the whole new one, never half of either (pinned by a test). `get` returns `undefined` for a missing file, unparsable JSON, or JSON that is not `{ outputs, contentHash }` with valid outputs and a string hash. Its errors are swallowed. These checks are `FsCache`'s own: the engine trusts whatever a `Cache` returns and only re-hashes the files it names, so a custom `Cache` must return a well-formed `CacheEntry` or `undefined`. `put` relies on `writeText` creating `<baseDir>/<key>/`. If the rename fails, `put` rejects and leaves `manifest.json.<uuid>` behind. The layout above holds when `baseDir` equals `casBaseDir`.
-- **`new MemCache()`**: entries held in a `Map` in memory and lost when the process exits. Meant for tests.
-- **`forcedCache(cache, keys?)`**: a wrapper over another cache whose reads of `keys`, or of every key, miss (see "Running again and forcing").
-
-Where it lives: `packages/dagraph/src/cache.ts`.
-
 ## The DagFs port
 
-`DagFs` is every filesystem operation the engine performs: hashing, the CAS, file handles, and `FsCache`. Each is a plain function, and the engine calls each one detached (`fs.hashFile(path)`), so an implementation must not use `this`. The members:
+`DagFs` is every filesystem operation the engine performs: hashing, the cache and its entries, and file handles. Each is a plain function, and the engine calls each one detached (`fs.hashFile(path)`), so an implementation must not use `this`. The members:
 
 | Member                     | Takes               | Gives                                                                                                                                                                                      |
 | -------------------------- | ------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
 | `exists(path)`             | a path              | whether a file is there. Reliable only for files: the Node implementation reports true for a directory, the Bun and memory ones false for every directory. The engine never calls it.      |
 | `readText(path)`           | a path              | the file's text                                                                                                                                                                            |
 | `writeText(path, content)` | a path and a string | writes the file, creating missing parent directories in all three implementations                                                                                                          |
-| `hashFile(path)`           | a path              | the SHA-256 hex of the bytes; rejects with an error whose `code` is `"ENOENT"` when there is no file, as `node:fs` does. The engine uses that code to name an output that was not written. |
+| `hashFile(path)`           | a path              | the SHA-256 hex of the bytes                                                                                                                                                               |
 | `ensureDir(path)`          | a path              | makes the directory, with its parents                                                                                                                                                      |
-| `rename(from, to)`         | two paths           | POSIX rename: replaces a file at `to` atomically; fails when `to` is a non-empty directory. Publishing relies on this.                                                                     |
+| `rename(from, to)`         | two paths           | POSIX rename: replaces a file at `to` atomically; fails when `to` is a non-empty directory. A commit relies on this.                                                                       |
 | `remove(path)`             | a path              | deletes a file, or a directory recursively; does nothing if it is absent                                                                                                                   |
+| `lstat(path)`              | a path              | `isFile()`, `mode`, `size` and `mtimeMs` of the path itself, not a link's target; rejects with code `"ENOENT"` when nothing is there, which the engine uses to name an output not written. |
+| `chmod(path, mode)`        | a path and a mode   | POSIX chmod: sets the file's permission bits. A commit makes each output read-only with it.                                                                                                |
+| `fsync(path)`              | a path              | POSIX fsync: flushes the file's data to disk. A commit flushes each output before recording its stats.                                                                                     |
+| `utimes(path, …)`          | a path, two `Date`s | POSIX utimes: sets the access and modification times of a file or a directory. A hit and a commit stamp a last use with it.                                                                |
 | `readdir(dir)`             | a directory         | entry names; `[]` if the directory is absent                                                                                                                                               |
 | `resolve(path)`            | a path              | the absolute form, as an action sees it                                                                                                                                                    |
 
-The execution context passed to `execute`, `lookupNode`, `runAction` and `processNode` is `ExecutionContext`: `{ cache, fs, casBaseDir, ports? }`. `ports` is required exactly when the graph's actions need ports. The engine passes them through untouched. The action context (`ActionContext`: `inputs`, `depOutputs`, `ports`, `outputDir`, `signal`, `output`) holds no file system, so an action writes its files any way it chooses: directly with `node:fs`, as the quick start does, or through a port, as the complete example below does. The engine then reads, hashes and moves them through the context's `fs`. The tests put the same `DagFs` in both places.
+The execution context passed to `execute`, `lookupNode`, `runAction` and `processNode` is `ExecutionContext`: `{ fs, cacheDir, clock, forcedKeys?, ports? }` ([dagraph-execution](dagraph-execution.md)). `ports` is required exactly when the graph's actions need ports. The engine passes them through untouched. The action context (`ActionContext`: `inputs`, `depOutputs`, `ports`, `outputDir`, `signal`, `output`) holds no file system, so an action writes its files any way it chooses: directly with `node:fs`, as the quick start does, or through a port, as the complete example below does. The engine then reads, hashes and moves them through the context's `fs`. The tests put the same `DagFs` in both places.
 
 Three implementations:
 
 - **`createNodeDagFs()`**, from the `@mrmeku/dagraph/fs/node` entry point. Built on `node:fs/promises`. `writeText` creates missing parent directories with `mkdir -p`. `hashFile` streams the file through `node:crypto`.
 - **`createBunDagFs()`**, from the `@mrmeku/dagraph/fs` entry point. Built on `Bun.file`, `Bun.write` and `Bun.CryptoHasher`, so it needs the Bun runtime. `Bun.write` creates missing parent directories. Hashing streams the file.
-- **`createMemoryDagFs(initial?)`** and its type `MemoryDagFs`, from the package index. Files live in a `Map` exposed as `.files`, so a test can seed or inspect it; `initial` is a record of path to string or bytes. Hashing a string hashes its UTF-8 bytes. It differs from a real disk in these ways:
-  - only files exist: a directory is just the files under its prefix, which `readdir`, `rename` and `remove` see, and `exists(dir)` is false for every directory, empty or not;
+- **`createMemoryDagFs(initial?)`** and its type `MemoryDagFs`, from the package index. Files live in a `Map` exposed as `.files`, from path to `{ data, mode, mtimeMs }`, so a test can seed or inspect it. Two paths that hold one such object are hard links to one file, and a write changes the object, so every link sees it. `initial` is a record of path to string or bytes, each a file of mode `0o644`, and `writeFile(path, data)` writes either, as `writeText` writes text. Hashing a string hashes its UTF-8 bytes, and `lstat`'s `size` counts them. A write to a file whose mode has no owner write bit fails with code `EACCES`, as on disk, and each write gives its file an mtime a millisecond later than any before. It differs from a real disk in these ways:
+  - only files exist: a directory is just the files under its prefix, which `readdir`, `rename`, `remove`, `lstat` and `utimes` see, and `exists(dir)` is false for every directory, empty or not. A directory's mtime is the one `utimes` last gave it, or else 0. There are no symbolic links;
+  - `lstat`'s `mode` holds the permission bits alone, without the file type's;
   - `ensureDir` does nothing;
   - `resolve` returns the path unchanged;
   - `rename` moves a file or every file under a directory. It throws `ENOENT: <from>` if nothing is there. When the source is a directory, it throws `ENOTEMPTY: <to>` if the target holds files. When the source is a file, it never checks the target, so renaming a file onto a non-empty directory succeeds and leaves a file and a directory sharing one name, which POSIX refuses.
 
-Why the two real ones are separate entry points: they import `node:fs`, and the package index must stay free of I/O modules because it is bundled into Temporal's workflow sandbox. Import the index for the engine, the caches and the memory filesystem; import `/fs` or `/fs/node` for disk.
+Why the two real ones are separate entry points: they import `node:fs`, and the package index must stay free of I/O modules because it is bundled into Temporal's workflow sandbox. Import the index for the engine and the memory filesystem; import `/fs` or `/fs/node` for disk.
 
 A file handle (what an action receives for a file input or a dep output) reads through the same `DagFs`. Its `text()` refuses a file whose bytes are not valid UTF-8, with `<abs> is not UTF-8 text: decoding it lost bytes. Hash its bytes with hash().`. A file that genuinely contains U+FFFD reads normally.
 
@@ -343,7 +353,7 @@ Where it lives: `packages/dagraph/src/cache.ts` (`DagFs`), `packages/dagraph/src
 
 ## A complete example (runs with Node's filesystem; verified)
 
-    import { Graph, FsCache, actionsFor, execute, type DagFs } from "@mrmeku/dagraph";
+    import { Graph, actionsFor, execute, type DagFs } from "@mrmeku/dagraph";
     import { createNodeDagFs } from "@mrmeku/dagraph/fs/node";
 
     type Ports = { fs: DagFs };
@@ -373,17 +383,15 @@ Where it lives: `packages/dagraph/src/cache.ts` (`DagFs`), `packages/dagraph/src
       return g;
     };
     const fs = createNodeDagFs();
-    const ctx = { ports: { fs }, fs, cache: new FsCache("cas", fs), casBaseDir: "cas" };
+    const ctx = { ports: { fs }, fs, cacheDir: "cache", clock: Date };
     await execute(build(), ctx); // fetch: done, title: done
     await execute(build(), ctx); // fetch: cached, title: cached
 
-After this, `cas/` holds one directory per key. Each holds `manifest.json` and one `out-<contentHash>/` with `page.json` or `title.txt` in it. The result of `fetch` looks like `{ name: "fetch", actionKey: "<64 hex>", status: "done", outputs: { page: "cas/<key>/out-<hash>/page.json" }, contentHash: "<64 hex>", elapsed: 2 }`.
+After this, `cache/v1/` holds one directory per key, and `cache/tmp/` nothing. Each key's directory holds `manifest.json` and one `<contentHash>/` with `page.json` or `title.txt` in it. The result of `fetch` looks like `{ name: "fetch", actionKey: "<64 hex>", status: "done", outputs: { page: "<working directory>/cache/v1/<key>/<hash>/page.json" }, contentHash: "<64 hex>", elapsed: 2 }`.
 
 ## Open questions
 
-1. **A rejected `put` fails the node, but a rejected `get` is only a miss.** The outputs were already published when the write fails, and they stay. A `Cache` that writes in two places, where the first write lands before the second fails, makes the node report `failed` and the next run `cached`. Is a failed entry write meant to fail the node?
-2. **A damaged `out-<hash>/` is never repaired or removed.** After verification finds it damaged, the new attempt's `tmp-<uuid>/` serves as the published copy. Every later attempt that produces the same content runs into the damaged directory again and keeps its own `tmp-` directory. Intended?
-3. **There is no garbage collection** of old `out-*` directories, of left-over `tmp-*` directories from killed processes, or of manifests nothing uses. The code has nothing that bounds the CAS's size.
-4. **`FsCache` joins paths by string** (`<baseDir>/<key>/manifest.json`), while the CAS directory is joined and normalized. On disk it makes no difference. On the memory filesystem a `baseDir` of `./cas` or `cas/` instead of `cas` finds no entry, so every node reruns once (see "The CAS directory layout"). Is the manifest path meant to be normalized too?
-5. **No stated policy on key stability across releases.** The key carries no format version, and only two literal keys are pinned by a test. Nothing in the code or the release scripts says whether a release may change how keys or content hashes are built, or whether such a change needs a new major version. The change since `0.3.0` reruns every node once. Is every such change meant to be called out in a release?
-6. **Nothing records a key's parts.** Explaining a rerun means rebuilding the preimage by hand, because no result, event or entry holds it and the code that builds it is not exported. Is that intended, or should the engine expose the preimage, for example on a result or an event?
+1. **A failed entry write fails the node, but an entry that cannot be read is only a miss.** The outputs were already committed when the write fails, and they stay. Is a failed entry write meant to fail the node?
+2. **Nothing bounds the cache's size.** A prune removes by last use alone. Is a size bound wanted?
+3. **No stated policy on key stability across releases.** The key carries no format version, and only two literal keys are pinned by a test. Nothing in the code or the release scripts says whether a release may change how keys or content hashes are built, or whether such a change needs a new major version. The change since `0.3.0` reruns every node once. Is every such change meant to be called out in a release?
+4. **Nothing records a key's parts.** Explaining a rerun means rebuilding the preimage by hand, because no result, event or entry holds it and the code that builds it is not exported. Is that intended, or should the engine expose the preimage, for example on a result or an event?

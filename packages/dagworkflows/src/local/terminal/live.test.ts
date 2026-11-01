@@ -93,7 +93,7 @@ function liveRun(workflowDef: WorkflowDef, held: string[], columns = 40, rows = 
       ...workflowDef,
       workflowFile: "ci.ts",
       ports,
-      casBaseDir: "/cas",
+      cacheDir: "/cache",
       historyDir: "/history",
     },
     { outputStyle: "live", syncFs: createMemorySyncFs(), streams: tty.streams },

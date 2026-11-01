@@ -26,7 +26,7 @@ Terms used below:
 | Slot              | A unit of a concurrency group's limit. Only a miss in a group takes one, just before it starts.                                                                                                         |
 | Execution         | One call of `execute` (or of `orchestrate`): one walk of a graph, from its first dispatch to its last result. Its options (`scheduler`, `signal`, …) last for that call only.                           |
 | Executor          | Whatever drives an execution: `execute` itself, or code of your own that calls `orchestrate` with a `RunNode`, for example one that processes nodes in worker processes.                                |
-| Execution context | What the caller hands the engine: cache, file system, CAS directory, clock and ports. It outlives any one execution.                                                                                    |
+| Execution context | What the caller hands the engine: file system, cache directory, clock, forced keys and ports. It outlives any one execution.                                                                            |
 
 Where it lives: `packages/dagraph/src/execute.ts`, `orchestrate.ts`, `process-node.ts`.
 
@@ -38,7 +38,7 @@ All of these are exported from the package index, `@mrmeku/dagraph`:
 | ------------------------------------------------------------------ | -------------- | -------------------------------------------------------------------------------------------------- |
 | `execute(graph, executionContext, options?)`                       | function       | Runs a whole graph in this process. Resolves to one `Result` per node.                             |
 | `ExecuteOptions`                                                   | type           | `{ onEvent?, scheduler?, signal? }`.                                                               |
-| `ExecutionContext<Ports>`                                          | type           | `{ cache, fs, casBaseDir, clock, ports }`.                                                         |
+| `ExecutionContext<Ports>`                                          | type           | `{ fs, cacheDir, clock, forcedKeys?, ports }`.                                                     |
 | `orchestrate(nodes, run, scheduler, clock, onEvent?, signal?)`     | function       | The scheduling half, over node data. Resolves to one `Result` per node.                            |
 | `RunNode<Meta = unknown>`                                          | type           | The function `orchestrate` calls to process one node.                                              |
 | `lookupNode(graph, name, depEntries, executionContext)`            | function       | Computes a node's key and checks its entry. Resolves to a `Lookup`: a result, or a `Miss`.         |
@@ -82,15 +82,15 @@ The options, all optional:
 
 `ExecutionContext<Ports>` has five fields:
 
-- `cache`: a `Cache` (`FsCache`, `MemCache` or your own), where action keys map to entries.
 - `fs`: a `DagFs`, the file system the engine reads, hashes and moves files with.
-- `casBaseDir`: the directory under which each action key gets its own directory of outputs.
-- `clock`: what the engine reads the time from, a `Clock`, which is `Pick<DateConstructor, "now">`, so `Date` itself or any `{ now(): number }` in ms since the epoch. It stamps every event's `occurredAt` and measures `elapsed` (see "Results" and "Events and listeners"); `execute` hands it to `orchestrate` too. Required, with no default: a caller passes `Date` for the wall clock, and a test a fake one to pin times.
+- `cacheDir`: the cache's directory, relative or absolute ([dagraph-caching](dagraph-caching.md), "The cache directory layout").
+- `clock`: what the engine reads the time from, a `Clock`, which is `Pick<DateConstructor, "now">`, so `Date` itself or any `{ now(): number }` in ms since the epoch. It stamps every event's `occurredAt`, measures `elapsed` (see "Results" and "Events and listeners") and stamps each hit's and commit's last use ([dagraph-caching](dagraph-caching.md), "Terms"); `execute` hands it to `orchestrate` too. Required, with no default: a caller passes `Date` for the wall clock, and a test a fake one to pin times.
+- `forcedKeys` (optional): `"all"`, or a set of action keys, whose nodes run again ([dagraph-caching](dagraph-caching.md), "Running again and forcing").
 - `ports`: the tools the actions use, passed through to each action as `ports`. It is required when the graph's actions declare ports, and optional (and may be left out) when they need none.
 
-The same context is meant to serve many executions: a CLI builds it once and executes graph after graph against it. Ports go in the context, never in the graph. The cache, the file system and the CAS layout are [dagraph-caching](dagraph-caching.md)'s.
+The same context is meant to serve many executions: a CLI builds it once and executes graph after graph against it. Ports go in the context, never in the graph. The cache, its layout and the file system are [dagraph-caching](dagraph-caching.md)'s.
 
-Because ports arrive only through the context, the same graph runs against real tools in production and against stubs or mocks in a test: give the test's context a `ports` object of the same type holding fakes. To test one action, add one node of it to a fresh `Graph` and `execute` it against `createMemoryDagFs()` (seeded with any input files), a `MemCache` and fake ports, then read the result's `outputs` back through the memory filesystem's `.files`. The worked example on [dagraph-graphs](dagraph-graphs.md) runs this way. `processNode(graph, name, {}, context)` does the same for one node without an orchestrator.
+Because ports arrive only through the context, the same graph runs against real tools in production and against stubs or mocks in a test: give the test's context a `ports` object of the same type holding fakes. To test one action, add one node of it to a fresh `Graph` and `execute` it against `createMemoryDagFs()` (seeded with any input files), a `cacheDir` such as `"/cache"` and fake ports, then read the result's `outputs` back through the memory filesystem's `.files`, whose values hold each file's `data`. The worked example on [dagraph-graphs](dagraph-graphs.md) runs this way. `processNode(graph, name, {}, context)` does the same for one node without an orchestrator.
 
 A test of one action in that form (verified: it passes under `bun test` with Bun 1.4.4, and type-checks under the repository's `tsconfig.json` with both TypeScript 6.0.3 and `tsgo`):
 
@@ -102,7 +102,6 @@ import {
   execute,
   file,
   Graph,
-  MemCache,
   namedOutput,
   nodeInputs,
   type DagFs,
@@ -138,19 +137,19 @@ test("translate writes the page in the language it is given", async () => {
   const [result] = await execute(graph, {
     ports: { fs, translator },
     fs,
-    cache: new MemCache(),
-    casBaseDir: "/cas",
+    cacheDir: "/cache",
+    clock: Date,
   });
 
   if (result?.status !== "done") throw new Error(JSON.stringify(result));
-  expect(fs.files.get(namedOutput(result.outputs, "page"))).toBe("fr: hello");
+  expect(fs.files.get(namedOutput(result.outputs, "page"))?.data).toBe("fr: hello");
 });
 ```
 
 What it relies on:
 
-- The action writes through its `fs` port, and the test passes the same memory file system as the port and as the context's `fs`, so the engine finds, hashes and moves what the action wrote. An action that writes with `node:fs` directly cannot run against the memory file system: its `ensureDir` does nothing, so the output directory does not exist on disk, the write fails, and the node settles `failed` with `ENOENT: no such file or directory, open '/cas/<key>/tmp-<uuid>/<file>'` (checked by a separate run).
-- After the execution, `.files` holds the seeded `/page.txt` and the one published output, `/cas/<actionKey>/out-<contentHash>/page.fr.txt`, and nothing else: a `MemCache` keeps its entries in memory, not in the file system.
+- The action writes through its `fs` port, and the test passes the same memory file system as the port and as the context's `fs`, so the engine finds, hashes and moves what the action wrote. An action that writes with `node:fs` directly cannot run against the memory file system: its `ensureDir` does nothing, so the output directory does not exist on disk, the write fails, and the node settles `failed` with `ENOENT: no such file or directory, open '/cache/tmp/<uuid>/<file>'` (checked by a separate run).
+- After the execution, `.files` holds the seeded `/page.txt`, the one committed output, `/cache/v1/<actionKey>/<contentHash>/page.fr.txt`, and its entry, `/cache/v1/<actionKey>/manifest.json`.
 - `namedOutput(outputs, name)` picks one path out of `outputs` ([dagraph-graphs](dagraph-graphs.md)). It needs the result narrowed to a success first, which the `if` does. On any other status it fails the test with the whole result as its message: a translator that throws `quota exceeded` gives `{"name":"translate","actionKey":"<64 hex>","status":"failed","error":{"name":"Error","message":"quota exceeded"},"elapsed":<ms>}`, and the file system then holds only `/page.txt`.
 - `await processNode(graph, "translate", {}, context)` in place of `execute` returns the same `done` result, with the same key and outputs (checked by a separate run).
 
@@ -162,14 +161,7 @@ Two actions: `fetch` writes a page, `summarize` reads it. The second execution f
 import { writeFile, mkdtemp } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import {
-  countResultsByStatus,
-  defineAction,
-  execute,
-  FsCache,
-  Graph,
-  nodeInputs,
-} from "@mrmeku/dagraph";
+import { countResultsByStatus, defineAction, execute, Graph, nodeInputs } from "@mrmeku/dagraph";
 import { createNodeDagFs } from "@mrmeku/dagraph/fs/node";
 
 const fetchPage = defineAction({
@@ -193,9 +185,9 @@ const summarize = defineAction({
   },
 });
 
-const casBaseDir = join(await mkdtemp(join(tmpdir(), "dag-")), "cas");
+const cacheDir = join(await mkdtemp(join(tmpdir(), "dag-")), "cache");
 const fs = createNodeDagFs();
-const context = { cache: new FsCache(casBaseDir, fs), fs, casBaseDir };
+const context = { fs, cacheDir, clock: Date };
 const graph = new Graph();
 const page = fetchPage.addNode(graph, { name: "fetch", inputs: { url: "https://example.com" } });
 summarize.addNode(graph, { name: "summarize", deps: { page } });
@@ -222,13 +214,13 @@ A node moves through these states. Each arrow names what moves it.
 1. **Waiting**: some dep has not settled. A node with no deps skips this state.
 2. **Ready**: every dep has settled, whatever its status. The node waits for the scheduler to admit it.
 3. **Admitted**. Orchestration first checks the node's _required_ deps (every dep but those marked `settled`). If one did not succeed, the node settles `dep-failed` at once, with no dispatch event and no action key. Otherwise orchestration emits `dispatch` and hands the node to processing.
-4. **Looking up**. Processing computes the action key. If that fails (an input file cannot be read), the node settles `failed`, with no action key. Unless the node is not cacheable, it reads the cache. A verified entry settles the node `cached`. A cache whose read rejects counts as a miss, never as a failure.
+4. **Looking up**. Processing computes the action key. If that fails (an input file cannot be read), the node settles `failed`, with no action key. Unless the node is not cacheable or its key is forced, it reads the key's entry. A verified entry settles the node `cached`. An entry that cannot be read counts as a miss, never as a failure.
 5. **Waiting for its slot**: only a miss whose action is in a concurrency group. It gives its place back and waits until the scheduler grants it a slot.
 6. **Starting**: the engine makes a fresh, empty output directory for this attempt and emits `start`. If the listener returns a promise, the action waits for it.
 7. **Running**: the engine resolves the action's inputs and its deps' outputs to handles (a failure here fails the node without running the action), reads its clock, and runs the action with a signal that fires on the node's timeout or on the execution's cancel.
 8. **Settled**: `done` (outputs stored, entry written unless the node is not cacheable), `failed`, or `cancelled`.
 
-A node that does not succeed never gets a cache entry, so its next execution starts it again. If it fails or is cancelled before its outputs are published, its attempt's directory is removed (best effort: a failed removal changes nothing in the result). The one case that leaves files behind is a cache write that rejects. By then the outputs are already published under `<casBaseDir>/<actionKey>/out-<contentHash>/`, so the node settles `failed` but that directory stays, with no entry pointing at it.
+A node that does not succeed never gets a cache entry, so its next execution starts it again. If it fails or is cancelled before its outputs are committed, its attempt's directory is removed (best effort: a failed removal changes nothing in the result). The one case that leaves files behind is an entry write that fails. By then the outputs are already committed under `<cacheDir>/v1/<actionKey>/<contentHash>/`, so the node settles `failed` but that directory stays, with no entry pointing at it.
 
 Where it lives: `packages/dagraph/src/orchestrate.ts`, `process-node.ts`, `exec-state.ts`.
 
@@ -240,11 +232,11 @@ A `Result` is how one node settled. It always has `name` (the node's name) and `
 | ------------ | ----------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `done`       | `outputs`, `contentHash`, `outputHashes`, `elapsed`         | The action ran and its outputs were stored.                                                                                                                                   |
 | `cached`     | `outputs`, `contentHash`, `outputHashes`                    | A verified cache entry was found. No `elapsed`.                                                                                                                               |
-| `failed`     | `error: { name, message, cause? }`, `elapsed?`, `timedOut?` | The node could not be keyed, or its action threw, timed out, or returned paths that are outside its output directory or cannot be read, or the work around the action failed. |
+| `failed`     | `error: { name, message, cause? }`, `elapsed?`, `timedOut?` | The node could not be keyed, or its action threw, timed out, or returned paths outside its output directory, not regular files or not readable, or the work around it failed. |
 | `dep-failed` | `dep`, `rootCauses?`                                        | A required dep did not succeed. `dep` names it; `rootCauses` names the nodes behind it (see "Failure semantics").                                                             |
 | `cancelled`  | `elapsed?`                                                  | The execution was cancelled before or while the node ran.                                                                                                                     |
 
-`outputs`, `contentHash` and `outputHashes` together are the node's cache entry (`CacheEntry`, from [dagraph-caching](dagraph-caching.md)): `outputs` is the record of outputs the action returned, moved to where the CAS keeps them.
+`outputs`, `contentHash` and `outputHashes` together are the node's cache entry (`CacheEntry`, from [dagraph-caching](dagraph-caching.md)): `outputs` is the record of outputs the action returned, moved to where the cache keeps them, each path absolute.
 
 `elapsed` is there **exactly when the engine ran the node's action**: always on `done`, on `failed` when the failure came from the action or after it, and on `cancelled` when the cancel caught the action running. It is in milliseconds by the context's clock, counted from just before the action is called (after the `start` event, its listener and the input resolution) to the result, so it includes hashing and storing the outputs. A node that failed or was cancelled before its action ran has no `elapsed`: one whose key could not be computed, whose attempt directory could not be made, whose inputs could not be resolved, whose `start` listener rejected, or that a cancel held back before the action. A `RunNode` rejection carries no `elapsed` either: orchestration does not know whether the action ran. Earlier versions wrote `elapsed: 0` on such failures; `isResult` still reads those.
 
@@ -271,7 +263,7 @@ A cached result, as JSON:
   "name": "fetch-b",
   "actionKey": "42a8d5ee…43756",
   "status": "cached",
-  "outputs": { "page": "<casBaseDir>/42a8d5ee…43756/out-c844d585…44b6/page.txt" },
+  "outputs": { "page": "<cacheDir, absolute>/v1/42a8d5ee…43756/c844d585…44b6/page.txt" },
   "contentHash": "c844d585…44b6",
   "outputHashes": { "page": "<64 hex>" }
 }
@@ -310,7 +302,8 @@ When a node has several deps that did not succeed, `dep` names the first of them
 | A returned path has no file, or cannot be read                                                          | named by [dagraph-caching](dagraph-caching.md)                                                  | yes  |
 | An output ref names an output its dep's entry does not hold                                             | `"<node>" has no output "<output>"`, no `elapsed`, the action never runs                        | yes  |
 | The `start` listener throws or rejects                                                                  | that error, no `elapsed`, the action never runs                                                 | yes  |
-| The output directory cannot be made, or the cache write fails (the published outputs then stay on disk) | that error, no `elapsed` when the directory could not be made                                   | yes  |
+| The output directory cannot be made, or the cache write fails (the committed outputs then stay on disk) | that error, no `elapsed` when the directory could not be made                                   | yes  |
+| The output directory cannot be renamed into place ([dagraph-caching](dagraph-caching.md))               | the rename's own error                                                                          | yes  |
 | The `RunNode` rejects                                                                                   | its error, no `elapsed` (or `cancelled` once the execution is cancelled)                        | no   |
 
 Where it lives: `packages/dagraph/src/orchestrate.ts`, `exec-state.ts`, `process-node.ts`.
@@ -511,7 +504,7 @@ Like a timeout, a cancel is cooperative: the execution ends only once each runni
 
 An execution removes every listener it added to `signal` when it ends, and each node's timeout timer is cleared once its action settles. So one long-lived `AbortSignal`, such as a process-wide Ctrl-C controller, can be passed to many executions in turn without piling up listeners.
 
-A worked example from the tests: `slow` (in the first execution only, waits for its signal, then returns normally), `quick`, `after` (needs `quick`) and `never` (needs `slow`), under `maxParallelism: 2`, with the abort fired from the listener when `quick`'s result arrives. The events are `start:slow`, `start:quick`, `done:quick`, `cancelled:after`, `cancelled:slow`, `cancelled:never`, and the counts are `{ done: 1, cached: 0, failed: 0, "dep-failed": 0, cancelled: 3 }`. Only `quick` and `slow` have an action key. The test then makes `slow` stop waiting, since with no signal it would never resolve, and the next execution without a signal finds `quick` cached and runs the other three. The order `start:slow`, `start:quick` holds with `createMemoryDagFs()` and a `MemCache`, as in the test; with a real file system the two starts may come in either order.
+A worked example from the tests: `slow` (in the first execution only, waits for its signal, then returns normally), `quick`, `after` (needs `quick`) and `never` (needs `slow`), under `maxParallelism: 2`, with the abort fired from the listener when `quick`'s result arrives. The events are `start:slow`, `start:quick`, `done:quick`, `cancelled:after`, `cancelled:slow`, `cancelled:never`, and the counts are `{ done: 1, cached: 0, failed: 0, "dep-failed": 0, cancelled: 3 }`. Only `quick` and `slow` have an action key. The test then makes `slow` stop waiting, since with no signal it would never resolve, and the next execution without a signal finds `quick` cached and runs the other three. The order `start:slow`, `start:quick` holds with `createMemoryDagFs()`, as in the test; with a real file system the two starts may come in either order.
 
 Where it lives: `packages/dagraph/src/orchestrate.ts`, `process-node.ts`.
 
@@ -535,7 +528,7 @@ import { mkdtemp, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
-import { defineAction, execute, FsCache, Graph } from "@mrmeku/dagraph";
+import { defineAction, execute, Graph } from "@mrmeku/dagraph";
 import { createNodeDagFs } from "@mrmeku/dagraph/fs/node";
 
 // Runs argv in a process group of its own, and on abort stops the whole group.
@@ -584,11 +577,11 @@ const tree = defineAction({
   },
 });
 
-const casBaseDir = join(await mkdtemp(join(tmpdir(), "dag-")), "cas");
+const cacheDir = join(await mkdtemp(join(tmpdir(), "dag-")), "cache");
 const fs = createNodeDagFs();
 const graph = new Graph();
 for (const action of [passOn, steps, tree]) action.addNode(graph, {});
-for (const r of await execute(graph, { cache: new FsCache(casBaseDir, fs), fs, casBaseDir }))
+for (const r of await execute(graph, { fs, cacheDir, clock: Date }))
   console.log(r.name, r.status, r.status === "failed" ? JSON.stringify(r.error) : "");
 ```
 
@@ -642,7 +635,7 @@ Where it lives: `packages/dagraph/src/orchestrate.ts`.
 Processing one node is two steps, and the scheduler's slot goes between them, since only a miss takes one:
 
 - `lookupNode(graph, name, depEntries, executionContext)` computes the node's key and reads and verifies its entry. It resolves to a `Lookup`: `cached`, `dep-failed` (a required dep missing from `depEntries`) or `failed` (the key could not be computed) as the node's `Result`, or a `Miss`, `{ name, actionKey, status: "missed" }`. It runs nothing.
-- `runAction(graph, miss, depEntries, executionContext, options?)` runs a missed node's action in a fresh attempt directory, publishes its outputs and writes its entry. It resolves to `done`, `failed` or `cancelled`. Its options are `signal`, the execution's cancel, and `onEvent`, which receives the node's `start` and `output` before the result returns.
+- `runAction(graph, miss, depEntries, executionContext, options?)` runs a missed node's action in a fresh attempt directory, commits its outputs and writes its entry. It resolves to `done`, `failed` or `cancelled`. Its options are `signal`, the execution's cancel, and `onEvent`, which receives the node's `start` and `output` before the result returns.
 - `processNode(graph, name, depEntries, executionContext, options?)` is `lookupNode`, then `runAction` on a miss, with no slot to wait for: for a test, a script, or a worker whose orchestrator already holds the node's slot.
 - `runNode(graph, executionContext, options?)` is the `RunNode` that waits for the scheduler between the two, as `execute` does.
 
@@ -657,14 +650,14 @@ The split lets the orchestrator run in one place and the work in another. The pa
 3. On a miss, the `RunNode` awaits `waitForScheduler()` in the orchestrator, then sends the node to a worker to run.
 4. The worker rebuilds a graph that declares the node, and calls `processNode`, since the orchestrator already holds the slot. It sends the `Result` back as JSON; the orchestrator can check it with `isResult`.
 
-Workers and orchestrator must see the same CAS: `depEntries` and results hold paths into it (see [dagraph-caching](dagraph-caching.md) for how paths are stored). `lookupNode` looks entries up in the context's `cache`, which is separate from the CAS files, so for one worker to hit another's entries the workers also need one shared `Cache`, such as an `FsCache` over a shared directory. The orchestrator reads no files and needs neither. The `start` and `output` events happen in the worker; only `dispatch` and `result` reach the orchestrator's listener. Each side stamps its own events with its own clock, so the stamps of one node come from two machines' clocks, and `elapsed` from the worker's.
+Workers and orchestrator must see the same cache at the same path: `depEntries` and results hold absolute paths into it ([dagraph-caching](dagraph-caching.md), "The cache directory layout"). Each key's entry is a manifest in it too, so one worker hits what another wrote. The orchestrator reads no files and needs none of it. The `start` and `output` events happen in the worker; only `dispatch` and `result` reach the orchestrator's listener. Each side stamps its own events with its own clock, so the stamps of one node come from two machines' clocks, and `elapsed` from the worker's.
 
 For a worker to compute the key the orchestrator's process would have, and to hit the entries other processes wrote:
 
 1. **The same declaration.** The worker's graph must declare the node with the same `kind`, the same inputs (the action's own, including its `version`, and the node's) and the same roles. Names, meta, groups and timeouts may differ.
 2. **The same files.** A `file()` input is keyed on its path as written and the bytes found there, read through the worker's own filesystem. A relative path is read from the worker's working directory.
 3. **The same dep entries.** The worker keys on the content hashes in the `depEntries` it is given, and reads the dep files at the paths they hold.
-4. **The same `casBaseDir` form.** Entries store paths relative or absolute as `casBaseDir` was. Processes that share one CAS but name it in different forms keep making each other miss: each rerun rewrites the entry in the rerunning process's form, so the other process misses on it next time. A relative `casBaseDir` that resolves to another directory is a different CAS altogether. A CAS restored under another working directory and read there with the same relative `casBaseDir` hits ([dagraph-caching](dagraph-caching.md)).
+4. **The same cache.** A worker hits the entries of any `cacheDir` that resolves to the directory they were written in, or to a copy of it ([dagraph-caching](dagraph-caching.md), "The cache directory layout").
 
 Results cross back as JSON with nothing lost (see "A result is plain data"), and `isResult` checks one read back. A replay passes a recorded result back from `RunNode` instead of calling a worker.
 
@@ -674,7 +667,7 @@ Where it lives: `packages/dagraph/src/process-node.ts`, `execute.ts` (`runNode`)
 
 - Every node given gets exactly one result, also on cancel, unless the scheduler returns early (see below) or throws.
 - A node is never processed before all its deps have settled.
-- A node that did not succeed leaves no cache entry. It leaves no attempt directory either, unless the cache write itself failed after its outputs were published.
+- A node that did not succeed leaves no cache entry. It leaves no attempt directory either, unless the cache write itself failed after its outputs were committed.
 - `cancelled`, `failed` and `dep-failed` are never cached; the next execution retries them.
 - A hit never starts, never emits `start`, and never takes a group slot.
 - A scheduler only filters the ready order; it never reorders it.

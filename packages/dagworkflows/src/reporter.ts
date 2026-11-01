@@ -34,12 +34,12 @@ export async function finishPass(
  * Turns dagraph's event stream into CI output as the GitHub renderer draws it
  * (github/renderer.ts), with a markdown summary drawn by the renderers in `summary`
  * (summary.ts). `rerunCommand` is the command that ran this workflow, for the recap's reproduce line.
- * Logs are read back from beside the CAS, which is why cached and failed nodes still show their output.
  */
 export function createReporter(
   ports: Ports,
   opts: {
-    casBaseDir: string;
+    buildLogDir?: string;
+    durationsFile: string;
     nodes: Node[];
     title?: string;
     rerunCommand?: string;
@@ -51,10 +51,13 @@ export function createReporter(
     nodes: opts.nodes,
     ...(opts.rerunCommand && { rerunCommand: opts.rerunCommand }),
   };
-  const store = createGithubStore(ports, opts.casBaseDir);
+  const store = createGithubStore(ports, opts);
   store.begin(pass);
   return {
     onEvent: store.onEvent,
-    finish: (results: Result[]) => finishPass(ports, store, pass, results, opts.summary),
+    finish: async (results: Result[]) => {
+      await store.writeDurations();
+      return finishPass(ports, store, pass, results, opts.summary);
+    },
   };
 }

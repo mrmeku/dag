@@ -37,8 +37,8 @@ as it happens (the run store), and what it returns.
   because a required dependency did not succeed) or `cancelled`.
 - **Run store**: the in-memory record of a run that every output (terminal, GitHub log, check
   runs, files) reads from. Outputs subscribe to it as **listeners**.
-- **CAS**: the content-addressed cache directory where nodes' outputs live (`.dag/cas` by
-  default). See the [dagraph-caching](dagraph-caching.md) domain.
+- **Cache dir**: the content-addressed cache directory where nodes' outputs live (`.dag/cache`
+  by default). See the [dagraph-caching](dagraph-caching.md) domain.
 
 ## A run, start to end
 
@@ -63,8 +63,8 @@ as it happens (the run store), and what it returns.
    each result is written when the node settles.
 5. **Clean up the history**: if the run owes nothing (every post whose main started has
    succeeded), its history file is deleted. Otherwise it stays for a later pass.
-6. **Finish the pass**: the summary is rendered and published, the recap printed, and the outcome
-   returned.
+6. **Finish the pass**: the durations are written, the summary is rendered and published, the
+   recap printed, and the outcome returned.
 
 A run leaves a history behind only if, when it ends, it owes a post: one whose main started and
 that has not succeeded. That is a run with a post that failed every try, or a cancelled run in
@@ -242,8 +242,8 @@ delete that history file.
 
 "The next run pays it" holds only for a run that finds the history: a run of the same workflow
 file (same resolved path) over the same history directory. Nothing in dagworkflows carries a
-history from one machine or job to the next. It is not under the CAS directory, so a cache of
-`.dag/cas` leaves it behind. And a run pays its debts before any node of its graph runs, so a
+history from one machine or job to the next. It is not under the cache dir, so a cache of
+`.dag/cache` leaves it behind. And a run pays its debts before any node of its graph runs, so a
 cache restore in the graph comes too late to bring one back for that run.
 
 On GitHub the action keeps its histories in the workspace (`.dag/history` unless the
@@ -274,8 +274,8 @@ default `true`). That deletes every ignored file, `.dag/` with it. So with the d
 runner would. With `history-dir` set to an absolute path outside the checkout, or with
 `clean: false`, the next run of that workflow on that runner finds the history. It then pays it
 before any task, or refuses to start while the post still fails. The history records the main's
-outputs as paths into the CAS (relative to the working directory when `cas-dir` is), and the clean
-deletes the CAS too unless `cas-dir` is also outside the checkout. Then the post runs with
+outputs as absolute paths into the cache dir, and the clean deletes it too unless `cache-dir` is
+also outside the checkout. Then the post runs with
 `main.<output>` naming a file that is gone: a post that does `cat "$ID"` prints
 `cat: …/id: No such file or directory`, may still exit 0, and so clears the debt without releasing
 anything.
@@ -293,8 +293,8 @@ And with the local CLI, in a git checkout ignoring `.dag/`, with a post
 
 4. With only `--history-dir ../kept`, after `git clean -ffdx` and `rm fail-down`, `dag post` drew
    `✔︎ down:db`, logged the `cat` error and a bare `stopping`, exited 0 and deleted the history.
-5. With `--cas-dir ../kept-cas` as well, the history recorded the output as
-   `../kept-cas/<key>/out-<hash>/id`, and the same `dag post` logged `stopping db-20686`.
+5. With `--cache-dir ../kept-cache` as well, the history recorded the output in
+   `../kept-cache`, and the same `dag post` logged `stopping db-20686`.
 
 **What is left to a GitHub user** when a post fails in both entries on a GitHub-hosted or
 ephemeral runner: nothing in dagworkflows. There is no history file to remove, since it went with
@@ -305,9 +305,9 @@ What the post released on the runner went with it. Whatever it releases outside 
 released by hand, and the failed job's log is the only record of what that is: the post entry's
 step holds the post's group, with its log, each failed try and its error annotation; the main
 step holds the group of the post's main. The main's outputs, which the post read under `main`,
-were files in the runner's CAS and are gone with it, so only what the main or the post printed
+were files in the runner's cache dir and are gone with it, so only what the main or the post printed
 says which thing to release. To have a later run pay such a debt instead, run the job on a
-persistent self-hosted runner with `history-dir` and `cas-dir` outside the checkout, as above;
+persistent self-hosted runner with `history-dir` and `cache-dir` outside the checkout, as above;
 there the debt is paid, or its history found and removed, as with a local run.
 
 ### Post pass output
@@ -409,7 +409,7 @@ second `dag post ci.ts` prints nothing and exits 0.
 ```
 ▶ post · 1 of 1 post steps owed
     down:db
-▷ down:db
+▷ down:db (last run 5.0s)
 ▶ ✔︎ down:db (9ms)
     stopping db-4250
 summary: .dag/summary.md
@@ -436,7 +436,7 @@ summary: .dag/summary.md
 cancelled: test, down:db
 ▶ post · 1 of 1 post steps owed
     down:db
-▷ down:db (last run 9ms)
+▷ down:db (last run 5.0s)
 ▶ ✔︎ down:db (9ms)
     stopping db-4646
 summary: .dag/summary.md
@@ -540,7 +540,7 @@ Its content (type `RunHistoryFile`):
       "name": "up:db",
       "actionKey": "fde7…",
       "status": "done",
-      "outputs": { "id": ".dag/cas/fde7…/out-c949…/id" },
+      "outputs": { "id": "/private/tmp/dwl/.dag/cache/v1/fde7…/c949…/id" },
       "contentHash": "c949…",
       "elapsed": 8
     },
@@ -644,7 +644,7 @@ which one holds a failing debt:
   posts, so look a post up by the name the output gave it.
 - Each pass that tries the debt adds the post to `started` again, so a history whose post failed
   in its run and again in one pass reads `"started": ["up:db", "test", "down:db", "down:db"]`.
-- The main's result holds its `outputs`, the CAS paths of the files the post is given under
+- The main's result holds its `outputs`, the cache dir paths of the files the post is given under
   `main`, such as the id of what it releases. They tell two histories that owe the same post
   apart, as the post's own log does when it prints what it releases.
 - A history with a `<file>.lock` directory beside it whose lock is fresh belongs to a run still
@@ -819,15 +819,19 @@ Where it lives: `runner.ts`, `cli.ts`, `action/main.ts`, `action/post.ts`.
 All three take `RunOptions` (or most of it):
 
 - `implementation` (required): the workflow's implementation, `defineWorkflow(...).implementation`,
-  of type `Implementation`: `(graph, ports, ctx) => Promise<unknown>`, where `ctx` is the
-  `CiContext` (so a workflow can branch on the ref or event).
+  of type `Implementation`: `(graph, ports, ctx, runDataPaths?) => Promise<unknown>`, where `ctx`
+  is the `CiContext` (so a workflow can branch on the ref or event).
 - `ports` (required): the `Ports` (see below).
-- `casBaseDir` (required): the CAS directory.
+- `cacheDir` (required): the cache dir.
+- `buildLogDir`: where the store keeps each built node's log; default `.dag/build-logs`
+  (`DEFAULT_BUILD_LOG_DIR`).
+- `durationsDir`: where the store keeps each workflow's durations; default `.dag/durations`
+  (`DEFAULT_DURATIONS_DIR`).
 - `historyDir`: default `.dag/history`.
 - `workflowFile`: the workflow file as given. It names the run in the banner, recap and summary
   heading (`run` when absent), identifies the workflow's histories, and builds the reproduce line.
 - `only`: node names to run (with their closure and posts).
-- `force`: ignore the cache for this run.
+- `force`: run every node; no lookup in the cache dir hits.
 - `signal`: the cancel.
 - `schedulerOptions`, `summary`: the workflow's concurrency limits and summary renderers.
 - `rerunCommand`: the command the recap's `reproduce:` line starts with, used as given;
@@ -865,14 +869,14 @@ post entry, which GitHub runs at the end of the job, calls `runPost`.
 The CLI commands, as far as this domain goes (the [dagworkflows-cli-action-release](dagworkflows-cli-action-release.md) domain owns
 the rest):
 
-- `dag run <workflow> [--only <names>] [--force] [--cas-dir <dir>] [--history-dir <dir>]
+- `dag run <workflow> [--only <names>] [--force] [--cache-dir <dir>] [--history-dir <dir>]
 [--summary-file <file>] [--output-style live|failures|grouped] [--log-dir <dir>]
 [--failures-report-file <file>]`.
-- `dag post <workflow> [--only <names>] [--cas-dir <dir>] [--history-dir <dir>]
+- `dag post <workflow> [--only <names>] [--cache-dir <dir>] [--history-dir <dir>]
 [--summary-file <file>]`: "Run the post steps that stopped runs' histories show as still owed".
   Locally it always draws in the plain grouped form, with no live footer, log files or
   failures report.
-- Defaults: `--cas-dir .dag/cas`, `--history-dir .dag/history`, `--summary-file .dag/summary.md`.
+- Defaults: `--cache-dir .dag/cache`, `--history-dir .dag/history`, `--summary-file .dag/summary.md`.
 
 `postNodes(graph)` maps each post's name to its main's name; it is how the runner finds what a
 history owes.
@@ -891,18 +895,19 @@ Every node of a pass is in one of these states (types exported as `NodeState` an
 - `dispatched` or `running` (`InFlightNodeState`): handed to processing, then its start came.
   Both carry `startedAt`: the dispatch's time, then the start's.
 - Settled (`SettledNodeState`): each holds `result`, dagraph's `Result` for the node as it is,
-  and `endedAt`, the time dagraph stamped on that result. The store copies nothing out of it: the
-  key, outputs, error, `timedOut` and `rootCauses` are read from `result`. A failed or cancelled
-  state has `startedAt` if and only if its result has `elapsed`, and its type allows no other.
+  `endedAt`, the time dagraph stamped on that result, and its log once read. The store copies
+  nothing out of it: the key, outputs, error, `timedOut` and `rootCauses` are read from `result`.
+  A failed or cancelled state has `startedAt` if and only if its result has `elapsed`, and its
+  type allows no other.
   - `done` or `cached` (`SucceededNodeState`): with `startedAt`, its start's time, or a cache
     hit's dispatch.
   - `failed` (`FailedNodeState`): with `startedAt` exactly when its action ran, which its
-    result's `elapsed` says, plus its log once read. A failure without `elapsed` never ran its
+    result's `elapsed` says. A failure without `elapsed` never ran its
     action: dagraph could not compute its key, as for a `file()` input that does not exist
     (`actionKey` `""`), could not make its attempt's directory or resolve its inputs (a real
     `actionKey`), could not record its start (the run's history write failed), or its `RunNode`
     rejected. It has no `startedAt`, so its check run has no start time, it counts toward no
-    duration or wall time, and it has no CAS log and no entry in `last-run.json`.
+    duration or wall time, it printed nothing, and its duration is not recorded.
   - `dep-failed` (`DepFailedNodeState`): never dispatched. Its result's `dep` is a required
     dependency that did not succeed, and `rootCauses` the nodes behind it. The UI calls it
     skipped.
@@ -974,19 +979,14 @@ listeners told of each change.
 
 ### Creating one
 
-`createRunStore({ fs, casBaseDir, listeners, lastRunAtBegin? })` returns a `RunStore`:
+`createRunStore({ fs, buildLogDir?, durationsFile, listeners })` returns a `RunStore`:
 
-- `fs`: the port it reads logs and `last-run.json` through. It reads no clock.
-- `casBaseDir`: where it reads each settled node's log, `<casBaseDir>.logs/<actionKey>.log`, and
-  reads and writes `<casBaseDir>/last-run.json`.
+- `fs`: the port it keeps build logs and durations through. It reads no clock.
+- `buildLogDir`: where it keeps each built node's log, `<buildLogDir>/<actionKey>.log`, which a
+  later hit reads ([dagworkflows-output](dagworkflows-output.md)).
+- `durationsFile`: the workflow's durations, which it reads and writes ("The last run's
+  durations").
 - `listeners`: an array of `RunListener`s, in order.
-- `lastRunAtBegin`: read `last-run.json` when the store's first pass begins, so even the first
-  start line can show the last run's time; later passes reuse that read. Without it the file is
-  read once, just before the store first writes it (when the first node that built, or failed once
-  its action ran, settles), because a node may restore the CAS that holds it, or at the first
-  `report` if no such node settled. So a pass of cache hits learns its `previous` durations only at
-  the report. Only the local `dag run` session sets the option; `dag post` and the GitHub store do
-  not, which is why `dag post`'s start line shows no last-run time.
 
 What a store offers:
 
@@ -994,9 +994,10 @@ What a store offers:
   optional `rerunCommand`).
 - `onEvent(event)`: feed it an engine event (dagraph `ExecEvent`).
 - `cancel()`: mark the run cancelling. `runWorkflow` calls it when the signal fires.
-- `report(pass)`: once every settle has been told and the last run is known, the pass's settled
-  nodes as `NodeReport`s, in the pass's order (unsettled ones left out). It rewrites
-  `last-run.json` if any node was timed.
+- `report(pass)`: once every settle has been told, the pass's settled nodes as `NodeReport`s, in
+  the pass's order (unsettled ones left out).
+- `writeDurations()`: write the run's durations once every settle so far is told. It resolves
+  once the write ends; a failed write fails the next `report`.
 - `log(name)`: a node's log as its group prints it: the log, then `── error ──` and the error for
   a failed node; just `dependency <name> failed` for a skipped one.
 - `finish(pass, reports)`: tell the listeners the pass is over; resolves once they have all
@@ -1011,15 +1012,14 @@ A `RunListener` may have any of these hooks:
 
 - `begin(pass, run, isFirstPass)`: a pass began; `isFirstPass` is true for the store's first.
 - `start(nodeState, run)`: a node's start came.
-- `settle(nodeState, run, log)`: a node settled, with its log read from beside the CAS
-  (`::debug::` lines dropped).
+- `settle(nodeState, run, log)`: a node settled, with its log (`::debug::` lines dropped).
 - `finish(pass, nodes)`: the pass ended, with its node reports.
 - `close(run)`, `interrupt(run)`: teardown.
 - `immediate.start(nodeState)`, `immediate.output(nodeState, lines)`: see below.
 
 **The ordered hooks** (`begin`, `start`, `settle`, `finish`) come in the order things happened,
-on one queue. A `settle` waits until its node's log has been read (and the last-run file written
-when the node was timed), and everything after it waits for it. So no pass's `begin` ever comes
+on one queue. A `settle` waits until its node's log has been read (and, until a read has found
+it, the durations file read), and everything after it waits for it. So no pass's `begin` ever comes
 ahead of the previous pass's settles, even though the post pass may begin while the run's last
 logs are still being read. The `run` argument is the state as it stands when the hook runs, which
 may be later than the event.
@@ -1072,26 +1072,28 @@ an unhandled rejection: under Node's default unhandled-rejections mode the proce
 
 ### The last run's durations
 
-`<casBaseDir>/last-run.json` holds `{ "durations": { "<node>": <ms> } }`. As each node that
-**built, or failed once its action ran**, settles, its duration is merged over the previous
-file's and the file is rewritten; cached and cancelled nodes, and a node that failed before its
-action ran, do not change it. Because it sits in the CAS directory, a cache of the CAS carries
-it from run to run. A file the store cannot read counts as no last run. The durations show as
-`(last run 1.0s)` on start lines and as `previous` in node reports.
+`durationsFile` holds `{ "durations": { "<node>": <ms> } }`, one file per workflow, so two
+workflows never mix theirs: `<durationsDir>/<workflow file>.json`, the file's path from the
+working directory with each `..` written `%2E%2E`, or `run.json` for a run of no file. The store
+reads it as each pass begins and at each settle, since a restore may bring it, until a read finds
+it or the store has written it. Each node that **built, or failed once its action ran**, records
+its duration, and only `writeDurations` writes them, over the durations read: `runWorkflow` calls
+it as each save starts and as its own pass ends. So a pass that pays old debts, and `runPost`,
+write nothing. The durations show as `(last run 1.0s)` on start lines and as `previous` in node
+reports.
 
 `NodeReport` (one per settled node): `{ node, result, start?, duration?, previous? }`: the pass's
 node, dagraph's `Result` as it is, the node's `startedAt` as `start` and its duration (both absent
 for a skipped node and one that failed or was cancelled before its action ran), and `previous`,
-its duration in `last-run.json`.
+its duration in the durations file.
 
 ### Reading the state
 
 `selectors` (exported as a namespace) are pure functions over the state: `isSettled`,
 `startedAtOf`, `actionRan(result)` (whether dagraph ran the action: the result has `elapsed`, a
 cancel that caught the action running included), `ranToItsEnd(result)` (built, or failed once its
-action ran; never a cache hit nor a cancel; the nodes whose time `last-run.json`, busy time and
-the timeline count), `logKeyOf` (the key whose CAS log
-holds what the node printed: none for a node whose action did not run, a cache hit aside),
+action ran; never a cache hit nor a cancel; the nodes whose time the durations file, busy time and
+the timeline count),
 `durationOf`, `commandOf(error)` (the `CommandCause` a failure's error carries), `nodesInFlight`
 (dispatched or running, earliest first), `runStartedAt`, `nodeReports`, `failedNodes`,
 `getDependencyFailures(run, nodeState)` (the node's deps that failed or were `dep-failed`),
@@ -1149,11 +1151,8 @@ Real implementations: `createExec(opts?)`, `systemClock()`, `abortOnSignals()`, 
 
 ### Step records
 
-A node's log lives beside the CAS, never in it: `logPath(casBaseDir, actionKey)` is
-`<casBaseDir>.logs/<actionKey>.log`, so a cached node shows the log of the run that built it. The
-log is written whole when the node's action ends, to a file beside it that is then renamed into
-place. So a store, or a concurrent run of the same key, never reads half a log, and a node that is
-still running has no log there yet.
+A task writes no log of its own: it prints through the engine's `output`, and the run store keeps
+the log ([dagworkflows-output](dagworkflows-output.md), "Where logs are kept: the build log").
 
 `CommandCause` (`{ argv, cwd, ended, code }`, where `cwd` is `"."` when the command named none,
 and `ended` and `code` are the command's `ExecResult`'s) is the
@@ -1228,7 +1227,7 @@ test("a cancel during the tests still stops the database", async () => {
   const options = {
     implementation: ci.implementation,
     ports,
-    casBaseDir: "/cas",
+    cacheDir: "/cache",
     historyDir: "/history",
   };
   const run = await runWorkflow({ ...options, signal: controller.signal });
@@ -1283,7 +1282,7 @@ Where it lives: `ports.ts`, `ports/real.ts`, `ports/local.ts`, `ports/memory.ts`
   what the post releases outside the runner. The code does not address it: is that accepted, or
   should such a debt reach the next job?
 - A post pass hands the post its main's outputs as the history recorded their paths, without
-  checking that the files are still there. When the CAS has gone and the history has not (a
+  checking that the files are still there. When the cache dir has gone and the history has not (a
   persistent runner's checkout cleaned with only `history-dir` outside it), the post runs on paths
   that are gone, and if it exits 0 the debt is cleared with nothing released. Should a pass refuse,
   or warn, when a main's recorded outputs are missing?

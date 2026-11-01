@@ -60,8 +60,10 @@ function localRun(
       implementation: async () => {},
       workflowFile: "ci.ts",
       ports,
-      casBaseDir: "/cas",
+      cacheDir: "/cache",
       historyDir: "/history",
+      buildLogDir: "/build-logs",
+      durationsDir: "/durations",
       ...run,
     },
     {
@@ -188,7 +190,7 @@ describe("local session, grouped style", () => {
         lint: { chunks: ["checking\n", "\x1b[31merror\x1b[0m"], code: 1 },
         up: { chunks: ["up\n\n"], code: 0 },
       }),
-      files: { "/cas/last-run.json": JSON.stringify({ durations: { lint: 2000 } }) },
+      files: { "/durations/ci flows.ts.json": JSON.stringify({ durations: { lint: 2000 } }) },
       clock: clockAt(),
     });
     const { implementation } = defineWorkflow({
@@ -711,7 +713,9 @@ describe("local session, failures style, warnings", () => {
 
 describe("local session, failures style, at the edges", () => {
   test("a post step that printed before its cancel, then hit the cache in the post pass, has the cached log", async () => {
-    const { ports } = createTestPorts({ files: { "/cas.logs/ks.log": "saved from the cache\n" } });
+    const { ports } = createTestPorts({
+      files: { "/build-logs/ks.log": "saved from the cache\n" },
+    });
     const session = localRun("failures", ports);
     const { store } = session.runOptions;
     const save: Node = { name: "save", kind: "save", deps: [] };
@@ -964,10 +968,10 @@ describe("local session, failures style, at the edges", () => {
   });
 
   test("a forced exit while a run that threw is closing", RUN_TIMEOUT, async (t) => {
-    const { ports, fs } = createTestPorts({ files: { "/cas/last-run.json": "{}" } });
+    const { ports, fs } = createTestPorts({ files: { "/durations/ci.ts.json": "{}" } });
     // The run throws once begun, and its close waits on the last run's durations, still being read.
     fs.ensureDir = async () => {
-      throw new Error("EACCES: permission denied, mkdir '/cas'");
+      throw new Error("EACCES: permission denied, mkdir '/cache'");
     };
     let read = () => {};
     const reading = new Promise<void>((resolve) => (read = resolve));
@@ -987,7 +991,7 @@ describe("local session, failures style, at the edges", () => {
     assert.deepEqual(
       { thrown: await job, ...atExit },
       {
-        thrown: "EACCES: permission denied, mkdir '/cas'",
+        thrown: "EACCES: permission denied, mkdir '/cache'",
         stdout: [
           "ci.ts · 0 nodes · report .dag/failures.md",
           "",
@@ -1284,15 +1288,14 @@ describe("local session, live style", () => {
       let now = 0;
       const { ports } = createTestPorts({
         files: {
-          "/cas/last-run.json": JSON.stringify({
+          "/durations/ci.ts.json": JSON.stringify({
             durations: {
               lint: 1000,
               "test:a": 2000,
               "integration:packages-dagworkflows-e2e": 64_000,
             },
           }),
-          "/cas.logs/k1.log": "checking src\nsrc/a.ts:1:1 error no-console\n",
-          "/cas.logs/kb.log": "\x1b[1mbundled\x1b[22m 3 files\n",
+          "/build-logs/kb.log": "\x1b[1mbundled\x1b[22m 3 files\n",
         },
         clock: clockAt(() => now),
       });
@@ -1327,7 +1330,7 @@ describe("local session, live style", () => {
       };
       const done = (node: Node, elapsed: number): ExecEvent =>
         resultOf(node, {
-          actionKey: "",
+          actionKey: `k-${node.name}`,
           status: "done",
           outputs: {},
           contentHash: "h",
@@ -1357,7 +1360,7 @@ describe("local session, live style", () => {
       await emitAt(600, [
         dispatchOf(fmt),
         resultOf(fmt, {
-          actionKey: "",
+          actionKey: "kf",
           status: "cached",
           outputs: {},
           contentHash: "h",
@@ -1370,6 +1373,7 @@ describe("local session, live style", () => {
       // The terminal echoes a ^C at the cursor, the end of the status row.
       session.writes.push("^C");
       await emitAt(900, [
+        outputOf(lint, "src/a.ts:1:1 error no-console\n"),
         failureOf(
           lint,
           "k1",
@@ -1401,7 +1405,7 @@ describe("local session, live style", () => {
         }),
         dispatchOf(docs),
         resultOf(docs, {
-          actionKey: "",
+          actionKey: "kd",
           status: "cached",
           outputs: {},
           contentHash: "h",
@@ -1445,10 +1449,10 @@ describe("local session, live style", () => {
             "equire-all",
             "⏭︎ deploy                   skipped (beca",
             "use require-all failed)",
-            "✔︎ test:a                   1.5s",
+            "✔︎ test:a                   1.5s · 1 line",
             "✔︎ test:b                   0.0s",
             "✔︎ integration:packages-dagworkflows-e2e ",
-            "1.5s",
+            "1.5s · 1 line",
             "✔︎ cached: build, docs",
             "",
             "✖︎ lint, require-all failed · ci.ts · wal",
@@ -1469,12 +1473,14 @@ describe("local session, live style", () => {
             "logs     .dag/logs/",
           ],
           logs: {
-            ".dag/logs/lint.log": "checking src\n",
+            ".dag/logs/fmt.log": "",
+            ".dag/logs/lint.log": "checking src\nsrc/a.ts:1:1 error no-console\n",
             ".dag/logs/integration/packages-dagworkflows-e2e.log": `${"x".repeat(100)}\n`,
             ".dag/logs/test/a.log": "ok 1 - parses\tthe feed\n",
             ".dag/logs/require-all.log": "",
             ".dag/logs/test/b.log": "",
             ".dag/logs/build.log": "bundled 3 files\n",
+            ".dag/logs/docs.log": "",
           },
         },
       );
@@ -1609,10 +1615,7 @@ describe("local session, live style", () => {
 
   test("a crowd, in color with links, then a cancel", async () => {
     let now = 0;
-    const { ports } = createTestPorts({
-      files: { "/cas.logs/k1.log": "checking src\nsrc/a.ts:1:1 error no-console\n" },
-      clock: clockAt(() => now),
-    });
+    const { ports } = createTestPorts({ clock: clockAt(() => now) });
     // supports-hyperlinks reads this as the session is made, as a terminal with links would.
     process.env.FORCE_HYPERLINK = "1";
     const session = localRun(
@@ -1657,7 +1660,7 @@ describe("local session, live style", () => {
     const started = (node: Node): ExecEvent[] => [dispatchOf(node), startOf(node)];
     const done = (node: Node, elapsed: number): ExecEvent =>
       resultOf(node, {
-        actionKey: "",
+        actionKey: `k-${node.name}`,
         status: "done",
         outputs: {},
         contentHash: "h",
@@ -1685,6 +1688,7 @@ describe("local session, live style", () => {
     await screenAt(1600);
     const crowded = session.footer();
     await emitAt(1900, [
+      outputOf(a1, "checking src\nsrc/a.ts:1:1 error no-console\n"),
       failureOf(
         a1,
         "k1",
@@ -1720,7 +1724,7 @@ describe("local session, live style", () => {
       done(b, 600),
       dispatchOf(c),
       resultOf(c, {
-        actionKey: "",
+        actionKey: "kc",
         status: "cached",
         outputs: {},
         contentHash: "h",
@@ -1784,7 +1788,10 @@ describe("local session, live style", () => {
           "├ deps   a1 also failed",
           "└ rerun  npx --no dag run ci.ts --only g",
           ...skipped.map((node) => `⏭︎ ${node.name} skipped (because a1 failed)`),
-          ...["a2", "a3", "a4", "a5"].map((node) => `✔︎ ${node} 0.9s`),
+          "✔︎ a2 0.9s",
+          "✔︎ a3 0.9s · 1 line",
+          "✔︎ a4 0.9s · 2 lines",
+          "✔︎ a5 0.9s · 1 line",
           "linking",
           "⠹ a6 1.2s  ok parses the feed",
           "⠹ b  0.3s",
@@ -1816,10 +1823,13 @@ describe("local session, live style", () => {
           ...skipped.map(
             (node) => `${yellow("⏭︎")} ${node.name} ${dim("skipped (because a1 failed)")}`,
           ),
-          ...["a2", "a3", "a4", "a5"].map((node) => `${green("✔︎")} ${node} ${dim("0.9s")}`),
+          `${green("✔︎")} a2 ${dim("0.9s")}`,
+          `${green("✔︎")} a3 ${dim("0.9s · 1 line")}`,
+          `${green("✔︎")} a4 ${dim("0.9s · 2 lines")}`,
+          `${green("✔︎")} a5 ${dim("0.9s · 1 line")}`,
           "linking",
           "building",
-          `${green("✔︎")} a6 ${dim("1.3s")}`,
+          `${green("✔︎")} a6 ${dim("1.3s · 1 line")}`,
           `${green("✔︎")} b  ${dim("0.6s")}`,
           `${green("✔︎")} ${dim("cached:")} c`,
           `${gray("◼︎")} x  ${dim("cancelled after 0.2s")}`,

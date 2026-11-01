@@ -77,7 +77,7 @@ export function nullHost(): Host {
 
 /**
  * Whether `path` holds anything: a file or a link, one that leads nowhere included, or a directory
- * with one anywhere in it. A run makes the CAS directory, empty, before its restore runs.
+ * with one anywhere in it. A run makes its cache dir, empty, before its restore runs.
  */
 async function holdsAnything(path: string): Promise<boolean> {
   const stats = await lstat(path).catch(() => undefined);

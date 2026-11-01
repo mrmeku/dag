@@ -13,9 +13,10 @@ interface NodeLines {
   readonly printed: boolean;
 }
 
-/** A settled node's CAS log, once the store has read it. */
+/** A settled node's log, once the store has read it. */
 interface LogRead {
   readonly lineCount?: number;
+  readonly log?: string[];
 }
 
 /** Not yet running: waiting on its deps, or held back by the scheduler, dispatched or not. */
@@ -53,11 +54,7 @@ export type SucceededNodeState = (SettledAs<"done"> | SettledAs<"cached">) & {
  * (its result's `actionKey` is ""), its attempt not set up, its start not recorded, or its inputs
  * not resolved.
  */
-export type FailedNodeState = SettledAs<"failed"> &
-  ActionRanOrNot & {
-    /** The CAS log, kept for the failure's block and report. */
-    readonly log?: string[];
-  };
+export type FailedNodeState = SettledAs<"failed"> & ActionRanOrNot;
 
 /** Skipped because a required dependency did not succeed: never dispatched. */
 export type DepFailedNodeState = SettledAs<"dep-failed">;
@@ -106,7 +103,7 @@ export interface Pass {
   rerunCommand?: string;
 }
 
-/** An engine event as dagraph emits it, or a settled node's CAS log once the store has read it. */
+/** An engine event as dagraph emits it, or a settled node's log once the store has read it. */
 export type NodeAction = ExecEvent | { type: "logRead"; settled: SettledNodeState; log: string[] };
 
 export type RunAction =
@@ -167,8 +164,7 @@ function linesAfter(state: NodeState, chunk: string) {
 
 /** A settled node once its log is read. */
 export function settledWithLog(state: SettledNodeState, log: string[]): SettledNodeState {
-  if (state.status === "failed") return { ...state, lineCount: log.length, log };
-  return { ...state, lineCount: log.length };
+  return { ...state, lineCount: log.length, log };
 }
 
 /** A node after `action`. */

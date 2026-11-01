@@ -12,7 +12,7 @@ import { registerHooks } from "node:module";
 import { resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { check, lock } from "proper-lockfile";
-import { DEFAULT_CAS_DIR, DEFAULT_HISTORY_DIR } from "../config.ts";
+import { DEFAULT_CACHE_DIR, DEFAULT_HISTORY_DIR } from "../config.ts";
 import {
   artifactServiceAvailable,
   createActionsArtifactStore,
@@ -63,7 +63,7 @@ export async function actionOptions(bundleUrl: string): Promise<RunOptions> {
       lockfile: { lock, check },
       env: process.env,
     },
-    casBaseDir: core.getInput("cas-dir") || DEFAULT_CAS_DIR,
+    cacheDir: core.getInput("cache-dir") || DEFAULT_CACHE_DIR,
     historyDir: core.getInput("history-dir") || DEFAULT_HISTORY_DIR,
     force: core.getBooleanInput("force"),
     ...(only.length && { only }),

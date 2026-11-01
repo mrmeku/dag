@@ -9,9 +9,10 @@ import {
 } from "@mrmeku/dagraph";
 import { cache, type ActionsCacheSpec, type ActionsCacheTasks } from "./cache.ts";
 import { addCommand, type CmdTaskSpec, type ShellTaskSpec } from "./commands.ts";
+import { DEFAULT_CACHE_DIR, DEFAULT_DURATIONS_DIR } from "./config.ts";
 import type { CiContext, Ports, WorkflowPorts } from "./ports.ts";
 import { addPost, type PostField } from "./post.ts";
-import type { Implementation } from "./runner.ts";
+import type { Implementation, RunDataPaths } from "./runner.ts";
 import { glob, hashFiles, requireAll, uploadArtifact, type UploadArtifactSpec } from "./steps.ts";
 import type { SummaryRenderer } from "./summary.ts";
 import { addTask, type ActionTaskSpec } from "./task.ts";
@@ -70,8 +71,8 @@ export interface Workflow<G extends string = never> {
   /**
    * `actions/cache` as tasks: adds the restore, `restore:<name>`, and returns it with `save`,
    * which adds the save, `save:<name>`, after every other node: see `ActionsCacheTasks`.
-   * `const cas = workflow.cache({ name: "cas", path: [".dag/cas"], key, restoreKeys })`, then
-   * `deps: { cas: cas.restore }` and `cas.save()`.
+   * `const cache = workflow.cache({ key, restoreKeys })`, then `deps: { cache: cache.restore }`
+   * and `cache.save()`.
    */
   cache: (spec: ActionsCacheSpec) => ActionsCacheTasks;
   /** `actions/upload-artifact` as a node: globs and dep outputs up as one artifact of the run. */
@@ -90,7 +91,9 @@ export function createWorkflow<G extends string>(
   graph: Graph<Ports>,
   ports: Ports,
   ctx: CiContext,
+  runDataPaths: RunDataPaths = { cacheDir: DEFAULT_CACHE_DIR },
 ): Workflow<G> {
+  const { cacheDir, durationsDir = DEFAULT_DURATIONS_DIR } = runDataPaths;
   return {
     graph,
     ports,
@@ -104,9 +107,9 @@ export function createWorkflow<G extends string>(
       return ref;
     },
     requireAll: (opts) => requireAll(graph, opts),
-    cache: (spec) => cache(graph, spec, ctx),
+    cache: (spec) => cache(graph, { path: [cacheDir, durationsDir], ...spec }, ctx),
     uploadArtifact: (spec) => uploadArtifact(graph, spec),
-    compose: (other) => other.implementation(graph, ports, ctx),
+    compose: (other) => other.implementation(graph, ports, ctx, runDataPaths),
   };
 }
 
@@ -149,7 +152,7 @@ export function defineWorkflow<S extends ThrottledSchedulerOptions, R = void>(de
     [WORKFLOW_DEF]: true,
     ...(def.schedulerOptions && { schedulerOptions: def.schedulerOptions }),
     ...(def.summary && { summary: def.summary }),
-    implementation: async (graph, ports, ctx) =>
-      def.implementation(createWorkflow<GroupsOf<S>>(graph, ports, ctx)),
+    implementation: async (graph, ports, ctx, runDataPaths) =>
+      def.implementation(createWorkflow<GroupsOf<S>>(graph, ports, ctx, runDataPaths)),
   };
 }

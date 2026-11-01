@@ -65,7 +65,7 @@ Types, each explained further in its section:
 
 Separate entry point `@mrmeku/dagraph/mermaid`: `mermaidBody(nodes, options?)`, `mermaidQuote(text)` and the type `MermaidOptions<Meta>`.
 
-The main entry point also exports the execution, caching and filesystem APIs (`execute`, `lookupNode`, `runAction`, `processNode`, `orchestrate`, schedulers, caches, `createMemoryDagFs`, result types). Those belong to [dagraph-execution](dagraph-execution.md) and [dagraph-caching](dagraph-caching.md). This page uses `execute`, `MemCache` and `createMemoryDagFs` only in its examples.
+The main entry point also exports the execution, caching and filesystem APIs (`execute`, `lookupNode`, `runAction`, `processNode`, `orchestrate`, schedulers, `createMemoryDagFs`, result types). Those belong to [dagraph-execution](dagraph-execution.md) and [dagraph-caching](dagraph-caching.md). This page uses `execute` and `createMemoryDagFs` only in its examples.
 
 ### The package
 
@@ -73,8 +73,8 @@ The main entry point also exports the execution, caching and filesystem APIs (`e
 - **Badges.** npm version `https://img.shields.io/npm/v/@mrmeku/dagraph`, linking to `https://www.npmjs.com/package/@mrmeku/dagraph`; CI `https://github.com/mrmeku/dag/actions/workflows/ci.yml/badge.svg`, linking to `https://github.com/mrmeku/dag/actions/workflows/ci.yml`; licence `https://img.shields.io/npm/l/@mrmeku/dagraph`, linking to `https://github.com/mrmeku/dag/blob/main/LICENSE`, the repository's root `LICENSE`.
 - **What ships.** JavaScript compiled from the TypeScript sources, with declarations. Its only runtime dependencies are `js-sha256` (every hash) and `pathe` (path normalising).
 - **Compiler settings a consumer needs.** The declarations name web globals such as `AbortSignal`. A program compiled with `lib` `ESNext` only, and neither `@types/node` nor Bun's types, gets `Cannot find name 'AbortSignal'` inside dagraph's declarations unless `skipLibCheck` is on. `lib` `DOM`, or the `node` or `bun` types, provide them.
-- **Entry points.** Four: `@mrmeku/dagraph` (the engine, the caches, the memory filesystem, every type), `@mrmeku/dagraph/fs` (`createBunDagFs`), `@mrmeku/dagraph/fs/node` (`createNodeDagFs`) and `@mrmeku/dagraph/mermaid` (`mermaidBody`, `mermaidQuote`).
-- **Runtimes.** Node and Bun. The engine itself uses no runtime-specific API; only the filesystem adapters do: `/fs/node` is built on `node:fs` and runs on Node (and on Bun, which implements `node:fs`), `/fs` is built on `Bun.file` and needs Bun. The package declares no `engines` field, and nothing else names a minimum Node or Bun version for it, so no supported range is stated (see Open questions); the `>=24.2` in `@mrmeku/dagworkflows` is that package's own. What the repository does run: its CI and release pin Node 24 and Bun 1.4.2. dagraph's own tests run under Bun (`bun test ./packages/dagraph`), and dagraph runs under Node 24 as the engine of dagworkflows, whose tests run with `node --test` and whose GitHub Action runs on `node24`. The build targets `ESNext`, so the shipped JavaScript is the sources' syntax as written, lowered and polyfilled for no older runtime. The newest features the sources use are ES2022's (class static blocks, `Object.hasOwn`, an error's `cause`), except for ES2024's `Map.groupBy` in `/mermaid`. The oldest Node that runs it is set by two globals, not by syntax. The engine calls the global `crypto.randomUUID()` to name each attempt's `tmp-<uuid>` directory and each `FsCache` manifest's temporary file, and Node has a global `crypto` without a flag from 19.0. `/mermaid` calls `Map.groupBy`, which Node has from 21.0. Verified on 2026-10-26 with the quick start as plain JavaScript (its two type annotations removed) against the packed package. Node 19.0.0 and 20.0.0 print its six lines. Node 18.0.0 and 18.20.8 settle every node that has to run `failed` with `ReferenceError: crypto is not defined`, and its dependents `dep-failed`. `mermaidBody` throws `TypeError: Map.groupBy is not a function or its return value is not iterable` on Node 20.0.0 and works on 21.0.0. These are the versions that run it, not a supported range (see Open questions). The worked example on [dagraph-caching](dagraph-caching.md) ("Quick start") was run against the packed package under Bun 1.4.4 and Node 22.18, 23.6, 24 and 25.
+- **Entry points.** Four: `@mrmeku/dagraph` (the engine, the memory filesystem, every type), `@mrmeku/dagraph/fs` (`createBunDagFs`), `@mrmeku/dagraph/fs/node` (`createNodeDagFs`) and `@mrmeku/dagraph/mermaid` (`mermaidBody`, `mermaidQuote`).
+- **Runtimes.** Node and Bun. The engine itself uses no runtime-specific API; only the filesystem adapters do: `/fs/node` is built on `node:fs` and runs on Node (and on Bun, which implements `node:fs`), `/fs` is built on `Bun.file` and needs Bun. The package declares no `engines` field, and nothing else names a minimum Node or Bun version for it, so no supported range is stated (see Open questions); the `>=24.2` in `@mrmeku/dagworkflows` is that package's own. What the repository does run: its CI and release pin Node 24 and Bun 1.4.2. dagraph's own tests run under Bun (`bun test ./packages/dagraph`), and dagraph runs under Node 24 as the engine of dagworkflows, whose tests run with `node --test` and whose GitHub Action runs on `node24`. The build targets `ESNext`, so the shipped JavaScript is the sources' syntax as written, lowered and polyfilled for no older runtime. The newest features the sources use are ES2022's (class static blocks, `Object.hasOwn`, an error's `cause`), except for ES2024's `Map.groupBy` in `/mermaid`. The oldest Node that runs it is set by two globals, not by syntax. The engine calls the global `crypto.randomUUID()` to name each attempt's `tmp/<uuid>` directory and each manifest's temporary file, and Node has a global `crypto` without a flag from 19.0. `/mermaid` calls `Map.groupBy`, which Node has from 21.0. Verified on 2026-10-26 with the quick start as plain JavaScript (its two type annotations removed) against the packed package. Node 19.0.0 and 20.0.0 print its six lines. Node 18.0.0 and 18.20.8 settle every node that has to run `failed` with `ReferenceError: crypto is not defined`, and its dependents `dep-failed`. `mermaidBody` throws `TypeError: Map.groupBy is not a function or its return value is not iterable` on Node 20.0.0 and works on 21.0.0. These are the versions that run it, not a supported range (see Open questions). The worked example on [dagraph-caching](dagraph-caching.md) ("Quick start") was run against the packed package under Bun 1.4.4 and Node 22.18, 23.6, 24 and 25.
 - **The sibling package.** `@mrmeku/dagworkflows`, a CI runner from the same repository, depends on `@mrmeku/dagraph` and runs its workflows as dagraph graphs.
 
 Where it lives: `packages/dagraph/package.json`, `scripts/release.ts`, `scripts/pack.ts`, `packages/dagworkflows/package.json`, `tsconfig.json`, `scripts/checks.ts`, `.github/workflows/ci.yml`, `packages/dagraph/src/process-node.ts` and `packages/dagraph/src/cache.ts` (`crypto.randomUUID`), `packages/dagraph/src/mermaid.ts` (`Map.groupBy`).
@@ -91,7 +91,6 @@ import {
   file,
   Graph,
   maybe,
-  MemCache,
   nodeInputs,
   settled,
   type DagFs,
@@ -161,8 +160,8 @@ const fs = createMemoryDagFs({ "/style.txt": "terse" });
 const results = await execute(graph, {
   ports: { fs },
   fs,
-  cache: new MemCache(),
-  casBaseDir: "/cas",
+  cacheDir: "/cache",
+  clock: Date,
 });
 ```
 
@@ -235,7 +234,7 @@ Nothing checks that two actions have different kinds. Two actions sharing a kind
 
 An action returns its outputs (`Outputs`): a record of named outputs, each a path or a list of paths (`Record<string, string | string[]>`). One file is still a record of one output, `{ html }`, and an action with no outputs returns `{}`. Every path must lie under the context's `outputDir`. The engine enforces that and files the outputs away ([dagraph-execution](dagraph-execution.md), [dagraph-caching](dagraph-caching.md)). The output type `R` is exactly what the function returns, so `{ html }` gives `{ html: string }`, and a returned template literal is typed as a plain `string`, not a pattern type. `OutputOf<typeof fetchPage>` names an action's (or a ref's, or a dep's) output type. `NodeRefOf<typeof fetchPage>` names the type of a ref to one of its nodes.
 
-Write only under `outputDir`. The directory is renamed after the action returns (from `tmp-<uuid>/` to `out-<contentHash>/`, [dagraph-caching](dagraph-caching.md)), so the absolute paths the action saw stop existing. The returned paths are rewritten for you; paths written _inside_ a file are not. A file that names another output of the same node (a playlist naming its segments, an index naming its pages) must name it relative to itself, never by its absolute path. Since the content hash covers each file's path relative to the output directory, two attempts that write the same relative names and bytes publish the same content.
+Write only under `outputDir`. The directory is renamed after the action returns (from `tmp/<uuid>/` to `v1/<actionKey>/<contentHash>/`, [dagraph-caching](dagraph-caching.md)), so the absolute paths the action saw stop existing. The returned paths are rewritten for you; paths written _inside_ a file are not. A file that names another output of the same node (a playlist naming its segments, an index naming its pages) must name it relative to itself, never by its absolute path. Since the content hash covers each file's path relative to the output directory, two attempts that write the same relative names and bytes commit the same content.
 
 ### The action context (`ActionContext`)
 
@@ -248,7 +247,7 @@ Each call of the action gets one object:
 - `signal`: an `AbortSignal` that fires on the node's timeout (reason a `TimeoutError`) or when the execution is cancelled.
 - `output(chunk)`: reports text the action prints, delivered as `output` events ([dagraph-execution](dagraph-execution.md)).
 
-That is all the action gets. It does not get its node's name, its meta, the graph, the cache or the CAS directory: anything an action needs to know must reach it as an input, a dep or a port, which keeps what the action can see and what the key covers the same thing.
+That is all the action gets. It does not get its node's name, its meta, the graph or the cache directory: anything an action needs to know must reach it as an input, a dep or a port, which keeps what the action can see and what the key covers the same thing.
 
 Only `inputs` and `depOutputs` affect the key ([dagraph-caching](dagraph-caching.md)). The action function itself does not, so changing an action's logic means changing one of its inputs, for example bumping `version`.
 
@@ -437,7 +436,7 @@ Input names that every object has, such as `constructor` or `toString`, are fine
 The argument has an entry only for the roles the node actually gives: a maybe role left out, or given as `undefined`, is absent, and its type is `undefined`. For an action whose deps are typed `DepSpecs` (any role), the argument is typed by the deps the node gives.
 
 - `page.html` is an `OutputRef<string>`, or `OutputRef<string[]>` for a list output. It is a `SettledOutputRef` when the role was given as `settled(ref)`. A settled ref never fits where an `OutputRef` is declared, because it may resolve to `undefined`.
-- The action reads the ref as a handle on that output's published file, or a list of handles. A settled ref reads as `undefined` when its dep did not succeed.
+- The action reads the ref as a handle on that output's committed file, or a list of handles. A settled ref reads as `undefined` when its dep did not succeed.
 - In the key, a ref is the role(s) it points through (all of them, sorted, when two roles name one node) plus the output's name. It is never the dep node's name and never a path, so a dep rebuilt to the same content at another path keeps the node `cached`.
 - Refs exist only for outputs every return of the dep includes. An optional output (`srt?: string`), or one named by an index signature, has no ref. Read it from `depOutputs`, where it is `| undefined`.
 - The refs of a dep cannot be listed: a spread `{ ...page }`, or putting the whole `page` object in a value, throws `node "<name>": the refs of page cannot be listed: name each output, as page.<output>`. Their names exist only in the types.

@@ -2,14 +2,16 @@ import { file, settled } from "@mrmeku/dagraph";
 import assert from "node:assert/strict";
 import { describe, test } from "node:test";
 import { errorMessage } from "../kernel/format.ts";
-import type { ExecResult } from "../ports.ts";
+import type { ExecOptions, ExecResult } from "../ports.ts";
 import { createTestPorts } from "../ports/memory.ts";
 import { runWorkflow } from "../runner.ts";
 import { renderFailures, renderStatus, renderTimeline } from "../summary.ts";
 import { defineWorkflow } from "../workflow.ts";
 import { createGithubStore } from "./renderer.ts";
 
-const exited = (code: number, output: string): ExecResult => {
+/** A command's exit, having printed `output` as it ran. */
+const exited = (opts: ExecOptions | undefined, code: number, output: string): ExecResult => {
+  opts?.onOutput?.(output);
   return { ended: "exited", code, stdout: output, stderr: "", output, ok: code === 0 };
 };
 
@@ -20,12 +22,12 @@ describe("GitHub renderer", () => {
     const { ports, rec } = createTestPorts({
       exec: {
         run: async (cmd, opts) => {
-          if (cmd[0] === "lint") return exited(1, "src/a.ts: error\n");
+          if (cmd[0] === "lint") return exited(opts, 1, "src/a.ts: error\n");
           started();
           const signal = opts?.signal;
           if (!signal) throw new Error(`${cmd.join(" ")} ran without a signal`);
           return new Promise((resolve) =>
-            signal.addEventListener("abort", () => resolve(exited(-1, "compiling\n"))),
+            signal.addEventListener("abort", () => resolve(exited(opts, -1, "compiling\n"))),
           );
         },
       },
@@ -52,7 +54,7 @@ describe("GitHub renderer", () => {
       implementation,
       workflowFile: "ci.ts",
       ports,
-      casBaseDir: "/cas",
+      cacheDir: "/cache",
       historyDir: "/history",
       signal: controller.signal,
     });
@@ -71,22 +73,22 @@ describe("GitHub renderer", () => {
           { title: "ci.ts · 3 nodes", lines: ["lint", "slow", "after"] },
           "▷ lint",
           {
-            title: "✖︎ lint (1.0s)",
+            title: "✖︎ lint (2.0s)",
             lines: ["src/a.ts: error", "── error ──", "lint exited 1"],
           },
           "▷ slow",
           { title: "◼︎ slow (cancelled)", lines: ["compiling"] },
           "◼︎ after: cancelled",
           "",
-          "✖︎ lint failed · ci.ts · built 0 · cached 0 · failed 1 · skipped 0 · cancelled 2 · wall 6.0s",
+          "✖︎ lint failed · ci.ts · built 0 · cached 0 · failed 1 · skipped 0 · cancelled 2 · wall 8.0s",
           "failed: lint",
           "cancelled: slow, after",
           "reproduce: npx --no dag run ci.ts --only lint",
         ],
         checks: [
           "lint in_progress",
-          "slow in_progress",
           "lint failure",
+          "slow in_progress",
           "slow cancelled",
           "after cancelled",
         ],
@@ -104,7 +106,7 @@ describe("GitHub renderer", () => {
           const signal = opts?.signal;
           if (!signal) throw new Error("slow ran without a signal");
           return new Promise((resolve) =>
-            signal.addEventListener("abort", () => resolve(exited(130, "compiling\n"))),
+            signal.addEventListener("abort", () => resolve(exited(opts, 130, "compiling\n"))),
           );
         },
       },
@@ -123,7 +125,7 @@ describe("GitHub renderer", () => {
       schedulerOptions,
       workflowFile: "ci.ts",
       ports,
-      casBaseDir: "/cas",
+      cacheDir: "/cache",
       historyDir: "/history",
       signal: controller.signal,
     });
@@ -161,7 +163,7 @@ describe("GitHub renderer", () => {
       ...workflowDef,
       workflowFile: "ci.ts",
       ports,
-      casBaseDir: "/cas",
+      cacheDir: "/cache",
       historyDir: "/history",
     });
     const error = "ENOENT: src/a.ts";
@@ -216,7 +218,7 @@ describe("GitHub renderer", () => {
       path.startsWith("/history/") && text.includes('"lint"')
         ? Promise.reject(new Error("disk full"))
         : writeText(path, text);
-    const store = createGithubStore(ports, "/cas");
+    const store = createGithubStore(ports, { durationsFile: "/durations/ci.ts.json" });
     const { implementation } = defineWorkflow({
       implementation: (workflow) => void workflow.task({ name: "lint", cmd: ["lint"] }),
     });
@@ -224,7 +226,7 @@ describe("GitHub renderer", () => {
       implementation,
       workflowFile: "ci.ts",
       ports,
-      casBaseDir: "/cas",
+      cacheDir: "/cache",
       historyDir: "/history",
       store,
     }).catch(errorMessage);
@@ -254,7 +256,7 @@ describe("GitHub renderer", () => {
 
   test("the reproduce line quotes a name the shell would split", async () => {
     const { ports, rec } = createTestPorts({
-      exec: { run: async (cmd) => exited(1, `${cmd[0]}\n`) },
+      exec: { run: async (cmd, opts) => exited(opts, 1, `${cmd[0]}\n`) },
     });
     const { implementation } = defineWorkflow({
       implementation: (workflow) =>
@@ -264,7 +266,7 @@ describe("GitHub renderer", () => {
       implementation,
       workflowFile: "ci.ts",
       ports,
-      casBaseDir: "/cas",
+      cacheDir: "/cache",
       historyDir: "/history",
     });
     assert.equal(rec.log.at(-1), "reproduce: npx --no dag run ci.ts --only 'lint docs'");
@@ -272,7 +274,7 @@ describe("GitHub renderer", () => {
 
   test("a failed post, a failed save and requireAll beside a failed check: each in the headline, the summary and the reproduce line", async () => {
     const { ports, rec, cacheStore } = createTestPorts({
-      exec: { run: async (cmd) => exited(cmd[0] === "up" ? 0 : 1, `${cmd[0]}\n`) },
+      exec: { run: async (cmd, opts) => exited(opts, cmd[0] === "up" ? 0 : 1, `${cmd[0]}\n`) },
     });
     // The save, an ordinary task now, fails for its own reason after the check it waits for.
     cacheStore.save = async () => {
@@ -296,7 +298,7 @@ describe("GitHub renderer", () => {
       implementation,
       workflowFile: "ci.ts",
       ports,
-      casBaseDir: "/cas",
+      cacheDir: "/cache",
       historyDir: "/history",
     });
     assert.deepEqual(
@@ -309,7 +311,7 @@ describe("GitHub renderer", () => {
       },
       {
         recap: [
-          "✖︎ test, require-all, down:db and 1 more failed · ci.ts · built 2 · cached 0 · failed 4 · skipped 0 · wall 25.0s",
+          "✖︎ test, require-all, down:db and 1 more failed · ci.ts · built 2 · cached 0 · failed 4 · skipped 0 · wall 29.0s",
           "failed: test, require-all, down:db, save:cas",
           "reproduce: npx --no dag run ci.ts --only test,require-all,down:db,save:cas",
         ],

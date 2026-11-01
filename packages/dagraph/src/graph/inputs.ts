@@ -87,7 +87,7 @@ export function canonical(value: unknown, refKey: (ref: AnyOutputRef) => string)
   return JSON.stringify(value);
 }
 
-/** A value as the action reads it: each output ref replaced by its dep's published files' handles. */
+/** A value as the action reads it: each output ref replaced by its dep's committed files' handles. */
 export function resolveValue(
   value: unknown,
   depEntries: Record<string, CacheEntry>,

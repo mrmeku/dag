@@ -149,7 +149,7 @@ describe("dag run", () => {
       { code, files: run.files() },
       {
         code: 0,
-        files: [".dag", ".dag/cas", ".dag/failures.md", "ci.ts", "history", "s.md"],
+        files: [".dag", ".dag/cache", ".dag/failures.md", "ci.ts", "history", "s.md"],
       },
     );
   });
@@ -195,7 +195,7 @@ describe("dag run", () => {
           "built **0** · cached **0** · failed **0** · skipped **0** · wall 0ms",
           "",
         ],
-        files: [".dag", ".dag/cas", ".dag/history", "ci.ts", "step-summary.md"],
+        files: [".dag", ".dag/cache", ".dag/history", "ci.ts", "step-summary.md"],
       },
     );
   });
@@ -214,7 +214,7 @@ describe("dag run", () => {
       `${IMPORT_DEFINE_WORKFLOW}\nexport default defineWorkflow({ implementation: async () => { console.log("building"); await new Promise((r) => setTimeout(r, 60_000)); } });\n`,
       {
         args: ["--output-style", "failures"],
-        files: { ".dag/cas/last-run.json": lastRun },
+        files: { ".dag/durations/ci.ts.json": lastRun },
         interrupts: ["building", "cancelling"],
       },
     );
@@ -224,7 +224,7 @@ describe("dag run", () => {
         code,
         stdout,
         report: run.read(".dag/failures.md").split("\n"),
-        lastRun: run.read(".dag/cas/last-run.json"),
+        lastRun: run.read(".dag/durations/ci.ts.json"),
       },
       {
         code: 130,
@@ -255,7 +255,7 @@ describe("dag run", () => {
 
 describe("dag run's cache, what the checkouts hold on disk", () => {
   test(
-    "the main checkout's CAS warms a new worktree, and the worktree keeps its own after",
+    "the main checkout's cache dir warms a new worktree, and the worktree keeps its own after",
     LIMIT,
     async () => {
       const clone = mkdtempSync(join(root, "clone-"));
@@ -270,9 +270,9 @@ describe("dag run's cache, what the checkouts hold on disk", () => {
       git(main, "init", "-q");
       git(main, "commit", "-q", "--allow-empty", "-m", "first");
       git(main, "worktree", "add", "-q", "--detach", "../worktree");
-      // The CAS carry: a cached task, whose entry the main checkout's CAS holds.
+      // Carrying the cache dir: a cached task, whose entry the main checkout's cache dir holds.
       const workflow = workflowOf(`
-      const cas = workflow.cache({ name: "cas", path: [".dag/cas"], key: "cas-1" });
+      const cas = workflow.cache({ name: "cas", path: [".dag/cache"], key: "cas-1" });
       workflow.task({
         name: "build",
         shell: "echo built",
@@ -306,17 +306,17 @@ describe("dag run's cache, what the checkouts hold on disk", () => {
             build: "built",
             save: notSaved,
           },
-          // The run makes .dag/cas empty before its restore, which fills it.
+          // The run makes .dag/cache empty before its restore, which fills it.
           inWorktree: {
             code: 0,
-            restore: `Cache restored from: ${realpathSync(main)}\nRestored: .dag/cas\n`,
+            restore: `Cache restored from: ${realpathSync(main)}\nRestored: .dag/cache\n`,
             build: "cached",
             save: notSaved,
           },
-          // The next run finds the worktree's CAS there, and keeps it.
+          // The next run finds the worktree's cache dir there, and keeps it.
           again: {
             code: 0,
-            restore: `${notFound}Kept, already there: .dag/cas\n`,
+            restore: `${notFound}Kept, already there: .dag/cache\n`,
             build: "cached",
             save: notSaved,
           },

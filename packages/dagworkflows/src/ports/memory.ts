@@ -1,4 +1,4 @@
-import { createMemoryDagFs, type MemoryDagFs } from "@mrmeku/dagraph";
+import { createMemoryDagFs, type ExecEvent, type MemoryDagFs } from "@mrmeku/dagraph";
 import { dirname } from "node:path";
 import type {
   AnnotationLevel,
@@ -62,6 +62,18 @@ export function clockAt(now: () => number = () => 0): Clock {
 export function steppingClock(start = 0, step = 1000): Clock {
   let t = start - step;
   return clockAt(() => (t += step));
+}
+
+/** An `onEvent` for dagraph's `execute` that records what each node printed through `output`, by name. */
+export function createOutputRecorder() {
+  const printed = new Map<string, string>();
+  return {
+    printed,
+    onEvent: (event: ExecEvent) => {
+      if (event.type === "output")
+        printed.set(event.node, (printed.get(event.node) ?? "") + event.chunk);
+    },
+  };
 }
 
 /** An Exec where every command succeeds silently. */

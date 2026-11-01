@@ -17,7 +17,7 @@ function logFileOf(logDir: string, nodeName: string): string {
 
 /**
  * Each node's log as it arrives, so `tail -F` follows it, replaced when its action starts or,
- * for a node that printed nothing as it ran, from the CAS at its settle.
+ * for a cache hit, which prints nothing as it runs, from its build log at its settle.
  */
 export function createLogFiles(logDir: string, fs: SyncFs, warn: (message: string) => void) {
   const writeFile = createWriter(fs, warn, "log files");
@@ -31,7 +31,7 @@ export function createLogFiles(logDir: string, fs: SyncFs, warn: (message: strin
       output: (nodeState, lines) => writeLog(nodeState.node.name, textOf(lines), true),
     },
     settle: (nodeState, _run, log) => {
-      if (selectors.logKeyOf(nodeState) && !nodeState.printed)
+      if (nodeState.status === "cached")
         writeLog(nodeState.node.name, textOf(log.map((line) => plainLine(line))));
     },
     interrupt: (run) => {

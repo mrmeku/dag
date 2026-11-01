@@ -2,7 +2,7 @@
 
 ## The problem
 
-A CI job is usually a YAML list of steps that runs top to bottom, every time. Two things hurt: steps that could run side by side wait for each other, and steps whose inputs did not change run again anyway. `@mrmeku/dagworkflows` lets you write the job as a TypeScript file that builds a graph of tasks instead. Each task names what it depends on and what decides its result. The runner (the `dag` CLI locally, or the GitHub action in CI) runs independent tasks in parallel, skips a task whose result is already in a local content-addressed cache (the CAS), and runs the same file the same way on a laptop and on GitHub.
+A CI job is usually a YAML list of steps that runs top to bottom, every time. Two things hurt: steps that could run side by side wait for each other, and steps whose inputs did not change run again anyway. `@mrmeku/dagworkflows` lets you write the job as a TypeScript file that builds a graph of tasks instead. Each task names what it depends on and what decides its result. The runner (the `dag` CLI locally, or the GitHub action in CI) runs independent tasks in parallel, skips a task whose result is already in a local content-addressed cache (the cache dir), and runs the same file the same way on a laptop and on GitHub.
 
 The core idea in two sentences: a workflow file default-exports `defineWorkflow({ implementation })`, and the implementation receives a `workflow` object whose methods (`task`, `cache`, `uploadArtifact`, `requireAll`, `compose`, …) add nodes to a graph. Every node is cached on a key made from what it declares (its kind, its inputs, and the content of what its deps produced), never from its code, so what a task reads must be declared.
 
@@ -14,7 +14,7 @@ Terms used throughout:
 - **Ref**: what `workflow.task` returns, a handle to the node (`NodeRef`). It has a `name` and is never part of a string.
 - **Output**: a file a task writes, declared by role in `outputs`. Its path exists only once the task has run.
 - **Action key**: the cache key of a node (see "The cache key of a task").
-- **CAS**: the directory where outputs live, keyed by action key; `.dag/cas` by default. The [dagraph-caching](dagraph-caching.md) domain owns how it stores and verifies entries.
+- **Cache dir**: the directory where outputs live, keyed by action key; `.dag/cache` by default. The [dagraph-caching](dagraph-caching.md) domain owns how it stores and verifies entries.
 
 The engine underneath is `@mrmeku/dagraph` (domains [dagraph-graphs](dagraph-graphs.md), [dagraph-execution](dagraph-execution.md), [dagraph-caching](dagraph-caching.md)). This domain is the facade a workflow author touches. How a run is driven, cancelled and how post steps are paid is [dagworkflows-lifecycle](dagworkflows-lifecycle.md); the cache and artifact tasks in depth are [dagworkflows-cache-artifacts](dagworkflows-cache-artifacts.md); logs, terminal and summary are [dagworkflows-output](dagworkflows-output.md); the CLI flags, the GitHub action and releases are [dagworkflows-cli-action-release](dagworkflows-cli-action-release.md).
 
@@ -98,11 +98,11 @@ The check is on a brand `defineWorkflow` stamps on its result, the key `Symbol.f
 - `summary`: optional, a list of `SummaryRenderer`s; defaults to `DEFAULT_SUMMARY_RENDERERS`. A custom list is built from the exported `renderStatus`, `renderTimeline`, `renderCriticalPath`, `renderDag`, `renderFailures` and `renderTable`, or functions of your own over a `RunReport` ([dagworkflows-output](dagworkflows-output.md) owns them).
 - `schedulerOptions`: optional, `{ maxParallelism?, concurrencyLimits? }` (see "Scheduler options and concurrency groups"). Its `concurrencyLimits` keys become the only concurrency group names that compile in this workflow.
 
-It returns a `WorkflowDef<R, G>`: `implementation` (rewrapped to take a graph, ports and context, as the runner calls it; its type is the exported `Implementation<R>`), `schedulerOptions` and `summary` when given. `R` is what the implementation returns; `G` the declared groups.
+It returns a `WorkflowDef<R, G>`: `implementation` (rewrapped to take a graph, ports, context and the run's data paths, as the runner calls it; its type is the exported `Implementation<R>`), `schedulerOptions` and `summary` when given. `R` is what the implementation returns; `G` the declared groups.
 
 When the implementation runs: once per invocation (`dag run`, `dag post`, the action's main and post entries), before any node starts. A `dag run` builds the graph once, pays from that same graph any post steps earlier runs owe, then runs the selection; it does not build again per pass. A `dag post` builds it again to find the post steps, and so does the post pass `runJob` starts after a cancel. So the implementation must be a pure description: no side effects, no commands. The types enforce the last part: `workflow.ports` has no `exec`.
 
-Conditional work is ordinary code at build time, reading `workflow.ctx` or `workflow.ports.env`: `if (workflow.ctx.ref === "refs/heads/main") cas.save()`. There is no `if:` field on a task.
+Conditional work is ordinary code at build time, reading `workflow.ctx` or `workflow.ports.env`: `if (workflow.ctx.ref === "refs/heads/main") cache.save()`. There is no `if:` field on a task.
 
 ### Type-checking a workflow file
 
@@ -165,7 +165,7 @@ So `workflow.ctx.ref === "refs/heads/main"` is true both on a push to main and o
 
 A `WorkflowPorts`: every port of the run but `exec`. A workflow and an action read:
 
-- `fs`: dagraph's file system port (`exists`, `readText`, `writeText`, which makes parent directories, `hashFile`, `ensureDir`, `rename`, `remove`, `readdir`, `resolve`).
+- `fs`: dagraph's file system port (`exists`, `readText`, `writeText`, which makes parent directories, `hashFile`, `ensureDir`, `rename`, `remove`, `lstat`, `chmod`, `fsync`, `utimes`, `readdir`, `resolve`).
 - `env`: the process environment (`process.env` in the CLI and the action). Read it at build time and put what matters in `inputs`: `inputs: { mixEnv: workflow.ports.env.MIX_ENV ?? null }`. Nothing reads it for you; a command inherits the real process environment regardless.
 - `clock`, `host`, `cacheStore`, `artifactStore`, `lockfile`: the run's other ports. A workflow rarely touches them; the built-in tasks use them.
 
@@ -271,7 +271,7 @@ The functions run once, when the node is added, not when it runs. A ref is a pla
 - **A dep output holding a list of paths** reaches the command as those absolute paths joined with `:`.
 - **Static `env` values** are plain strings.
 
-At start, each ref is filled with an absolute path, so a command with its own `cwd` still finds them even when the CAS directory is relative.
+At start, each ref is filled with an absolute path, so a command with its own `cwd` still finds them even when the cache dir is relative.
 
 Failures a command meets, as the task's error message:
 
@@ -284,9 +284,9 @@ Failures a command meets, as the task's error message:
 
 Every failure the task wrapper raises (a nonzero exit, a program that could not start, a declared output not written) carries a `cause` of type `CommandCause`: `{ argv, cwd, ended, code }`, the last command the task ran (`cwd` is `"."` when none was given; `ended` is `exited`, `signalled` or `not-started`, as its `ExecResult` says). For a shell command `argv` is the whole bash invocation ending in the string; a program that could not start has `ended: "not-started"` and `code: -1`; an output not written after a successful command has `code: 0`, and no cause if no command ran. So a cause does not by itself mean a command failed. The same holds for `run`/`runShell` in an action task, while an error the action throws itself keeps its own cause. A timeout keeps the cause of what was thrown as it stopped.
 
-A command makes only the output directory; for a nested output (`outputs: { report: "reports/junit.xml" }`) the command must create `reports/` itself, as with `mkdir -p "$(dirname "$OUT")"`. A command that writes into the missing directory fails with the ordinary nonzero-exit error (`touch <path> exited 1` for a `cmd`, `its shell command exited 1` for a `shell`), and its log holds the tool's own message, which ends in the system's `No such file or directory`. Verified on macOS, where `<dir>` is the attempt's staging directory `<cas>/<action key>/tmp-<uuid>`: `cmd: ({ out }) => ["touch", out.report]` logs `touch: <dir>/reports/junit.xml: No such file or directory`, and `shell: 'echo "<testsuites/>" > "$OUT"'` logs `bash: line 1: <dir>/reports/junit.xml: No such file or directory`. An action writing with `ports.fs.writeText` gets parent directories made for it.
+A command makes only the output directory; for a nested output (`outputs: { report: "reports/junit.xml" }`) the command must create `reports/` itself, as with `mkdir -p "$(dirname "$OUT")"`. A command that writes into the missing directory fails with the ordinary nonzero-exit error (`touch <path> exited 1` for a `cmd`, `its shell command exited 1` for a `shell`), and its log holds the tool's own message, which ends in the system's `No such file or directory`. Verified on macOS, where `<dir>` is the attempt's staging directory `<cacheDir>/tmp/<uuid>`: `cmd: ({ out }) => ["touch", out.report]` logs `touch: <dir>/reports/junit.xml: No such file or directory`, and `shell: 'echo "<testsuites/>" > "$OUT"'` logs `bash: line 1: <dir>/reports/junit.xml: No such file or directory`. An action writing with `ports.fs.writeText` gets parent directories made for it.
 
-Commands inherit the whole process environment, secrets included; what they print goes to their log beside the CAS, never into it.
+Commands inherit the whole process environment, secrets included; what they print goes to their log, never into the cache dir.
 
 A command never talks to a terminal. Its stdin is the null device (`/dev/null`, not a closed descriptor), so a `read` gets end of file at once, its stdout and stderr are pipes the task reads (so `[ -t 1 ]` is false, and a tool that colours only on a terminal does not), and it runs in a session of its own with no controlling terminal (opening `/dev/tty` fails). So a command that asks a question cannot be answered: give it its non-interactive flag (`--yes`, `CI=true`, …). Verified in a scratch repository: a `shell` task testing each prints `in-notty`, `out-notty`, `read-eof` and `devtty-no`. The same holds for `run`/`runShell` in an action, locally and on GitHub.
 
@@ -347,16 +347,16 @@ For each node, in the order its deps settle, once it has taken a place in `maxPa
 
 1. If a required dep did not succeed, it is `dep-failed`. Its action never runs.
 2. Its action key is computed (file inputs hashed). A failure here (a missing input file) fails it.
-3. If it is cacheable and the run is not forced (`--force`), and the CAS holds a verified entry for the key, it is `cached`.
+3. If it is cacheable and the run is not forced (`--force`), and the cache dir holds a verified entry for the key, it is `cached`.
 4. Otherwise, without a concurrency group, it runs at once. With one, it gives its place back while it waits for its group's slot, then takes both and runs.
 
-On success its outputs are published in the CAS directory under its key either way; the cache entry that lets a later run hit is written only when it is cacheable. A failure, a timeout or a cancel is never cached. `--force` skips the lookup, but a forced success still writes its entry.
+On success its outputs are committed in the cache dir under its key either way; the cache entry that lets a later run hit is written only when it is cacheable. A failure, a timeout or a cancel is never cached. `--force` skips the lookup, but a forced success still writes its entry.
 
 Which nodes are never cached, whatever their inputs: a task with a `post`, the post step itself, `restore:<name>`, `save:<name>` and every `uploadArtifact` node. `requireAll` is cacheable (it has a version input), so a green required-check whose deps did not change is `cached`.
 
 ### Side effects: the receipt pattern
 
-A task whose point is an effect outside the CAS (a deploy, an `npm publish`, a push) usually has nothing to write, yet must not repeat its effect when nothing it ships has changed. Make it cacheable and key it on what it ships: give it the deps whose content it sends out and `cacheable: true` (or a version input). Its cache entry, which holds no outputs, is then a **receipt**: proof that this exact effect, with this exact command and these exact dep contents, succeeded. The next run with the same deps is `cached` and does nothing; a run whose deps changed does the effect again. A failure is never cached, so a failed effect is tried again on the next run.
+A task whose point is an effect outside the cache dir (a deploy, an `npm publish`, a push) usually has nothing to write, yet must not repeat its effect when nothing it ships has changed. Make it cacheable and key it on what it ships: give it the deps whose content it sends out and `cacheable: true` (or a version input). Its cache entry, which holds no outputs, is then a **receipt**: proof that this exact effect, with this exact command and these exact dep contents, succeeded. The next run with the same deps is `cached` and does nothing; a run whose deps changed does the effect again. A failure is never cached, so a failed effect is tried again on the next run.
 
 Verified as a whole file, `ci.ts`, in a scratch git repository holding `a.txt` (content `a`) and a `package.json` of `{ "type": "module" }`, with `@mrmeku/dagworkflows` resolved from `node_modules`. It type-checks under `strict` and `exactOptionalPropertyTypes`, and each step below ran `npx --no dag run ci.ts --output-style grouped`. `deploy` stands in for a deploy by appending to `deploys.log`, and creating `fail-deploy` makes it fail after its effect:
 
@@ -393,7 +393,7 @@ export default defineWorkflow({
 What this shows, and the rules that follow:
 
 - The effect of a failed attempt is not undone: step 3 wrote before it failed, so step 4 did it twice. Make the effect idempotent, or guard it: the dag repository's own publish runs `npm view @mrmeku/<pkg>@<version> version || npm publish "$TARBALL" …`, so a run without its receipt still never publishes a version twice.
-- A receipt lives in the CAS, so it lasts only as long as the CAS does: on a fresh GitHub runner, only if the workflow caches the CAS ([dagworkflows-cache-artifacts](dagworkflows-cache-artifacts.md)). Without it, every run repeats the effect, which is why the guard above matters.
+- A receipt lives in the cache dir, so it lasts only as long as the cache dir does: on a fresh GitHub runner, only if the workflow caches the cache dir ([dagworkflows-cache-artifacts](dagworkflows-cache-artifacts.md)). Without it, every run repeats the effect, which is why the guard above matters.
 - The receipt's key is the kind (`run`/`run-shell`, or an action task's name), the command line, `cwd`, static `env`, and the deps' content by role. A different command, such as the same publish with `--dry-run`, is a different key, so a dry run's receipt never stands in for the real one.
 - A task with a `post` cannot be cacheable (it does not compile), so an effect that needs a release cannot have a receipt.
 - To repeat an effect on purpose, run with `--force`, or change its inputs.
@@ -410,7 +410,7 @@ The action key is the SHA-256 of three things, and nothing else: the node's **ki
   - for a command, `command`: its line as written (a `shell` string, or the argv with each dep ref as the role and output name it points through, and each own ref as its file name or as "the output dir"), its `cwd` and its `env` as written, plus an internal version tag.
 - **Deps** by role: each dep's content hash, which is a hash of its outputs' names, their file paths relative to its output directory and their contents; or "missing" for a settled dep that did not succeed.
 
-Not in the key: the action's function body; a task's name, unless it is an action task; the deps' node names; `timeoutMs`; `concurrencyGroup`; `cacheable`; the CAS directory (moving it changes no key); the inherited environment; absolute paths.
+Not in the key: the action's function body; a task's name, unless it is an action task; the deps' node names; `timeoutMs`; `concurrencyGroup`; `cacheable`; the cache dir (moving it changes no key); the inherited environment; absolute paths.
 
 Consequences an author meets:
 
@@ -435,7 +435,7 @@ task "x": outputs.report is "/tmp/report.xml", not a file in its output director
 
 The ref `workflow.task` returns carries the output roles only in a phantom type field, not as properties: the ref has no `tarball` property, so any property read on it besides `name` fails to compile, with no suggestion. A misspelling is caught, with `Did you mean 'tarball'?`, where the outputs are read: in a command function's argument (`({ pack }) => [..., pack.tarbal]`) or in `depOutputs.pack.tarbal`. Naming an output role in the type parameters without declaring it in `outputs` does not compile.
 
-Inside the task, `out.<role>` (action) or the `out` ref (command) is an absolute path in a fresh staging directory. On success the directory moves to `<cas>/<actionKey>/out-<contentHash>/`, and the node's result records each output's path there, relative to the working directory when the CAS directory is relative. A dependent receives absolute paths.
+Inside the task, `out.<role>` (action) or the `out` ref (command) is an absolute path in a fresh staging directory. On success the directory moves to `<cacheDir>/v1/<actionKey>/<contentHash>/`, and the node's result records each output's absolute path there, even when the cache dir is relative. A dependent receives the same paths.
 
 A task with no outputs is fine: its result is `{}`. That is how `restore:<name>` is built.
 
@@ -496,7 +496,7 @@ export default defineWorkflow({
 
 Here `test` runs at most 2 at once (the outer limit), not 1.
 
-`createWorkflow(graph, ports, ctx)` builds the same object over a graph of your own, for tests or for a program that drives dagraph itself.
+`createWorkflow(graph, ports, ctx, runDataPaths?)` builds the same object over a graph of your own, for tests or for a program that drives dagraph itself. Its `runDataPaths`, the run's `cacheDir` and `durationsDir` for a `workflow.cache` with no `path` ([dagworkflows-cache-artifacts](dagworkflows-cache-artifacts.md)), default to `.dag/cache` and `.dag/durations`.
 
 Where it lives: `workflow.ts`.
 
@@ -529,8 +529,8 @@ Where it lives: `post.ts`, `select.ts`.
 
 [dagworkflows-cache-artifacts](dagworkflows-cache-artifacts.md) covers these in depth.
 
-- `workflow.cache({ name = "cache", path, key, restoreKeys = [] })` adds `restore:<name>`, which runs every time, tries `key` and then each `restoreKeys` prefix, and has no outputs, so a hit and a miss key its dependents alike. Order tasks after it with `deps: { cas: cas.restore }`. It returns `{ restore, save }`. `save({ partial = "save" | "skip" })` adds `save:<name>`, which waits, settled, for every other node of the run except post steps and other saves, including nodes added after the call. In a run where a task did not succeed it saves under `<key>-partial-<runId>` (or nothing with `partial: "skip"`); only a green run saves under `key`. Call `save()` conditionally to save only on main.
-- `workflow.uploadArtifact({ name, artifact, path, deps?, ifNoFilesFound = "warn", overwrite?, retentionDays?, compressionLevel? })` adds a never-cached node named `name` that uploads files as the artifact `artifact`. `path` is a list of globs, or a function of its deps' outputs (handles) returning globs, handles or `undefined` (left out): `deps: { pack }, path: ({ pack }) => ["reports/**", pack.tarball]`. Its globs get the same `DEFAULT_EXCLUDES` as `workflow.glob`, so a glob never uploads anything under `.dag/`, `node_modules/` or `.git/` (such as `.dag/summary.md`); a dep output given as a handle goes up whatever its path, which is how a file from the CAS goes up. Its `response` output, `artifact.json`, holds `{ id, size }` or `null`. Without an artifact service (locally) nothing is uploaded and the log says so.
+- `workflow.cache({ name = "cache", path?, key, restoreKeys = [] })` adds `restore:<name>`, which runs every time, tries `key` and then each `restoreKeys` prefix, and has no outputs, so a hit and a miss key its dependents alike. Order tasks after it with `deps: { cache: cache.restore }`. It returns `{ restore, save }`. `save({ partial = "save" | "skip" })` adds `save:<name>`, which waits, settled, for every other node of the run except post steps and other saves, including nodes added after the call. In a run where a task did not succeed it saves under `<key>-partial-<runId>` (or nothing with `partial: "skip"`); only a green run saves under `key`. Call `save()` conditionally to save only on main.
+- `workflow.uploadArtifact({ name, artifact, path, deps?, ifNoFilesFound = "warn", overwrite?, retentionDays?, compressionLevel? })` adds a never-cached node named `name` that uploads files as the artifact `artifact`. `path` is a list of globs, or a function of its deps' outputs (handles) returning globs, handles or `undefined` (left out): `deps: { pack }, path: ({ pack }) => ["reports/**", pack.tarball]`. Its globs get the same `DEFAULT_EXCLUDES` as `workflow.glob`, so a glob never uploads anything under `.dag/`, `node_modules/` or `.git/` (such as `.dag/summary.md`); a dep output given as a handle goes up whatever its path, which is how a file from the cache dir goes up. Its `response` output, `artifact.json`, holds `{ id, size }` or `null`. Without an artifact service (locally) nothing is uploaded and the log says so.
 
 ## Selecting nodes (`--only`)
 
@@ -584,16 +584,16 @@ Where it lives: `ports/glob.ts`, `ports/github.ts`, `services.ts`, `action/env.t
 
 A workflow can be run in a unit test against in-memory ports: `createTestPorts(opts?)` returns `{ ports, fs, rec, cacheStore, artifactStore }`. Its options, each with its default:
 
-- `exec`: an `Exec` (its `run(argv, opts)` resolves to an `ExecResult`, `{ ended, code, stdout, stderr, output, ok }`); default `okExec`, every command succeeds silently;
+- `exec`: an `Exec` (its `run(argv, opts)` resolves to an `ExecResult`, `{ ended, code, stdout, stderr, output, ok }`); what it passes to `opts.onOutput` is what the node prints, and `output` alone reaches no log; default `okExec`, every command succeeds silently;
 - `clock`: default `steppingClock()`;
 - `env`: default `{}`, so `workflow.ports.env` is empty in a test;
 - `files`: the in-memory file system's seed, text by path;
 - `cacheStore`, `artifactStore`: default fresh memory stores;
 - `context`: a partial `CiContext` over the recording host's defaults (provider `"recording"`, empty strings, `runId` 0).
 
-The lockfile is an in-memory one. `workflow.glob`, `workflow.hash` and an upload's globs still read the real working directory, not the in-memory fs: a test that globs gets real paths, and their `file()` inputs then fail with `ENOENT` unless `opts.files` seeds the same paths. A node's log is found with `logPath(casBaseDir, actionKey)`.
+The lockfile is an in-memory one. `workflow.glob`, `workflow.hash` and an upload's globs still read the real working directory, not the in-memory fs: a test that globs gets real paths, and their `file()` inputs then fail with `ENOENT` unless `opts.files` seeds the same paths. A built node's log is at `<buildLogDir>/<actionKey>.log` ([dagworkflows-output](dagworkflows-output.md)).
 
-`runWorkflow({ implementation, ports, casBaseDir, historyDir })` runs it and resolves to `{ results, failed, markdown, cancelled, exitCode }` ([dagworkflows-lifecycle](dagworkflows-lifecycle.md)). It takes `implementation` alone: the definition's `schedulerOptions` and `summary` apply only when passed as options of their own (`schedulerOptions: ci.schedulerOptions`); the CLI and the action copy them from the definition themselves. Passing them field by field (`schedulerOptions: def.schedulerOptions, summary: def.summary`) fails to type-check under `exactOptionalPropertyTypes` (TS2379), because those fields are `T | undefined`; `runWorkflow({ ...def, ports, casBaseDir, historyDir })` type-checks under both settings and passes them when they are set.
+`runWorkflow({ implementation, ports, cacheDir, historyDir })` runs it and resolves to `{ results, failed, markdown, cancelled, exitCode }` ([dagworkflows-lifecycle](dagworkflows-lifecycle.md)). It takes `implementation` alone: the definition's `schedulerOptions` and `summary` apply only when passed as options of their own (`schedulerOptions: ci.schedulerOptions`); the CLI and the action copy them from the definition themselves. Passing them field by field (`schedulerOptions: def.schedulerOptions, summary: def.summary`) fails to type-check under `exactOptionalPropertyTypes` (TS2379), because those fields are `T | undefined`; `runWorkflow({ ...def, ports, cacheDir, historyDir })` type-checks under both settings and passes them when they are set.
 
 The example below was verified with `node --test <file>.test.ts` (plain `node` works too) on Node 24.2 or later, with no flag, in a package with `"type": "module"` (or as a `.mts` file). Under `"type": "commonjs"` it fails with `SyntaxError: Cannot use import statement outside a module`.
 
@@ -626,7 +626,7 @@ const { ports } = createTestPorts({
 const outcome = await runWorkflow({
   implementation: ci.implementation,
   ports,
-  casBaseDir: "/cas",
+  cacheDir: "/cache",
   historyDir: "/history",
 });
 assert.deepEqual(calls, ["docker compose up -d", "npm test", "docker compose down"]);
@@ -643,9 +643,9 @@ Where it lives: `ports/memory.ts`.
 
 - Writing a workflow (this domain):
   - Functions: `defineWorkflow`, `createWorkflow`, `selectNodes`, `postNodes`, `hashFiles(patterns)` (as `workflow.hash`), and, re-exported from dagraph, `file(path)` and `settled(ref)`.
-  - Types: `Workflow<G>`, `WorkflowDef<R, G>`, `Implementation<R>`, `GroupsOf<S>`, `TaskSpec`, `ActionTaskSpec`, `CmdTaskSpec`, `ShellTaskSpec`, `PostSpec`, `PostField`, `ActionsCacheSpec`, `ActionsCacheTasks`, `SaveSpec`, `UploadArtifactSpec` (which extends `ArtifactUploadOptions`), `CommandCause`, `CiContext`, `Ports`, `WorkflowPorts`, and from dagraph `NodeRef`, `SettledRef`, `OutputRef`, `SettledOutputRef`.
-  - Constants: `DEFAULT_EXCLUDES` (`[".git", "node_modules", ".dag"]`), `DEFAULT_CAS_DIR` (`.dag/cas`).
-- Testing doubles (used above): `createTestPorts`, `okExec`, `clockAt`, `steppingClock`, `createRecordingHost`, `RecordedHost`, `createMemoryCacheStore`, `MemoryCacheStore`, `createMemoryArtifactStore`, `MemoryArtifactStore`, `nullHost`, `nullCacheStore`, `nullArtifactStore`, and `logPath`.
+  - Types: `Workflow<G>`, `WorkflowDef<R, G>`, `Implementation<R>`, `RunDataPaths`, `GroupsOf<S>`, `TaskSpec`, `ActionTaskSpec`, `CmdTaskSpec`, `ShellTaskSpec`, `PostSpec`, `PostField`, `ActionsCacheSpec`, `ActionsCacheTasks`, `SaveSpec`, `UploadArtifactSpec` (which extends `ArtifactUploadOptions`), `CommandCause`, `CiContext`, `Ports`, `WorkflowPorts`, and from dagraph `NodeRef`, `SettledRef`, `OutputRef`, `SettledOutputRef`.
+  - Constants: `DEFAULT_EXCLUDES` (`[".git", "node_modules", ".dag"]`), `DEFAULT_CACHE_DIR` (`.dag/cache`), `DEFAULT_BUILD_LOG_DIR` (`.dag/build-logs`), `DEFAULT_DURATIONS_DIR` (`.dag/durations`).
+- Testing doubles (used above): `createTestPorts`, `okExec`, `clockAt`, `steppingClock`, `createRecordingHost`, `RecordedHost`, `createMemoryCacheStore`, `MemoryCacheStore`, `createMemoryArtifactStore`, `MemoryArtifactStore`, `nullHost`, `nullCacheStore` and `nullArtifactStore`.
 - Ports and their real implementations: the types `Exec`, `ExecOptions`, `ExecResult`, `Clock`, `Host`, `Lockfile`, `CacheStore`, `ArtifactStore`, `ArtifactUploadOptions`, `AnnotationLevel`, `CheckUpdate`, and `createExec`, `abortOnSignals`, `systemClock`, `createLocalHost`, `createActionsCacheStore`, `createActionsArtifactStore`, `artifactServiceAvailable` ([dagworkflows-cache-artifacts](dagworkflows-cache-artifacts.md) for the stores, [dagworkflows-cli-action-release](dagworkflows-cli-action-release.md) for the hosts).
 - Running and history ([dagworkflows-lifecycle](dagworkflows-lifecycle.md)): `runWorkflow`, `runJob`, `runPost`, `RunOptions`, `RunOutcome`, `createRunHistory`, `readRunHistory`, `runHistoryLive`, `RunHistory`, `RunHistoryFile`, `DEFAULT_HISTORY_DIR`, and the kernel: `RunState`, `RunLifecycle`, `RunAction`, `NodeAction`, `Pass`, `NodeState` and its cases (`PendingNodeState`, `InFlightNodeState`, `SettledNodeState`, `SucceededNodeState`, `FailedNodeState`, `DepFailedNodeState`, `CancelledNodeState`), `selectors`, `createRunStore`, `RunStore`, `RunListener`.
 - Output ([dagworkflows-output](dagworkflows-output.md)): `createReporter`, `SummaryRenderer`, `RunReport`, `NodeReport`, `DEFAULT_SUMMARY_RENDERERS`, `renderStatus`, `renderTimeline`, `renderCriticalPath`, `renderDag`, `renderFailures`, `renderTable`, `formatDuration`, `failureMessage`, `DEFAULT_SUMMARY_PATH`.
@@ -658,5 +658,4 @@ Where it lives: `ports/memory.ts`.
 - The `CiContext` doc comment says locally "the rest is `0` and `""`", but the local `eventName` is `"local"`.
 - An action that calls `@actions/core` (or `console.log`) directly writes to the process's stdout, bypassing the node's log, so it is not grouped, not in the log file and not ordered with the node's output. The code gives no guidance on this beyond `log` and `warn`.
 - `workflow.ports` is typed without `exec` but at runtime is the full ports object, `exec` included.
-- Nodes added straight to `workflow.graph` with a dagraph action write no log file (the log is written by the task wrapper); whether the output layer copes is [dagworkflows-output](dagworkflows-output.md)'s question.
 - Two post steps with identical commands, on tasks with no outputs and nothing downstream, have the same action key and so the same log path.
