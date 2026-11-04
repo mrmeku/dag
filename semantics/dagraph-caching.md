@@ -330,12 +330,19 @@ Three implementations:
 
 - **`createNodeFileSystem()`**, from the `@mrmeku/dagraph/fs/node` entry point. Built on `node:fs/promises`. `writeText` creates missing parent directories with `mkdir -p`. `hashFile` streams the file through `node:crypto`.
 - **`createBunFileSystem()`**, from the `@mrmeku/dagraph/fs` entry point. Built on `Bun.file`, `Bun.write` and `Bun.CryptoHasher`, so it needs the Bun runtime. `Bun.write` creates missing parent directories. Hashing streams the file.
-- **`createMemoryFileSystem(initial?)`** and its type `MemoryFileSystem`, from the package index. Files live in a `Map` exposed as `.files`, from path to `{ data, mode, mtimeMs }`, so a test can seed or inspect it. Two paths that hold one such object are hard links to one file, and a write changes the object, so every link sees it. `initial` is a record of path to string or bytes, each a file of mode `0o644`, and `writeFile(path, data)` writes either, as `writeText` writes text. Hashing a string hashes its UTF-8 bytes, and `lstat`'s `size` counts them. A write to a file whose mode has no owner write bit fails with code `EACCES`, as on disk, and each write gives its file an mtime a millisecond later than any before. It differs from a real disk in these ways:
-  - only files exist: a directory is just the files under its prefix, which `readdir`, `rename`, `remove`, `lstat` and `utimes` see. A directory's mtime is the one `utimes` last gave it, or else 0. There are no symbolic links;
-  - `lstat`'s `mode` holds the permission bits alone, without the file type's;
-  - `ensureDir` does nothing;
-  - `resolve` returns the path unchanged;
-  - `rename` moves a file or every file under a directory. It throws `ENOENT: <from>` if nothing is there. When the source is a directory, it throws `ENOTEMPTY: <to>` if the target holds files. When the source is a file, it never checks the target, so renaming a file onto a non-empty directory succeeds and leaves a file and a directory sharing one name, which POSIX refuses.
+- **`createMemoryFileSystem(initial?)`** and its type `MemoryFileSystem`, from the package index. Files live in a `Map` exposed as `.files`, from path to `{ data, mode, mtimeMs }`, so a test can seed or inspect it. Two paths that hold one such object are hard links to one file, and a write changes the object, so every link sees it. `initial` is a record of path to string or bytes, each a file of mode `0o644`, and `writeFile(path, data)` writes either, as `writeText` writes text. Hashing a string hashes its UTF-8 bytes, and `lstat`'s `size` counts them. A write to a file whose mode has no owner write bit fails with code `EACCES`, as on disk.
+
+  It models directories and does on each what the disk adapters do, failing with the same codes. A test in `filesystem/filesystems.test.ts` runs each case against all three adapters:
+  - A write makes its file's missing directories, and `ensureDir` makes a directory and its missing parents, so an empty directory exists. `lstat` sees it, `readdir` lists nothing, and `chmod`, `utimes` and `fsync` take it.
+  - A directory gets an mtime when it is made, and a new one each time an entry is added to it, removed from it or renamed in or out of it. A write to an existing file changes only that file's mtime. Each change gets an mtime a millisecond later than any before, from one counter that starts at 1, not from the clock.
+  - `rename` of a file onto a directory fails with `EISDIR`, and of a directory onto a file with `ENOTDIR`. Of a directory onto a non-empty one it fails with `ENOTEMPTY`, and onto an empty one it replaces it. Into a directory that does not exist it fails with `ENOENT`.
+  - `readText` and `hashFile` of a directory fail with `EISDIR`, and `readdir` of a file with `ENOTDIR`. `ensureDir` over a file fails with `EEXIST`, and under one with `ENOTDIR`.
+  - A file seeded straight into `.files` makes the directories above it exist too.
+
+  It differs from a real disk in these ways:
+  - there are no symbolic links;
+  - `lstat`'s `mode` holds the permission bits alone, without the file type's, and a directory's `size` is 0;
+  - `resolve` returns the path unchanged, and the root always exists.
 
 Why the two real ones are separate entry points: they import `node:fs`, and only `filesystem/` may import an I/O module, so the package index, which re-exports the memory adapter alone, loads none. Import the index for the engine and the memory filesystem; import `/fs` or `/fs/node` for disk.
 

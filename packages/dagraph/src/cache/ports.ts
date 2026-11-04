@@ -21,13 +21,16 @@ export interface FileSystem {
   remove: (path: string) => Promise<void>;
   /** POSIX `lstat`; rejects with code `ENOENT` when nothing is at `path`, as node:fs does. */
   lstat: (path: string) => Promise<Stats>;
-  /** POSIX `chmod`: sets a file's permission bits. */
+  /** POSIX `chmod`: sets a file's or a directory's permission bits. */
   chmod: (path: string, mode: number) => Promise<void>;
-  /** POSIX `fsync`: flushes a file's data to disk. */
+  /** POSIX `fsync`: flushes a file's or a directory's data to disk. */
   fsync: (path: string) => Promise<void>;
   /** POSIX `utimes`: sets the access and modification times of a file or a directory. */
   utimes: (path: string, atime: Date, mtime: Date) => Promise<void>;
-  /** The names of the entries in a directory; none when the directory does not exist. */
+  /**
+   * The names of the entries in a directory; none when the directory does not exist. Rejects with
+   * code `ENOTDIR` when `dir` is a file.
+   */
   readdir: (dir: string) => Promise<string[]>;
   /** The absolute form of `path`, as an action sees it. */
   resolve: (path: string) => string;
