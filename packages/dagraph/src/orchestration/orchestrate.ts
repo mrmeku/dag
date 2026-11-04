@@ -11,6 +11,34 @@ import type {
 import type { OrchestrationEvent, Result, ScheduledNode } from "./types.ts";
 
 /**
+ * The first cycle among `nodes`, searched from each in their order and along each node's deps in
+ * theirs: the names along it, the first again at its end. A node that depends on itself is one.
+ */
+function firstCycle(nodes: ScheduledNode[]): string[] | undefined {
+  const byName = new Map(nodes.map((n) => [n.name, n]));
+  const acyclic = new Set<string>();
+  const path: string[] = [];
+  const visit = (name: string): string[] | undefined => {
+    if (acyclic.has(name)) return undefined;
+    const start = path.indexOf(name);
+    if (start !== -1) return [...path.slice(start), name];
+    path.push(name);
+    for (const dep of byName.get(name)?.deps ?? []) {
+      const cycle = visit(dep);
+      if (cycle) return cycle;
+    }
+    path.pop();
+    acyclic.add(name);
+    return undefined;
+  };
+  for (const n of nodes) {
+    const cycle = visit(n.name);
+    if (cycle) return cycle;
+  }
+  return undefined;
+}
+
+/**
  * The scheduling half of `execute`, for an executor that processes nodes elsewhere. It works on
  * nodes as data: it tracks which are ready, admits them through the scheduler, hands each its
  * deps' details, and propagates a failure. It does no I/O, never reads a details and never sees
@@ -42,6 +70,11 @@ export async function orchestrate<
   });
   if (unmet.length > 0)
     throw new Error(`orchestrate: nodes depend on nodes it was not given: ${unmet.join("; ")}`);
+  const cycle = firstCycle(all);
+  if (cycle)
+    throw new Error(
+      `orchestrate: nodes depend on each other in a cycle: ${cycle.map((name) => `"${name}"`).join(" needs ")}`,
+    );
   const state = new ExecState<NodeData, SuccessDetails, FailureDetails, CancellationDetails>(all);
   let processing = 0;
   let resumeLoop: () => void = () => {};

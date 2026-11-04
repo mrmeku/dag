@@ -235,6 +235,44 @@ describe("orchestrate", () => {
     );
   });
 
+  test("refuses node data with a cycle, naming the first one by its nodes, before any node runs", async () => {
+    const refusal = (nodes: ScheduledNode[]) => {
+      const ran: string[] = [];
+      const run: RunNode<ScheduledNode, Made, never, never> = async (n) => {
+        ran.push(n.name);
+        return { name: n.name, status: "succeeded", details: "ran" };
+      };
+      return orchestrate(nodes, run, unboundedScheduler(), clock).then(
+        () => ({ refused: "resolved", ran }),
+        (e: unknown) => ({ refused: errorMessage(e), ran }),
+      );
+    };
+    const refused = (path: string) => ({
+      refused: `orchestrate: nodes depend on each other in a cycle: ${path}`,
+      ran: [],
+    });
+    expect({
+      itself: await refusal([node("root"), node("a", ["a"])]),
+      through: await refusal([
+        node("root"),
+        node("a", ["root", "b"]),
+        node("b", ["c"]),
+        node("c", ["a"]),
+        node("d", ["d"]),
+      ]),
+      diamond: await refusal([
+        node("top"),
+        node("left", ["top"]),
+        node("right", ["top"]),
+        node("bottom", ["left", "right"]),
+      ]),
+    }).toEqual({
+      itself: refused('"a" needs "a"'),
+      through: refused('"a" needs "b" needs "c" needs "a"'),
+      diamond: { refused: "resolved", ran: ["top", "left", "right", "bottom"] },
+    });
+  });
+
   test("an onEvent that throws stops nothing: the nodes settle, then orchestrate rejects with its first error, and leaves no listener on the signal", async () => {
     const ran: string[] = [];
     const controller = new AbortController();
