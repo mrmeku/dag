@@ -33,7 +33,7 @@ const dagworkflowsImports = {
  */
 const DAGRAPH_ADAPTERS = ["src/ports/fs.ts", "src/ports/node-fs.ts"];
 const NO_IO_IN_INDEX =
-  "dagraph's index must reach no I/O module: Temporal bundles it into its workflow sandbox";
+  "dagraph's index must reach no I/O module: the engine does its I/O through its filesystem port";
 const dagraphImports = {
   patterns: [
     {
