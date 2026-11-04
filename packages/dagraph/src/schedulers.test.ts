@@ -5,7 +5,7 @@ import { getEventListeners } from "node:events";
 import type { DagFs } from "./cache.ts";
 import { actionsFor } from "./define-action.ts";
 import { runNode } from "./execute.ts";
-import { Graph, nodeInputs, type Node } from "./graph/index.ts";
+import { Graph, nodeInputs } from "./graph/index.ts";
 import { orchestrate, type RunNode } from "./orchestrate.ts";
 import { createMemoryDagFs } from "./ports/memory-fs.ts";
 import {
@@ -13,14 +13,14 @@ import {
   unboundedScheduler,
   type ThrottledSchedulerOptions,
 } from "./schedulers.ts";
-import type { Result } from "./types.ts";
+import type { Result, ScheduledNode } from "./types.ts";
 import { errorMessage } from "./utils.ts";
 
 // A miss awaits its gate and then runs until the test finishes it by hand; a hit settles at once.
 // `idle` waits for a macrotask, which comes only after every queued microtask has run, so the
 // scheduler has done all it would do on its own.
 function harness(
-  nodes: Node[],
+  nodes: ScheduledNode[],
   opts: ThrottledSchedulerOptions,
   { hits = [], slowLookups = [] }: { hits?: string[]; slowLookups?: string[] } = {},
 ) {
@@ -59,9 +59,9 @@ function harness(
   return { log, done, idle, finish, look };
 }
 
-const node = (name: string, concurrencyGroup?: string, deps: string[] = []): Node => ({
+// Orchestration schedules node data alone: no kind, no action and nothing processing reads.
+const node = (name: string, concurrencyGroup?: string, deps: string[] = []): ScheduledNode => ({
   name,
-  kind: name,
   deps,
   ...(concurrencyGroup && { concurrencyGroup }),
 });
@@ -201,7 +201,7 @@ describe("throttledScheduler", () => {
 });
 
 describe("orchestrate", () => {
-  const done = async (n: Node): Promise<Result> => ({
+  const done = async (n: ScheduledNode): Promise<Result> => ({
     name: n.name,
     actionKey: "k",
     status: "done",
@@ -254,7 +254,7 @@ describe("orchestrate", () => {
       if (n.name === "later") controller.abort();
       throw new RangeError(`${n.name} broke`, { cause: { code: 1 } });
     };
-    const later: Node = { ...node("later", undefined, ["first"]), settledDeps: ["first"] };
+    const later: ScheduledNode = { ...node("later", undefined, ["first"]), settledDeps: ["first"] };
     const results = await orchestrate(
       [node("first"), later],
       run,

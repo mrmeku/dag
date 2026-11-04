@@ -1,7 +1,6 @@
 import type { CacheEntry } from "./cache.ts";
 import { ExecState, type Ready } from "./exec-state.ts";
-import type { Node } from "./graph/index.ts";
-import type { Clock, ExecEvent, ExecListener, Result } from "./types.ts";
+import type { Clock, ExecEvent, ExecListener, Result, ScheduledNode } from "./types.ts";
 import { errorOf } from "./utils.ts";
 
 export type { Ready } from "./exec-state.ts";
@@ -13,8 +12,8 @@ export type { Ready } from "./exec-state.ts";
  * `RunNode` becomes a failure, as an action's error does, or `cancelled` once the execution is
  * cancelled.
  */
-export type RunNode<Meta = unknown> = (
-  node: Node<Meta>,
+export type RunNode<NodeData extends ScheduledNode = ScheduledNode> = (
+  node: NodeData,
   depEntries: Record<string, CacheEntry>,
   waitForScheduler: () => Promise<void>,
 ) => Promise<Result>;
@@ -25,9 +24,9 @@ export type RunNode<Meta = unknown> = (
  * concurrency group, again `pending`. `run` hands a ready node to processing, or lets a pending
  * one run; it resolves once the node settles or, as it begins to pend, gives its place back. `workAvailable` resolves when that may have changed what `take` returns.
  */
-export interface SchedulerContext<Meta = unknown> {
-  take(filter?: (ready: Ready<Meta>) => boolean): Ready<Meta> | null;
-  run(ready: Ready<Meta>): Promise<void>;
+export interface SchedulerContext<NodeData extends ScheduledNode = ScheduledNode> {
+  take(filter?: (ready: Ready<NodeData>) => boolean): Ready<NodeData> | null;
+  run(ready: Ready<NodeData>): Promise<void>;
   hasWork(): boolean;
   workAvailable(): Promise<void>;
 }
@@ -36,7 +35,9 @@ export interface SchedulerContext<Meta = unknown> {
  * The policy that admits ready nodes. It takes them in orchestration's order and only filters
  * it: it may hold a node back, but never reorders them.
  */
-export type Scheduler = <Meta>(ctx: SchedulerContext<Meta>) => Promise<void>;
+export type Scheduler = <NodeData extends ScheduledNode>(
+  ctx: SchedulerContext<NodeData>,
+) => Promise<void>;
 
 /**
  * The scheduling half of `execute`, for an executor that processes nodes elsewhere. It works on
@@ -47,9 +48,9 @@ export type Scheduler = <Meta>(ctx: SchedulerContext<Meta>) => Promise<void>;
  * A throw of `onEvent` stops nothing: once the nodes settle, `orchestrate` rejects with the first
  * error that it threw.
  */
-export async function orchestrate<Meta>(
-  nodes: Iterable<Node<Meta>>,
-  run: RunNode<Meta>,
+export async function orchestrate<Meta, NodeData extends ScheduledNode<Meta> = ScheduledNode<Meta>>(
+  nodes: Iterable<NodeData>,
+  run: RunNode<NodeData>,
   schedule: Scheduler,
   clock: Clock,
   onEvent?: ExecListener<Meta>,
@@ -63,7 +64,7 @@ export async function orchestrate<Meta>(
   });
   if (unmet.length > 0)
     throw new Error(`orchestrate: nodes depend on nodes it was not given: ${unmet.join("; ")}`);
-  const state = new ExecState<Meta>(all);
+  const state = new ExecState<NodeData>(all);
   let processing = 0;
   let resumeLoop: () => void = () => {};
   const wake = () => resumeLoop();
@@ -89,8 +90,8 @@ export async function orchestrate<Meta>(
   /** What each pending miss awaits: the scheduler letting it run. */
   const pendingRuns = new Map<string, { resolve: () => void; reject: (reason: unknown) => void }>();
 
-  const meta = (node: Node<Meta>) => (node.meta === undefined ? {} : { meta: node.meta });
-  const settle = (node: Node<Meta>, result: Result) => {
+  const meta = (node: ScheduledNode<Meta>) => (node.meta === undefined ? {} : { meta: node.meta });
+  const settle = (node: NodeData, result: Result) => {
     state.settle(node, result);
     emit({ type: "result", node: node.name, ...meta(node), result, occurredAt: clock.now() });
     releasePlace(node.name);
@@ -100,14 +101,14 @@ export async function orchestrate<Meta>(
   // Once cancelled, every node that becomes ready settles cancelled instead of running, and every
   // pending miss stops waiting, so the loop drains as running nodes settle.
   const drainCancelled = () => {
-    let next: Ready<Meta> | null;
+    let next: Ready<NodeData> | null;
     while ((next = state.take())) {
       if (next.pending) pendingRuns.get(next.node.name)?.reject(signal?.reason);
       else settle(next.node, { name: next.node.name, actionKey: "", status: "cancelled" });
     }
   };
 
-  const waitForSchedulerOf = (node: Node<Meta>) => {
+  const waitForSchedulerOf = (node: NodeData) => {
     let admitted: Promise<void> | undefined;
     const pend = () => {
       if (signal?.aborted) return Promise.reject(signal.reason);
@@ -123,7 +124,7 @@ export async function orchestrate<Meta>(
     return () => (admitted ??= pend());
   };
 
-  const ctx: SchedulerContext<Meta> = {
+  const ctx: SchedulerContext<NodeData> = {
     take(filter) {
       if (signal?.aborted) {
         drainCancelled();

@@ -38,7 +38,6 @@ Main entry point `@mrmeku/dagraph` (graph-building part):
 | `nodeInputs<T>`              | Declares the inputs each node of the action must give, by name and type.                              |
 | `file(path)`                 | A file input: the file's content becomes part of the key.                                             |
 | `nodeRefNamed(name)`         | An untyped ref to a node known only by its name.                                                      |
-| `requiredDeps(node)`         | A described node's deps minus its settled ones.                                                       |
 | `namedOutput(outputs, name)` | Pick one path out of a node's outputs, or throw.                                                      |
 | `isFileHandle(value)`        | Type guard: is a value a single file handle.                                                          |
 | `notAString(value, refusal)` | Makes an object refuse every conversion to a string (described below).                                |
@@ -306,7 +305,7 @@ Example: in a graph with `v1:*` and `v10:*` nodes and a root node `shared` that 
 
 ### `describe()`
 
-`describe()` is the one view of a graph as data. It returns an array of `Node<Meta>` in the order the nodes were added. Each holds:
+`describe()` is the one view of a graph as data. It returns an array of `Node<Meta>` in the order the nodes were added. `Node<Meta>` extends orchestration's `ScheduledNode<Meta>` (see the execution page) with `kind`, `cacheable` and `timeoutMs`. Each holds:
 
 - `name`: the full name.
 - `kind`.

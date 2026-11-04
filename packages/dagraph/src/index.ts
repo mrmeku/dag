@@ -22,7 +22,6 @@ export {
   nodeRefNamed,
   notAString,
   pick,
-  requiredDeps,
   settled,
 } from "./graph/index.ts";
 export type {
@@ -77,12 +76,14 @@ export {
   countResultsByStatus,
   isResult,
   isSucceeded,
+  requiredDeps,
   type Clock,
   type ExecEvent,
   type ExecListener,
   type FailedError,
   type JsonValue,
   type Result,
+  type ScheduledNode,
   type SucceededResult,
   type Tally,
 } from "./types.ts";

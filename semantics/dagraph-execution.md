@@ -34,27 +34,29 @@ Where it lives: `packages/dagraph/src/execute.ts`, `orchestrate.ts`, `process-no
 
 All of these are exported from the package index, `@mrmeku/dagraph`:
 
-| Name                                                               | Kind           | What it is                                                                                         |
-| ------------------------------------------------------------------ | -------------- | -------------------------------------------------------------------------------------------------- |
-| `execute(graph, executionContext, options?)`                       | function       | Runs a whole graph in this process. Resolves to one `Result` per node.                             |
-| `ExecuteOptions`                                                   | type           | `{ onEvent?, scheduler?, signal? }`.                                                               |
-| `ExecutionContext<Ports>`                                          | type           | `{ fs, cacheDir, clock, forcedKeys?, ports }`.                                                     |
-| `orchestrate(nodes, run, scheduler, clock, onEvent?, signal?)`     | function       | The scheduling half, over node data. Resolves to one `Result` per node.                            |
-| `RunNode<Meta = unknown>`                                          | type           | The function `orchestrate` calls to process one node.                                              |
-| `lookupNode(graph, name, depEntries, executionContext)`            | function       | Computes a node's key and checks its entry. Resolves to a `Lookup`: a result, or a `Miss`.         |
-| `runAction(graph, miss, depEntries, executionContext, options?)`   | function       | Runs a missed node's action and stores what it made. Resolves to its `Result`.                     |
-| `processNode(graph, name, depEntries, executionContext, options?)` | function       | `lookupNode`, then `runAction` on a miss, with no slot to wait for.                                |
-| `runNode(graph, executionContext, options?)`                       | function       | The `RunNode` that `execute` uses: lookup, the slot on a miss, then the action.                    |
-| `Lookup`, `Miss`, `RunActionOptions<Meta>`                         | types          | A lookup's outcome, a miss (`{ name, actionKey, status: "missed" }`), and `{ signal?, onEvent? }`. |
-| `unboundedScheduler()`                                             | function       | The default scheduler: no limits.                                                                  |
-| `throttledScheduler(options?)`                                     | function       | A scheduler with a global limit and one limit per concurrency group.                               |
-| `ThrottledSchedulerOptions`                                        | type           | `{ maxParallelism?, concurrencyLimits? }`.                                                         |
-| `Scheduler`, `SchedulerContext<Meta = unknown>`, `Ready<Meta>`     | types          | For writing a scheduler of your own.                                                               |
-| `Result`, `SucceededResult`, `FailedError`, `JsonValue`            | types          | A node's result and its parts.                                                                     |
-| `isResult(value)`, `isSucceeded(result)`                           | functions      | Type guards.                                                                                       |
-| `countResultsByStatus(results)`, `Tally`                           | function, type | Counts results, or anything with a `status`, by status.                                            |
-| `Clock`                                                            | type           | What `ExecutionContext.clock` and `orchestrate` read the time from.                                |
-| `ExecEvent<Meta = unknown>`, `ExecListener<Meta = unknown>`        | types          | The event stream and its listener.                                                                 |
+| Name                                                               | Kind           | What it is                                                                                          |
+| ------------------------------------------------------------------ | -------------- | --------------------------------------------------------------------------------------------------- |
+| `execute(graph, executionContext, options?)`                       | function       | Runs a whole graph in this process. Resolves to one `Result` per node.                              |
+| `ExecuteOptions`                                                   | type           | `{ onEvent?, scheduler?, signal? }`.                                                                |
+| `ExecutionContext<Ports>`                                          | type           | `{ fs, cacheDir, clock, forcedKeys?, ports }`.                                                      |
+| `orchestrate(nodes, run, scheduler, clock, onEvent?, signal?)`     | function       | The scheduling half, over node data. Resolves to one `Result` per node.                             |
+| `ScheduledNode<Meta = unknown>`                                    | type           | The node as orchestration schedules it: `{ name, deps, settledDeps?, concurrencyGroup?, meta? }`.   |
+| `requiredDeps(node)`                                               | function       | A scheduled node's deps minus its settled ones.                                                     |
+| `RunNode<NodeData extends ScheduledNode = ScheduledNode>`          | type           | The function `orchestrate` calls to process one node, given the node as `orchestrate` was given it. |
+| `lookupNode(graph, name, depEntries, executionContext)`            | function       | Computes a node's key and checks its entry. Resolves to a `Lookup`: a result, or a `Miss`.          |
+| `runAction(graph, miss, depEntries, executionContext, options?)`   | function       | Runs a missed node's action and stores what it made. Resolves to its `Result`.                      |
+| `processNode(graph, name, depEntries, executionContext, options?)` | function       | `lookupNode`, then `runAction` on a miss, with no slot to wait for.                                 |
+| `runNode(graph, executionContext, options?)`                       | function       | The `RunNode` that `execute` uses: lookup, the slot on a miss, then the action.                     |
+| `Lookup`, `Miss`, `RunActionOptions<Meta>`                         | types          | A lookup's outcome, a miss (`{ name, actionKey, status: "missed" }`), and `{ signal?, onEvent? }`.  |
+| `unboundedScheduler()`                                             | function       | The default scheduler: no limits.                                                                   |
+| `throttledScheduler(options?)`                                     | function       | A scheduler with a global limit and one limit per concurrency group.                                |
+| `ThrottledSchedulerOptions`                                        | type           | `{ maxParallelism?, concurrencyLimits? }`.                                                          |
+| `Scheduler`, `SchedulerContext<NodeData>`, `Ready<NodeData>`       | types          | For writing a scheduler of your own. `NodeData` is the node type, `ScheduledNode` by default.       |
+| `Result`, `SucceededResult`, `FailedError`, `JsonValue`            | types          | A node's result and its parts.                                                                      |
+| `isResult(value)`, `isSucceeded(result)`                           | functions      | Type guards.                                                                                        |
+| `countResultsByStatus(results)`, `Tally`                           | function, type | Counts results, or anything with a `status`, by status.                                             |
+| `Clock`                                                            | type           | What `ExecutionContext.clock` and `orchestrate` read the time from.                                 |
+| `ExecEvent<Meta = unknown>`, `ExecListener<Meta = unknown>`        | types          | The event stream and its listener.                                                                  |
 
 The file system implementations live on subpaths so that the index reaches no I/O module: `@mrmeku/dagraph/fs` exports `createBunDagFs()` (Bun) and `@mrmeku/dagraph/fs/node` exports `createNodeDagFs()` (Node). `createMemoryDagFs()`, an in-memory file system for tests, is exported from the index.
 
@@ -593,8 +595,8 @@ Where it lives: `packages/dagraph/src/process-node.ts` (`actionSignal`), `graph/
 
 `orchestrate(nodes, run, scheduler, clock, onEvent?, signal?)` does what `execute` does, except that it never processes a node itself: it calls `run` for that.
 
-- `nodes`: the node data, any iterable of `Node`, usually `graph.describe()`. It carries no actions or inputs, so it can cross into another process when its `meta` can.
-- `run`: a `RunNode`, `(node, depEntries, waitForScheduler) => Promise<Result>`. `depEntries` is the cache entry of each dep that succeeded, by dep name (a dep that did not succeed is absent). `waitForScheduler` waits until the scheduler lets the node's action run (below).
+- `nodes`: the node data, any iterable of `ScheduledNode` or a type that extends it, usually `graph.describe()`. Orchestration reads only `name`, `deps`, `settledDeps`, `concurrencyGroup` and `meta`, so node data with no `kind` schedules too. It carries no actions or inputs, so it can cross into another process when its `meta` can.
+- `run`: a `RunNode`, `(node, depEntries, waitForScheduler) => Promise<Result>`. It gets each node as `orchestrate` was given it, so a `run` given graph's nodes reads their `kind`. `depEntries` is the cache entry of each dep that succeeded, by dep name (a dep that did not succeed is absent). `waitForScheduler` waits until the scheduler lets the node's action run (below).
 - `scheduler`: required here; there is no default.
 - `clock`: required; stamps the `occurredAt` of the events it emits (`dispatch`, `pending`, `result`). `execute` passes the context's.
 - `onEvent`: receives `dispatch` and `result`.

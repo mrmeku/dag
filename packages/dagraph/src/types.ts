@@ -1,6 +1,25 @@
 import { isCacheEntry, type CacheEntry } from "./cache.ts";
 import { isJsonValue } from "./utils.ts";
 
+/**
+ * A node as orchestration schedules it: its name, its deps and its concurrency group. Its `meta`
+ * is the caller's, carried through to events untouched.
+ */
+export interface ScheduledNode<Meta = unknown> {
+  name: string;
+  /** The names of the nodes it depends on, once each. */
+  deps: string[];
+  /** The deps it runs without when they do not succeed. */
+  settledDeps?: string[];
+  concurrencyGroup?: string;
+  meta?: Meta;
+}
+
+/** The deps a node runs only once they succeed: its deps less its `settled` ones. */
+export function requiredDeps(node: ScheduledNode): string[] {
+  return node.deps.filter((d) => !node.settledDeps?.includes(d));
+}
+
 /** A value as JSON holds it. A property that is `undefined` is left out when it is written. */
 export type JsonValue =
   | string

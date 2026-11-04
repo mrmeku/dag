@@ -1,4 +1,4 @@
-import type { Graph } from "./graph/index.ts";
+import type { Graph, Node } from "./graph/index.ts";
 import { orchestrate, type RunNode, type Scheduler } from "./orchestrate.ts";
 import {
   lookupNode,
@@ -47,7 +47,7 @@ export function runNode<Ports, Meta>(
   graph: Graph<Ports, Meta>,
   executionContext: ExecutionContext<NoInfer<Ports>>,
   options: RunActionOptions<Meta> = {},
-): RunNode<Meta> {
+): RunNode<Node<Meta>> {
   return async (node, depEntries, waitForScheduler) => {
     const found = await lookupNode(graph, node.name, depEntries, executionContext);
     if (found.status !== "missed") return found;

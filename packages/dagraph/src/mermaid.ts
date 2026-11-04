@@ -2,17 +2,17 @@
  * Draws a graph as a Mermaid flowchart. Published as `@mrmeku/dagraph/mermaid`, beside the engine:
  * it reads only `graph.describe()`, so a team can copy and change it.
  */
-import type { Node } from "./graph/index.ts";
+import type { ScheduledNode } from "./types.ts";
 
-export interface MermaidOptions<Meta = unknown> {
+export interface MermaidOptions<NodeData extends ScheduledNode = ScheduledNode> {
   /** Text inside a node's box. Default: its full name. */
-  label?: (node: Node<Meta>) => string;
+  label?: (node: NodeData) => string;
   /** The box a node is drawn in, from its `meta`; "" for none. Without it, nothing is boxed. */
-  subgraphOf?: (meta: Meta | undefined) => string;
+  subgraphOf?: (meta: NodeData["meta"]) => string;
   /** Title of a box, given its subgraph and its index. Default: the subgraph itself. */
   subgraphLabel?: (subgraph: string, index: number) => string;
   /** A class name per node, applied with `class` lines. Default: none. */
-  classOf?: (node: Node<Meta>) => string | undefined;
+  classOf?: (node: NodeData) => string | undefined;
 }
 
 /**
@@ -32,9 +32,9 @@ export function mermaidQuote(text: string): string {
  * id in the lines and `subgraphs` lists the subgraph ids, so a caller can style them or draw
  * edges to its own pseudo-nodes.
  */
-export function mermaidBody<Meta>(
-  nodes: Node<Meta>[],
-  opts: MermaidOptions<Meta> = {},
+export function mermaidBody<NodeData extends ScheduledNode>(
+  nodes: NodeData[],
+  opts: MermaidOptions<NodeData> = {},
 ): { lines: string[]; id: (name: string) => string; subgraphs: string[] } {
   const ids = new Map(nodes.map((n, i) => [n.name, `n${i}`]));
   const id = (name: string) => {
@@ -42,7 +42,7 @@ export function mermaidBody<Meta>(
     if (!found) throw new Error(`mermaidBody: unknown node "${name}"`);
     return found;
   };
-  const subgraphOf = (n: Node<Meta>) => opts.subgraphOf?.(n.meta) ?? "";
+  const subgraphOf = (n: NodeData) => opts.subgraphOf?.(n.meta) ?? "";
   const label = opts.label ?? ((n) => n.name);
   const lines: string[] = [];
   const subgraphs: string[] = [];

@@ -1,3 +1,5 @@
+import type { ScheduledNode } from "../types.ts";
+
 /** What an action returns: named outputs, each a path or a list of paths under its outputDir. */
 export type Outputs = Record<string, string | string[]>;
 
@@ -570,25 +572,13 @@ export type NodeParams<D, N, I, Meta, ND = NodeDeps<D>, NI = N> = {
   Param<"inputs", N, NodeInputs<N, I, RefDeps<D, ND>, NI>>;
 
 /**
- * A node as data, from `graph.describe()`: no action or inputs, so it can cross
- * into orchestration and into another process when its `meta` can.
+ * A node as data, from `graph.describe()`: the node orchestration schedules, plus what processing
+ * reads. It has no action or inputs, so it can cross into another process when its `meta` can.
  */
-export interface Node<Meta = unknown> {
-  name: string;
+export interface Node<Meta = unknown> extends ScheduledNode<Meta> {
   kind: string;
-  meta?: Meta;
-  /** The names of the nodes it depends on, once each. */
-  deps: string[];
-  /** The deps it runs without when they do not succeed. */
-  settledDeps?: string[];
-  concurrencyGroup?: string;
   /** `false`: the node's entry is never read or written, so it runs in every execution. */
   cacheable?: boolean;
   /** How long the action may run, in ms, before its signal fires with a "TimeoutError". */
   timeoutMs?: number;
-}
-
-/** The deps a node runs only once they succeed: its deps less its `settled` ones. */
-export function requiredDeps(node: Node): string[] {
-  return node.deps.filter((d) => !node.settledDeps?.includes(d));
 }

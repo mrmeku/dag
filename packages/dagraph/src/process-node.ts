@@ -16,8 +16,14 @@ import {
 import { fileHandle } from "./file-handle.ts";
 import { graphNodes, type Graph, type GraphNode } from "./graph/graph.ts";
 import { canonical, resolveValue } from "./graph/inputs.ts";
-import { FILE_INPUT, isFileInput, isOutputs, requiredDeps, type Outputs } from "./graph/types.ts";
-import type { Clock, ExecListener, FailedError, Result } from "./types.ts";
+import { FILE_INPUT, isFileInput, isOutputs, type Outputs } from "./graph/types.ts";
+import {
+  requiredDeps,
+  type Clock,
+  type ExecListener,
+  type FailedError,
+  type Result,
+} from "./types.ts";
 import { errorOf } from "./utils.ts";
 
 /**

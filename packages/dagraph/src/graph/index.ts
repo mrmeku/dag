@@ -12,7 +12,6 @@ export {
   nodeRefNamed,
   notAString,
   pick,
-  requiredDeps,
   settled,
 } from "./types.ts";
 export type {

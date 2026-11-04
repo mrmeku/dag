@@ -1,5 +1,6 @@
 import type { Ready } from "./exec-state.ts";
 import type { Scheduler, SchedulerContext } from "./orchestrate.ts";
+import type { ScheduledNode } from "./types.ts";
 
 /**
  * Core scheduling loop: repeatedly take ready nodes, run them, and wait for in-flight work to
@@ -10,11 +11,11 @@ function schedulingLoop(hooks?: {
   onRun?: (ready: Ready) => void;
   onEnd?: (ready: Ready) => void;
 }): Scheduler {
-  return async <Meta>(ctx: SchedulerContext<Meta>) => {
+  return async <NodeData extends ScheduledNode>(ctx: SchedulerContext<NodeData>) => {
     // A settled node resumes the loop before its onEnd runs, so the loop may see a stale filter.
     // onEnd dispatches too: whichever of the two runs last sees both updates.
     const dispatch = () => {
-      let next: Ready<Meta> | null;
+      let next: Ready<NodeData> | null;
       while ((next = ctx.take(hooks?.admits))) {
         const taken = next;
         hooks?.onRun?.(taken);
