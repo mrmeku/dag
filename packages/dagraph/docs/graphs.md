@@ -134,7 +134,7 @@ Value inputs are JSON only: strings, finite numbers, booleans, `null`, and array
 
 To put a dependency's output into a value, such as an argv list for a command, give `inputs` as a function, as each summarize node does. The function gets each role's output refs. So `page.html` here is a ref to the fetched html, not the node ref `page` passed in `deps`. `["render", page.html]` puts that ref in the list, and the action reads the item as a handle on the fetched file.
 
-## Files and outputs
+## FileSystem and outputs
 
 An action reads every file through a handle, whether it comes from a `file()` input or a dependency's output. A handle has:
 

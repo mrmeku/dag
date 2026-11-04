@@ -226,7 +226,7 @@ export function createLiveRenderer(
   const drawFooter = () => {
     const run = getState();
     printLines([]);
-    const now = clock.now();
+    const now = clock.epochMilliseconds();
     const startedAt = selectors.runStartedAt(run);
     const { columns = LIVE_FALLBACK_SIZE.columns, rows = LIVE_FALLBACK_SIZE.rows } = streams.stdout;
     const footerShown = startedAt !== undefined && now - startedAt >= LIVE_FIRST_DRAW_MS;

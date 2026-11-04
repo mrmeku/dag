@@ -58,7 +58,7 @@ error: option '--output-style <style>' value 'bogus' from env 'DAG_OUTPUT_STYLE'
 
 By default every rerun line starts with `npx --no dag run` followed by the workflow file. The terminal's `rerun` lines come only from the local session, which always builds `npx --no dag run <shell-quoted workflow file>` and overrides any `rerunCommand` it is given. `RunOptions.rerunCommand` sets only the command at the start of GitHub's `reproduce:` line, used as given: the workflow file is not appended. A run with neither `rerunCommand` nor `workflowFile` prints no `reproduce:` line.
 
-### Files
+### FileSystem
 
 | Path (default)              | Written by    | Content                                                                                                             |
 | --------------------------- | ------------- | ------------------------------------------------------------------------------------------------------------------- |
@@ -354,7 +354,7 @@ Every local style writes each node's log to `<log dir>/<node>.log`. The files ar
 - **Paths.** Each `:` or `/` in a node name is a directory level: `test:a` goes to `.dag/logs/test/a.log`, and `packages/pkg0:test` goes to `.dag/logs/packages/pkg0/test.log`. A `.` or `..` segment is encoded as `%2E` (`../up` goes to `.dag/logs/%2E%2E/up.log`), so no name escapes the directory. A name made only of separators is URL-encoded (`:` goes to `.dag/logs/%3A.log`). Empty segments are dropped (`/abs` goes to `.dag/logs/abs.log`). So names that differ only in `:` versus `/`, or in repeated or leading separators (`test:a`, `test/a`, `test::a`), share one log file, and the later writer overwrites it.
 - **Content.** The file holds plain lines: escape codes and control characters removed, each line as a terminal leaves it after carriage returns, and `::debug::` lines dropped. Blank lines are kept. A `::warning` line stays as written. The node's error is not written to it, only what the node printed, so a node that failed without printing has an empty file: `require-all` failing with `failed: flaky`, or a `shell` task `exit 3` (verified).
 - **When.** A node's file is emptied when its start comes, and each completed line is appended. A cache hit, which prints nothing as it runs, gets its file from its build log at its settle, so it holds the log of the build that made the entry. A node skipped, or one that failed or was cancelled before its start came, gets no file; one whose start came but whose action did not run keeps the empty file. At a forced exit, the unfinished line of each running node is appended.
-- Files of nodes that are not part of this run are left alone.
+- FileSystem of nodes that are not part of this run are left alone.
 - **Errors.** Writes are synchronous, so files are whole when the process is forced out. The first write that fails prints the warning `[warning] dag: log files off: <error>`, and the log files stop for that run. The run goes on.
 
 Where it lives: `src/local/recorders/log-files.ts`, `src/local/recorders/writer.ts`.
@@ -795,9 +795,9 @@ The `selectors` namespace queries the state: `isSettled`, `startedAtOf`, `elapse
 This script ran (with its imports pointed at the packages' sources) and prints one JSON line per settle:
 
 ```ts
-import { createNodeDagFs } from "@mrmeku/dagraph/fs/node";
 import {
   createExec,
+  createFileSystem,
   createRunStore,
   defineWorkflow,
   nullArtifactStore,
@@ -829,7 +829,7 @@ const { implementation } = defineWorkflow({
     workflow.task({ name: "deploy", cmd: ["echo", "deployed"], deps: { lint } });
   },
 });
-const fs = createNodeDagFs();
+const fs = createFileSystem();
 const clock = systemClock();
 const store = createRunStore({
   fs,

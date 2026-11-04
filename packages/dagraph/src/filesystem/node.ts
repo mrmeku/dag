@@ -1,12 +1,10 @@
 /**
- * Node-backed DagFs. Published as the `@mrmeku/dagraph/fs/node` subpath, never from the
- * package index: it imports node:fs, and the index is bundled into Temporal's V8 workflow
- * sandbox, which admits no I/O modules (lint refuses them elsewhere, eslint.config.ts).
+ * The Node adapter of the cache's `FileSystem`. Published as the `@mrmeku/dagraph/fs/node` subpath,
+ * never from the package index: it imports node:fs, and only filesystem/ may import an I/O module.
  */
 import { createHash } from "node:crypto";
 import { createReadStream } from "node:fs";
 import {
-  access,
   chmod,
   lstat,
   mkdir,
@@ -19,17 +17,11 @@ import {
   writeFile,
 } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
-import type { DagFs } from "../cache.ts";
-import { isMissingFileError } from "../utils.ts";
+import { isMissingFileError, type FileSystem } from "../cache/index.ts";
 
 /** Streams large files through the hasher instead of reading them whole. */
-export function createNodeDagFs(): DagFs {
+export function createNodeFileSystem(): FileSystem {
   return {
-    exists: (path) =>
-      access(path).then(
-        () => true,
-        () => false,
-      ),
     readText: (path) => readFile(path, "utf8"),
     writeText: async (path, content) => {
       await mkdir(dirname(path), { recursive: true });

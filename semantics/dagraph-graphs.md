@@ -19,7 +19,7 @@ Terms used throughout:
 - **Ports**: the program's tools (a filesystem, an HTTP client, a translator), handed to every action at run time. They are part of the execution context, not of the graph.
 - **Meta**: free-form data a node carries for the program's own use, such as which page it belongs to. The engine passes it through and never interprets it.
 
-Where it lives: `packages/dagraph/src/define-action.ts`, `src/graph/graph.ts`, `src/graph/types.ts`.
+Where it lives: `packages/dagraph/src/graph/define-action.ts`, `src/graph/graph.ts`, `src/graph/types.ts`.
 
 ## The public surface at a glance
 
@@ -46,7 +46,7 @@ Types, each explained further in its section:
 
 - `Action<Ports, R, D = {}, N = {}, I = {}>`: an action needing `Ports`, with outputs `R`, deps `D`, node inputs `N` and own inputs `I`. `Action<Ports, Record<never, never>>[]` accepts a portless action that returns no outputs.
 - `ActionSpec`: what `defineAction` takes.
-- `ActionContext<Ports = unknown, D = DepSpecs, I = Record<string, unknown>>`: what one call of the action gets; `I` is the action's inputs and its nodes' together.
+- `ActionContext<Ports, D = DepSpecs, I = InputRecord<unknown>>`: what one call of the action gets; `I` is the action's inputs and its nodes' together. With `unknown` ports and its defaults it is `ErasedContext`, the context of no action in particular, as a graph holds actions.
 - `NodeRef<T>`, `SettledRef<T>`: a ref to a node, plain or wrapped in `settled`. `T` defaults to `Outputs`. `AnyNodeRef<T>` is either.
 - `OutputRef<T, S>`, `SettledOutputRef<T, S>`: a ref to one output of a dep, inside an `inputs` function. `S` is the scope of the call that received it, default `unknown`. `AnyOutputRef<T, S>` is either.
 - `Dep<T>`, `SettledDep<T>`: what `dep<T>()` and `settled<T>()` (or `settled(action)`) return, a role declaration.
@@ -66,7 +66,7 @@ Separate entry point `@mrmeku/dagraph/mermaid`: `mermaidBody(nodes, options?)`, 
 
 Separate entry point `@mrmeku/dagraph/orchestration`: what an executor's scheduling side needs and nothing else. It exports `orchestrate`, `RunNode`, `Ready`, `Scheduler`, `SchedulerContext`, the two schedulers and `ThrottledSchedulerOptions`, and from the result types `Result`, `isResult`, `isSucceeded`, `countResultsByStatus`, `Tally`, `FailureError`, `JsonValue`, `OrchestrationEvent`, `OrchestrationListener`, `ScheduledNode`, `requiredDeps` and `Clock`. It loads nothing of the cache, no hashing and no I/O module, so Temporal's workflow sandbox can bundle it ([dagraph-execution](dagraph-execution.md)).
 
-The main entry point also exports the execution, caching and filesystem APIs (`execute`, `lookupNode`, `runAction`, `processNode`, `orchestrate`, schedulers, `createMemoryDagFs`, result types). Those belong to [dagraph-execution](dagraph-execution.md) and [dagraph-caching](dagraph-caching.md). This page uses `execute` and `createMemoryDagFs` only in its examples.
+The main entry point also exports the execution, caching and filesystem APIs (`execute`, `startGlobalTimer`, `lookupNode`, `runAction`, `lookupOrRunNode`, `orchestrate`, schedulers, `createMemoryFileSystem`, result types). Those belong to [dagraph-execution](dagraph-execution.md) and [dagraph-caching](dagraph-caching.md). This page uses `execute`, `startGlobalTimer` and `createMemoryFileSystem` only in its examples.
 
 ### The package
 
@@ -74,11 +74,14 @@ The main entry point also exports the execution, caching and filesystem APIs (`e
 - **Badges.** npm version `https://img.shields.io/npm/v/@mrmeku/dagraph`, linking to `https://www.npmjs.com/package/@mrmeku/dagraph`; CI `https://github.com/mrmeku/dag/actions/workflows/ci.yml/badge.svg`, linking to `https://github.com/mrmeku/dag/actions/workflows/ci.yml`; licence `https://img.shields.io/npm/l/@mrmeku/dagraph`, linking to `https://github.com/mrmeku/dag/blob/main/LICENSE`, the repository's root `LICENSE`.
 - **What ships.** JavaScript compiled from the TypeScript sources, with declarations. Its only runtime dependencies are `js-sha256` (every hash) and `pathe` (path normalising).
 - **Compiler settings a consumer needs.** The declarations name web globals such as `AbortSignal`. A program compiled with `lib` `ESNext` only, and neither `@types/node` nor Bun's types, gets `Cannot find name 'AbortSignal'` inside dagraph's declarations unless `skipLibCheck` is on. `lib` `DOM`, or the `node` or `bun` types, provide them.
-- **Entry points.** Five: `@mrmeku/dagraph` (the engine, the memory filesystem, every type), `@mrmeku/dagraph/fs` (`createBunDagFs`), `@mrmeku/dagraph/fs/node` (`createNodeDagFs`), `@mrmeku/dagraph/mermaid` (`mermaidBody`, `mermaidQuote`) and `@mrmeku/dagraph/orchestration` (`orchestrate`, the schedulers and the result types).
+- **Entry points.** Five: `@mrmeku/dagraph` (the engine, the memory filesystem, every type), `@mrmeku/dagraph/fs` (`createBunFileSystem`), `@mrmeku/dagraph/fs/node` (`createNodeFileSystem`), `@mrmeku/dagraph/mermaid` (`mermaidBody`, `mermaidQuote`) and `@mrmeku/dagraph/orchestration` (`orchestrate`, the schedulers and the result types).
 - **Runtimes.** Node and Bun. The engine itself uses no runtime-specific API; only the filesystem adapters do: `/fs/node` is built on `node:fs` and runs on Node (and on Bun, which implements `node:fs`), `/fs` is built on `Bun.file` and needs Bun. The package declares no `engines` field, and nothing else names a minimum Node or Bun version for it, so no supported range is stated (see Open questions); the `>=24.2` in `@mrmeku/dagworkflows` is that package's own. What the repository does run: its CI and release pin Node 24 and Bun 1.4.2. dagraph's own tests run under Bun (`bun test ./packages/dagraph`), and dagraph runs under Node 24 as the engine of dagworkflows, whose tests run with `node --test` and whose GitHub Action runs on `node24`. The build targets `ESNext`, so the shipped JavaScript is the sources' syntax as written, lowered and polyfilled for no older runtime. The newest features the sources use are ES2022's (class static blocks, `Object.hasOwn`, an error's `cause`), except for ES2024's `Map.groupBy` in `/mermaid`. The oldest Node that runs it is set by two globals, not by syntax. The engine calls the global `crypto.randomUUID()` to name each attempt's `tmp/<uuid>` directory and each manifest's temporary file, and Node has a global `crypto` without a flag from 19.0. `/mermaid` calls `Map.groupBy`, which Node has from 21.0. Verified on 2026-10-26 with the quick start as plain JavaScript (its two type annotations removed) against the packed package. Node 19.0.0 and 20.0.0 print its six lines. Node 18.0.0 and 18.20.8 settle every node that has to run `failed` with `ReferenceError: crypto is not defined`, and its dependents `dep-failed`. `mermaidBody` throws `TypeError: Map.groupBy is not a function or its return value is not iterable` on Node 20.0.0 and works on 21.0.0. These are the versions that run it, not a supported range (see Open questions). The worked example on [dagraph-caching](dagraph-caching.md) ("Quick start") was run against the packed package under Bun 1.4.4 and Node 22.18, 23.6, 24 and 25.
 - **The sibling package.** `@mrmeku/dagworkflows`, a CI runner from the same repository, depends on `@mrmeku/dagraph` and runs its workflows as dagraph graphs.
+- **Components.** Each concern of the sources is a component, one directory of `packages/dagraph/src`: `graph/` and `mermaid/` (this page), `orchestration/`, `schedulers/`, `lookup-or-run/` and `json/` ([dagraph-execution](dagraph-execution.md)), and `cache/` and `filesystem/` ([dagraph-caching](dagraph-caching.md)). A component's `index.ts` exports what it does, the data it owns and the ports it declares, and its `ports.ts`, when it owns any, declares those ports. A port is a need the component takes as a parameter, always named with its owner: graph's `HashFile`, the cache's `FileSystem`, orchestration's `RunNode`, `Scheduler`, `Clock` and `OrchestrationListener`, lookup-or-run's `StartTimer` and `ActionListener`. The files at the root of `src` are not components: `execute.ts` is the executor that wires orchestration and lookup-or-run together in one process, and the entry points `index.ts` and `orchestration.ts` only re-export. The package index re-exports a named list from each component's `index.ts`, so it alone shows the published API, and a name a component exports only for a sibling, such as graph's `computeActionKey`, stays out of it.
+- **Import edges.** A component imports another only through that one's `index.ts`, and only along these edges, `import type` included: `json/` imports no other component; `orchestration/` imports `json/`; `schedulers/` and `mermaid/` import `orchestration/`; `graph/` imports `orchestration/` and `json/`; `cache/` imports `graph/`; `lookup-or-run/` imports `orchestration/`, `graph/`, `cache/` and `json/`; `filesystem/` imports `cache/`. The edges are acyclic, so no two components import each other. The root files may import every component. The tests are the whole-library tests at `src/*.test.ts`, which may import every component and the disk adapters `filesystem/bun.ts` and `filesystem/node.ts`. A test inside a component may import what the component imports, the components that fill its ports (the schedulers for orchestration, the filesystems for graph, the cache and lookup-or-run) and the disk adapters.
+- **What lint enforces.** `eslint.dagraph.ts`, which `eslint.config.ts` includes, pins the import edges, what each test may import and that a component is reached only through its `index.ts` (with `eslint-plugin-boundaries`), and the module bans, the sandbox's reach and the global bans listed under "What the engine knows, and what it leaves to nodes". `packages/dagraph/lint/global-bans.ts` is the fixture that pins the global bans.
 
-Where it lives: `packages/dagraph/package.json`, `scripts/release.ts`, `scripts/pack.ts`, `packages/dagworkflows/package.json`, `tsconfig.json`, `scripts/checks.ts`, `.github/workflows/ci.yml`, `packages/dagraph/src/process-node.ts` and `packages/dagraph/src/cache.ts` (`crypto.randomUUID`), `packages/dagraph/src/mermaid.ts` (`Map.groupBy`).
+Where it lives: `packages/dagraph/package.json`, `scripts/release.ts`, `scripts/pack.ts`, `packages/dagworkflows/package.json`, `tsconfig.json`, `scripts/checks.ts`, `.github/workflows/ci.yml`, `packages/dagraph/src/cache/cache.ts` (`crypto.randomUUID`), `packages/dagraph/src/mermaid/mermaid.ts` (`Map.groupBy`), `packages/dagraph/src/index.ts`, `eslint.dagraph.ts`.
 
 ## A worked example
 
@@ -87,21 +90,23 @@ This example type-checks under the repository's strict compiler settings and run
 ```ts
 import {
   actionsFor,
-  createMemoryDagFs,
+  startGlobalTimer,
+  wallClock,
+  createMemoryFileSystem,
   execute,
   file,
   Graph,
   maybe,
   nodeInputs,
   settled,
-  type DagFs,
   type FileInput,
+  type FileSystem,
   type OutputRef,
 } from "@mrmeku/dagraph";
 import { mermaidBody } from "@mrmeku/dagraph/mermaid";
 
 interface Ports {
-  fs: DagFs;
+  fs: FileSystem;
 }
 const limits = { network: 2 };
 const defineActionWithPorts = actionsFor<Ports, keyof typeof limits>();
@@ -157,12 +162,13 @@ for (const id of ["home", "about"]) {
   });
 }
 
-const fs = createMemoryDagFs({ "/style.txt": "terse" });
+const fs = createMemoryFileSystem({ "/style.txt": "terse" });
 const results = await execute(graph, {
   ports: { fs },
   fs,
   cacheDir: "/cache",
-  clock: Date,
+  clock: wallClock,
+  startTimer: startGlobalTimer,
 });
 ```
 
@@ -204,6 +210,12 @@ Walking through it:
 ```
 
 Running it, all six nodes succeed, and `home:summarize` writes `terse | 2 | <P>HTTPS://EXAMPLE.COM/HOME</P> | no notes`. If translate threw, both translate nodes would fail, and both summarize nodes would still run, with `depOutputs.translation` `undefined`.
+
+## `graph/` (port: `HashFile`)
+
+`graph/` is typed authoring: actions, nodes, dep roles, inputs and refs. It checks each value input with a JSON walk of its own, lowers a graph to node data (`describe()`), owns `Outputs`, what an action returns, and computes each node's action key. Its one port, `HashFile` in `graph/ports.ts`, hashes a file for a `file()` input's part of the key; the cache's `FileSystem` fills it. It imports `ScheduledNode` from `orchestration/`, which its `Node` extends, and `isPlainObject` from `json/`. Its `index.ts` exports every name of graph's that this page lists, and besides them what its siblings read: `computeActionKey`, `ActionKeyInput`, `ActionKeyDep`, `HashFile`, `graphNodes` and `GraphNode`, `mapPaths`, `collectPaths`, `isOutputs`, `isOutputRef`, `isFileInput`, `FILE_INPUT`, `FILE_HANDLE` and `NodeInputs`. The package publishes the names this page lists only. The sections from here to "Type-level guarantees" describe it.
+
+Where it lives: `packages/dagraph/src/graph/index.ts`, `src/graph/ports.ts`.
 
 ## Actions
 
@@ -250,9 +262,9 @@ Each call of the action gets one object:
 
 That is all the action gets. It does not get its node's name, its meta, the graph or the cache directory: anything an action needs to know must reach it as an input, a dep or a port, which keeps what the action can see and what the key covers the same thing.
 
-Only `inputs` and `depOutputs` affect the key ([dagraph-caching](dagraph-caching.md)). The action function itself does not, so changing an action's logic means changing one of its inputs, for example bumping `version`.
+Only `inputs` and `depOutputs` affect the key (see "The action key: exactly what is hashed"). The action function itself does not, so changing an action's logic means changing one of its inputs, for example bumping `version`.
 
-Where it lives: `src/define-action.ts`, `src/graph/types.ts` (`ActionContext`, `Outputs`), `src/process-node.ts` (how the context is filled).
+Where it lives: `src/graph/define-action.ts`, `src/graph/types.ts` (`ActionContext`, `Outputs`), `src/lookup-or-run/lookup-or-run.ts` (how the context is filled).
 
 ## Graphs, nodes and names
 
@@ -277,7 +289,7 @@ A node's full name is its own name, prefixed by the subgraph path it was added t
 
 So two nodes of one action in the same scope need explicit names. A name may itself contain `:` (`name: "b:c"` in subgraph `a` gives `a:b:c`). Nothing forbids that, and such a node then counts as under prefix `a:b` too.
 
-The name is not part of the key, and neither is meta ([dagraph-caching](dagraph-caching.md)). Renaming nodes re-keys nothing.
+The name is not part of the key, and neither is meta (see "The action key: exactly what is hashed"). Renaming nodes re-keys nothing.
 
 ### Subgraphs and meta
 
@@ -374,7 +386,7 @@ Where it lives: `src/graph/types.ts` (`dep`, `settled`, `maybe`), `src/graph/gra
 
 ## Inputs
 
-A node's inputs are its action's own `inputs` merged with the node's. The key reads all of them by name ([dagraph-caching](dagraph-caching.md)).
+A node's inputs are its action's own `inputs` merged with the node's. The key reads all of them by name (see "The action key: exactly what is hashed").
 
 ### What an input can be
 
@@ -461,7 +473,7 @@ Refs, file inputs and file handles are objects whose paths are unknown, or machi
 
 Because the type says "symbol", never test for a handle with `typeof`. Use `isFileHandle`. `notAString(value, refusal)` is exported for a program that wants the same protection on its own objects. It installs throwing `toString`, `valueOf`, `toJSON` and `Symbol.toPrimitive` on `value` (mutating it) and returns it typed `T & NotAString`. The value must be extensible: a frozen, sealed or non-extensible object, or one where one of those four is already a non-configurable own property, makes `notAString` throw a `TypeError`.
 
-Where it lives: `src/graph/types.ts` (`notAString`, `file`), `src/file-handle.ts`.
+Where it lives: `src/graph/types.ts` (`notAString`, `file`), `src/lookup-or-run/handles.ts`.
 
 ## File handles
 
@@ -474,7 +486,7 @@ A `FileHandle` is how an action sees any file it reads: a `file()` input, or an 
 
 `Handles<T>` maps an output record to its handles, field by field: a `string` becomes a `FileHandle`, a `string[]` a `FileHandle[]`, and an optional field stays `| undefined`. `isFileHandle(x)` is true only for a single handle, not for a list or record of them.
 
-Where it lives: `src/file-handle.ts`, `src/graph/types.ts` (`FileHandle`, `Handles`).
+Where it lives: `src/lookup-or-run/handles.ts`, `src/graph/types.ts` (`FileHandle`, `Handles`).
 
 ## Output helpers
 
@@ -483,6 +495,46 @@ For code that reads a node's outputs back as data (results, cache entries), not 
 - `namedOutput(outputs, name)` returns the path the outputs hold as `name`. It throws `the node's outputs hold no path "<name>"` when there is none or when the field is a list.
 
 Where it lives: `src/graph/types.ts`.
+
+## The action key: exactly what is hashed
+
+Every node gets an **action key**: a 64-character lowercase SHA-256 hex string that names the node's work, and under which the cache stores and finds its entry ([dagraph-caching](dagraph-caching.md)). Graph computes it, and the cache never does. `computeActionKey(graphNode, depOutputHashes, hashFile)` takes the node as the graph holds it, the output hashes of each dep that succeeded, by dep name, and graph's `HashFile` port, `(path) => Promise<string>`, which gives a `file()` input's content hash. lookup-or-run calls it as it looks a node up, with the cache's `FileSystem` port's `hashFile`, which is a `HashFile` ([dagraph-execution](dagraph-execution.md)). Graph's `index.ts` exports it, with the types `ActionKeyInput` and `ActionKeyDep`, for lookup-or-run; the package does not publish it.
+
+The key is the SHA-256 hex of a JSON array with three parts:
+
+    [kind, [[inputName, actionKeyInput], ...sorted by name], [[role, actionKeyDep], ...sorted by role]]
+
+**Kind.** This is the action's `kind` string. Two actions with different kinds never share an entry, even with identical inputs.
+
+**Inputs.** These are the action's own `inputs` merged with the node's own inputs. A node may not repeat a name its action declares. Doing so fails `addNode` with `node "<name>": inputs.<input> is declared by its action "<kind>". Give the node's input another name.` A property whose value is `undefined` is dropped, as if it were absent. Each remaining input is keyed one of two ways:
+
+- **A file input**, `file(path)`, keys as `["file", path, sha256OfBytes]`. The path is the string exactly as given, not resolved. So `file("bun.lock")` and `file("./bun.lock")` key differently, and so does the same path holding different bytes. The engine hashes the file each time the node is looked up, after the node's deps have settled. So a node that depends on the node that writes the file sees the bytes that dep wrote, even if an earlier node in the same execution hashed the old bytes. Each node that declares a file hashes it separately.
+- **A value input** (string, finite number, boolean, `null`, or an array or plain object of these) keys as `["value", canonical]`. `canonical` is JSON with object keys sorted at every level. Array order counts. `1` and `"1"` differ. An output ref (a pointer to one named output of a dep, made by a node's `inputs` function) keys as `#ref(<JSON of [sorted roles that name that dep, outputName]>)`. That is the role it points through plus the output's name. It is never the dep node's name and never the file's content, because the dep's content is already keyed through its role. A ref to a node that two roles name keys with both roles, sorted, whichever role it was written through.
+
+  Values that are not JSON are refused when the action is defined or the node is added, naming their path (see "Inputs"). So every input that reaches the key is plain, canonical JSON.
+
+**Deps, by role.** A role is the name a node gives a dep in `deps`. Each role the node gives is keyed one of two ways:
+
+- `["outputs", [[name, hash], ...]]`: the hash of each output the role reads, from the dep's `outputHashes`, sorted by name. A role reads every output of its dep unless the action declares it with `pick`, which names the outputs it reads ([dagraph-caching](dagraph-caching.md), "Reading part of a dependency"). A picked output the dep did not produce keys as `null`.
+- `["missing"]`: a `settled` dep that did not succeed. The node runs without it, and runs again with a new key once the dep succeeds.
+
+A `maybe` role the node leaves out is not in the key at all. Deps are keyed by role, not by node name. Renaming the dep nodes leaves the key unchanged. Swapping two deps between roles changes it.
+
+**What never joins the key:**
+
+- the node's name, or its subgraph prefix;
+- the dep nodes' names;
+- the node's `meta`;
+- the action function itself;
+- `concurrencyGroup`, `timeoutMs` and `cacheable`;
+- file handles' absolute paths, the working directory, and the machine;
+- anything the action reads without declaring it: a file opened by a path it builds itself, an environment variable, a clock, a network call through its ports. A change there reruns nothing. To make a node rerun when such a thing changes, declare it: a `file()` input, a value input, or a dep on a node that fetches it (with `cacheable: false` if it must be fetched every time).
+
+A worked check, verified by running it: an action `{ kind: "hello", inputs: { version: 1 } }` with no deps has the key `sha256(JSON.stringify(["hello", [["version", ["value", "1"]]], []]))`.
+
+How the key changed across dagraph releases, and how to find out why a node reran, are [dagraph-caching](dagraph-caching.md)'s ("Keys across dagraph versions", "Finding out why a node reran").
+
+Where it lives: `packages/dagraph/src/graph/action-key.ts` (`computeActionKey`), `src/graph/ports.ts` (`HashFile`), `src/graph/inputs.ts` (`canonical`), `src/lookup-or-run/lookup-or-run.ts` (`lookupNode`, its caller).
 
 ## Type-level guarantees
 
@@ -498,9 +550,9 @@ What the compiler stops, and so what a user can rely on not happening in code th
 
 The run-time checks (duplicate names, required roles present, deps already in the graph, input values, redeclared inputs, `timeoutMs` range) catch what types cannot see or what a cast bypassed. They all fire while the graph is being built, before anything runs. One check fires later: an output ref (possible only through a cast) naming an output its dep did not return fails the node at execution, while its inputs are resolved, with `"<dep full name>" has no output "<output>"`.
 
-## Drawing a graph: `@mrmeku/dagraph/mermaid`
+## `mermaid/` (no ports): drawing a graph, `@mrmeku/dagraph/mermaid`
 
-A separate entry point that reads only `Node` data (from `describe()`) and is small enough to copy and adapt. It imports only a type and falls under the package's no-I/O lint rule, so like the index it is safe in Temporal's workflow sandbox.
+`mermaid/` draws node data as a Mermaid flowchart. Its `index.ts` is the separate entry point `@mrmeku/dagraph/mermaid`, and the package index does not re-export it. It reads only node data (from `describe()`) and is small enough to copy and adapt. It is generic in the node type, any `ScheduledNode`, so a label can read a `Node`'s `kind`. Its one import edge is a type, `ScheduledNode` from `orchestration/`, and it falls under the module and global bans (see "What the engine knows, and what it leaves to nodes"), so like the index it is safe in Temporal's workflow sandbox.
 
 `mermaidBody(nodes, options?)` returns `{ lines, id, subgraphs }`:
 
@@ -511,7 +563,7 @@ A separate entry point that reads only `Node` data (from `describe()`) and is sm
 - `id(name)`: the Mermaid id of a node by name, so a caller can style it or draw edges to its own pseudo-nodes. It throws `mermaidBody: unknown node "<name>"` for a name not in `nodes`.
 - `subgraphs`: the subgraph ids, `s0, s1, …`.
 
-Options (`MermaidOptions<Meta>`), all optional:
+Options (`MermaidOptions<NodeData>`), all optional:
 
 - `label(node)`: text in a node's box. Default: its full name.
 - `subgraphOf(meta)`: the box a node goes in, computed from its meta; `""` for none. Without it, nothing is boxed.
@@ -544,7 +596,7 @@ flowchart LR
   n4 -.-> n5
 ```
 
-Where it lives: `src/mermaid.ts`, `src/mermaid.test.ts`.
+Where it lives: `src/mermaid/index.ts`, `src/mermaid/mermaid.ts`, `src/mermaid.test.ts`.
 
 ## What the engine knows, and what it leaves to nodes
 
@@ -552,17 +604,17 @@ The engine knows one thing: nodes. A node is a kind, inputs, deps by role, and a
 
 **The primitives, and why each lives in the engine.** Each one does something a node cannot do for itself, because it acts before the node's action runs, or after it, or across nodes:
 
-| Primitive                    | Why a node cannot do it                                                                                                                          |
-| ---------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------ |
-| Deps by role                 | The engine must know the order to run nodes in, and the dep content each key covers.                                                             |
-| `settled`                    | Holding a dependent back (`dep-failed`) is decided by orchestration before the dependent is ever processed, so a node cannot opt itself back in. |
-| `maybe`                      | A role a node may leave out; it changes what is keyed (an absent role is not in the key) and what the action is typed to read.                   |
-| `file()` inputs              | The file's content must be hashed into the key before the action runs.                                                                           |
-| `cacheable: false`           | The cache lookup happens before the action, so the action cannot ask to skip it.                                                                 |
-| `concurrencyGroup`           | Only a miss takes a slot, and only after its lookup; a node that limited itself would hold a slot during a hit.                                  |
-| `timeoutMs`                  | The node must fail, and not be cached, whatever the action returns once the time is up.                                                          |
-| `signal`, `waitForScheduler` | Choices about a whole execution or one node of it, made by whoever runs the graph.                                                               |
-| An awaited `start` listener  | Lets a journal record a start before the action has any effect.                                                                                  |
+| Primitive                    | Why a node cannot do it                                                                                                                           |
+| ---------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Deps by role                 | The engine must know the order to run nodes in, and the dep content each key covers.                                                              |
+| `settled`                    | Holding a dependent back (`dep-failed`) is decided by orchestration before the dependent is ever dispatched, so a node cannot opt itself back in. |
+| `maybe`                      | A role a node may leave out; it changes what is keyed (an absent role is not in the key) and what the action is typed to read.                    |
+| `file()` inputs              | The file's content must be hashed into the key before the action runs.                                                                            |
+| `cacheable: false`           | The cache lookup happens before the action, so the action cannot ask to skip it.                                                                  |
+| `concurrencyGroup`           | Only a miss takes a slot, and only after its lookup; a node that limited itself would hold a slot during a hit.                                   |
+| `timeoutMs`                  | The node must fail, and not be cached, whatever the action returns once the time is up.                                                           |
+| `signal`, `waitForScheduler` | Choices about a whole execution or one node of it, made by whoever runs the graph.                                                                |
+| An awaited `start` listener  | Lets a journal record a start before the action has any effect.                                                                                   |
 
 **What the engine does not know.** The package imports nothing but `js-sha256` and `pathe` (and, in the two filesystem adapters, `node:fs`, `node:path`, `node:crypto` or Bun's file API). So:
 
@@ -573,14 +625,15 @@ The engine knows one thing: nodes. A node is a kind, inputs, deps by role, and a
 - it holds no secrets: credentials reach actions through ports;
 - it does not know what a node is for: meta is passed through and never read.
 
-A lint rule in the repository's ESLint config covers every dagraph source file except the two filesystem adapters (published as `/fs` and `/fs/node`) and tests, so it covers the index and the `/mermaid` and `/orchestration` entry points. Test files are exempt, and the engine's tests do import both adapters. The rule has two patterns, each with its own message:
+dagraph's lint, `eslint.dagraph.ts`, holds this in place with three kinds of ban beside the import edges (see "The package"). Tests are exempt except where said: they run under Bun, not in a sandbox, and the engine's tests import both disk adapters.
 
-- an I/O module (`node:*`, `bun`, `fs` and every `fs/` subpath, `child_process`, `os`, `path`): `dagraph's index must reach no I/O module: the engine does its I/O through its filesystem port. Do I/O in a file system adapter, published as a subpath.`
-- an adapter imported by a relative path: `dagraph's index must reach no I/O module: the engine does its I/O through its filesystem port. Import its file system adapters by their subpaths, outside the package.`
+- **Module bans.** No file of `src` outside `filesystem/` imports a built-in I/O module, such as `node:fs`, `fs`, `path`, `os` or `child_process`, by value: `Only filesystem/ imports an I/O module by value: do I/O through the cache's FileSystem port`. A type may still name one, as the cache's `Stats` names `node:fs`. In `filesystem/`, its `index.ts` and its memory adapter, which the package index loads, import no built-in module and neither disk adapter: `The package index loads filesystem/'s index and memory adapter: they import no I/O module and no disk adapter`. The tests of `orchestration/`, `schedulers/`, `graph/`, `mermaid/` and `json/` import no fs module either: `This component's tests touch no filesystem: use the memory adapter`.
+- **The sandbox's reach.** `orchestration/`, `schedulers/` and `json/` import no package and no built-in module, only each other, and the `./orchestration` entry imports nothing but those three: `What runs in the workflow sandbox imports nothing but orchestration/, schedulers/ and json/`. With the import edges, lint alone then shows what that entry reaches at run time.
+- **Global bans.** `orchestration/`, `schedulers/`, `graph/`, `mermaid/`, `json/` and `lookup-or-run/` read none of `Date`, `setTimeout`, `clearTimeout`, `crypto` and `globalThis` as a value, and call no `Math.random`: `Take the time, a timer or randomness as a port: a Clock, an StartTimer or a value passed in`. `Date` as a type stays legal. `cache/` may: it turns the time it is given into the `Date`s that `utimes` takes, and names its staging paths with `crypto.randomUUID()`. So may `execute.ts`, whose `startGlobalTimer` fills `StartTimer` from the global timers. `packages/dagraph/lint/global-bans.ts` pins each ban: every banned use in it carries a directive that disables the ban for its line, and lint fails on a directive left unused, so a ban that stops refusing its use fails lint.
 
-Separately, a rule over every package's sources, outside `src/ports/` and tests, refuses `node:fs`, `node:fs/promises`, `fs` and `fs/promises` with `Use the FileSystem port instead of direct fs imports.`
+Separately, a rule over every package's sources, outside `src/ports/`, dagraph's two disk adapters and tests, refuses `node:fs`, `node:fs/promises`, `fs` and `fs/promises` with `Use the FileSystem port instead of direct fs imports.`
 
-Where it lives: `packages/dagraph/package.json` (`dependencies`), `src/index.ts`, `eslint.config.ts`.
+Where it lives: `packages/dagraph/package.json` (`dependencies`), `src/index.ts`, `eslint.dagraph.ts`, `eslint.config.ts`, `packages/dagraph/lint/global-bans.ts`.
 
 ## Open questions
 

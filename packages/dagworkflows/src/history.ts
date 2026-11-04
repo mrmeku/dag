@@ -1,4 +1,9 @@
-import { isNodeResult, type DagFs, type ExecutionEvent, type NodeResult } from "@mrmeku/dagraph";
+import {
+  isNodeResult,
+  type ExecutionEvent,
+  type FileSystem,
+  type NodeResult,
+} from "@mrmeku/dagraph";
 import { HISTORY_LOCK_STALE_MS } from "./config.ts";
 import type { Lockfile } from "./ports.ts";
 
@@ -41,7 +46,7 @@ export const runHistoryLive = (lockfile: Lockfile, path: string): Promise<boolea
  * a history it left then shows a later pass what it still owes.
  */
 export async function createRunHistory(
-  fs: DagFs,
+  fs: FileSystem,
   lockfile: Lockfile,
   dir: string,
   initial: RunHistoryFile,
@@ -108,7 +113,7 @@ const isHistoryFile = (
  * The history at `path`. A result in an older shape is dropped, so its node replays as one that
  * never settled; the started nodes still say what the run owes.
  */
-export async function readRunHistory(fs: DagFs, path: string): Promise<RunHistoryFile> {
+export async function readRunHistory(fs: FileSystem, path: string): Promise<RunHistoryFile> {
   const file: unknown = JSON.parse(await fs.readText(path));
   if (!isHistoryFile(file))
     throw new Error(

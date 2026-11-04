@@ -1,14 +1,13 @@
 import { describe, expect, test } from "bun:test";
 import assert from "node:assert/strict";
 
-import { actionsFor } from "./define-action.ts";
-import { execute } from "./execute.ts";
-import { dep, Graph, nodeInputs, type ActionContext } from "./graph/index.ts";
-import { createMemoryDagFs, type MemoryDagFs } from "./ports/memory-fs.ts";
-import { lookupNode, type NodeResult } from "./process-node.ts";
+import { execute, startGlobalTimer, wallClock } from "./execute.ts";
+import { createMemoryFileSystem, type MemoryFileSystem } from "./filesystem/index.ts";
+import { actionsFor, dep, Graph, nodeInputs, type ActionContext } from "./graph/index.ts";
+import { lookupNode, type NodeResult } from "./lookup-or-run/index.ts";
 
 interface Ports {
-  fs: MemoryDagFs;
+  fs: MemoryFileSystem;
   ran: string[];
   source: { id: string; bitrate: number };
 }
@@ -80,10 +79,20 @@ function buildGraph(transcriptVersion = 1) {
 }
 
 function setup() {
-  const ports: Ports = { fs: createMemoryDagFs(), ran: [], source: { id: "abc", bitrate: 128 } };
+  const ports: Ports = {
+    fs: createMemoryFileSystem(),
+    ran: [],
+    source: { id: "abc", bitrate: 128 },
+  };
   return {
     ports,
-    ctx: { ports, fs: ports.fs, clock: Date, cacheDir: "/cache" },
+    ctx: {
+      ports,
+      fs: ports.fs,
+      clock: wallClock,
+      startTimer: startGlobalTimer,
+      cacheDir: "/cache",
+    },
   };
 }
 

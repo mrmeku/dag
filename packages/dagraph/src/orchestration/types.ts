@@ -1,4 +1,4 @@
-import { isJsonValue } from "./utils.ts";
+import { isJsonValue, type JsonValue } from "../json/index.ts";
 
 /**
  * A node as orchestration schedules it: its name, its deps and its concurrency group. Its `meta`
@@ -18,15 +18,6 @@ export interface ScheduledNode<Meta = unknown> {
 export function requiredDeps(node: ScheduledNode): string[] {
   return node.deps.filter((d) => !node.settledDeps?.includes(d));
 }
-
-/** A value as JSON holds it. A property that is `undefined` is left out when it is written. */
-export type JsonValue =
-  | string
-  | number
-  | boolean
-  | null
-  | readonly JsonValue[]
-  | { readonly [key: string]: JsonValue | undefined };
 
 /** A thrown value as a result keeps it: its name, its message and its cause as JSON. */
 export type FailureError = { name: string; message: string; cause?: JsonValue };
@@ -100,9 +91,6 @@ export function isSucceeded<Settled extends Result<unknown, unknown, unknown>>(
 
 export type Tally = Record<Result<unknown, unknown, unknown>["status"], number>;
 
-/** Where the engine reads the time: `Date`, or a fake one in a test. */
-export type Clock = Pick<DateConstructor, "now">;
-
 /** Count results, or anything else with a status, by status. */
 export function countResultsByStatus(results: Iterable<{ status: keyof Tally }>): Tally {
   const t: Tally = { succeeded: 0, failed: 0, cancelled: 0, "dep-failed": 0 };
@@ -124,11 +112,3 @@ export type OrchestrationEvent<Meta, SuccessDetails, FailureDetails, Cancellatio
   | { type: "pending" }
   | { type: "result"; result: Result<SuccessDetails, FailureDetails, CancellationDetails> }
 );
-
-/**
- * Receives each `OrchestrationEvent`. A throw, or a returned promise that rejects before the
- * execution ends, rejects the execution at its end.
- */
-export type OrchestrationListener<Meta, SuccessDetails, FailureDetails, CancellationDetails> = (
-  event: OrchestrationEvent<Meta, SuccessDetails, FailureDetails, CancellationDetails>,
-) => unknown;

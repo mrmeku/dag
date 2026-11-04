@@ -150,9 +150,9 @@ describe("createExec with a process left behind", () => {
   test("a command that exits while a background process holds its output settles after the drain grace, with what it printed", async () => {
     const exec = createExec({ streamDrainGraceMs: 200 });
     const clock = systemClock();
-    const started = clock.now();
+    const started = clock.epochMilliseconds();
     const r = await exec.run(["sh", "-c", "sleep 30 & echo $!"]);
-    const elapsed = clock.now() - started;
+    const elapsed = clock.epochMilliseconds() - started;
     process.kill(Number(r.stdout.trim()));
     assert.deepEqual(
       {

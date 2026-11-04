@@ -1,17 +1,14 @@
 /**
- * Bun-backed DagFs. Published as the `@mrmeku/dagraph/fs` subpath, never from the package
- * index: it imports node:fs, and the index is bundled into Temporal's V8 workflow sandbox,
- * which admits no I/O modules (lint refuses them elsewhere, eslint.config.ts).
+ * The Bun adapter of the cache's `FileSystem`. Published as the `@mrmeku/dagraph/fs` subpath, never
+ * from the package index: it imports node:fs, and only filesystem/ may import an I/O module.
  */
 import { chmod, lstat, mkdir, open, readdir, rename, rm, utimes } from "node:fs/promises";
 import { resolve } from "node:path";
-import type { DagFs } from "../cache.ts";
-import { isMissingFileError } from "../utils.ts";
+import { isMissingFileError, type FileSystem } from "../cache/index.ts";
 
 /** Streams large files through the native hasher instead of reading them whole. */
-export function createBunDagFs(): DagFs {
+export function createBunFileSystem(): FileSystem {
   return {
-    exists: (path) => Bun.file(path).exists(),
     readText: (path) => Bun.file(path).text(),
     writeText: async (path, content) => {
       await Bun.write(path, content);

@@ -56,6 +56,7 @@ export type {
   Exec,
   ExecOptions,
   ExecResult,
+  FileSystem,
   Host,
   Lockfile,
   Ports,
@@ -83,7 +84,7 @@ export {
   steppingClock,
   type RecordedHost,
 } from "./ports/memory.ts";
-export { abortOnSignals, createExec, systemClock } from "./ports/real.ts";
+export { abortOnSignals, createExec, createFileSystem, systemClock } from "./ports/real.ts";
 export type { PostField, PostSpec } from "./post.ts";
 export { createReporter } from "./reporter.ts";
 export {

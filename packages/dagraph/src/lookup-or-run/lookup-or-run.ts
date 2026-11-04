@@ -5,31 +5,44 @@ import {
   lookupEntry,
   newStagingDir,
   type CacheEntry,
-  type DagFs,
-} from "./cache.ts";
+  type FileSystem,
+} from "../cache/index.ts";
 import {
+  FILE_INPUT,
   computeActionKey,
+  graphNodes,
+  isFileInput,
+  isOutputs,
   mapPaths,
-  type HashFileFn,
-  type KeyedDep,
-  type KeyedInput,
-} from "./content-addressing.ts";
-import { fileHandle } from "./file-handle.ts";
-import { graphNodes, type Graph, type GraphNode } from "./graph/graph.ts";
-import { canonical, resolveValue } from "./graph/inputs.ts";
-import { FILE_INPUT, isFileInput, isOutputs, type Outputs } from "./graph/types.ts";
-import { isResult, requiredDeps, type Clock, type FailureError, type Result } from "./types.ts";
-import { errorOf } from "./utils.ts";
+  type ErasedContext,
+  type Graph,
+  type GraphNode,
+  type Node,
+  type Outputs,
+} from "../graph/index.ts";
+import {
+  failureErrorOf,
+  isResult,
+  requiredDeps,
+  type Clock,
+  type FailureError,
+  type Result,
+  type RunNode,
+} from "../orchestration/index.ts";
+import { fileHandle, resolveValue } from "./handles.ts";
+import type { ActionListener, StartTimer } from "./ports.ts";
 
 /**
  * What an executor hands the engine. It outlives any one execution. `ports` are the actions'
  * tools, which the engine passes through; a graph whose actions need none takes no `ports`.
  */
 export type ExecutionContext<Ports = unknown> = {
-  fs: DagFs;
+  fs: FileSystem;
   /** The cache's directory, relative or absolute; results name its files by absolute path. */
   cacheDir: string;
   clock: Clock;
+  /** Starts the timer of each node's `timeoutMs`. */
+  startTimer: StartTimer;
   /** Action keys whose lookups miss, or `"all"`: their nodes run again and write new entries. */
   forcedKeys?: ReadonlySet<string> | "all";
 } & (unknown extends Ports ? { ports?: Ports } : { ports: Ports });
@@ -106,23 +119,6 @@ export function resultActionKey(result: NodeResult): string | undefined {
   }
 }
 
-/**
- * Lookup-or-run's own events: `start`, as the action of a node that missed begins, and `output`,
- * for what the action prints.
- */
-export type ActionEvent<Meta = unknown> = { node: string; meta?: Meta; occurredAt: number } & (
-  | { type: "start" }
-  | { type: "output"; chunk: string }
-);
-
-/**
- * Receives each `ActionEvent`. For `start` it may return a promise, and the action runs only once
- * it resolves, so a journal records the start before any effect: `onEvent: (event) =>
- * journal.record(event)`. A rejection fails the node without running it. The promise of an
- * `output` is not awaited, and its rejection is dropped.
- */
-export type ActionListener<Meta = unknown> = (event: ActionEvent<Meta>) => unknown;
-
 export interface RunActionOptions<Meta> {
   /** The execution's cancel. A node it stops settles `cancelled`, whatever its action returns. */
   signal?: AbortSignal;
@@ -139,40 +135,9 @@ export type Lookup =
   | Miss;
 
 /** A listener's promise that nothing awaits: its rejection is dropped, not left unhandled. */
-const ignoreRejection = (returned: unknown) => {
+const ignoreRejection = (returned: void | Promise<void>) => {
   if (returned instanceof Promise) returned.catch(() => {});
 };
-
-/** The node's action key, from its kind, its inputs by name and its deps by role. */
-async function actionKeyOf(
-  { spec, roles, inputs }: GraphNode,
-  entryOf: (dep: string) => CacheEntry | undefined,
-  hashFile: HashFileFn,
-): Promise<string> {
-  const rolesOf = (dep: string) =>
-    Object.keys(roles)
-      .filter((role) => roles[role] === dep)
-      .sort();
-  const refKey = (ref: { node: string; output: string }) =>
-    JSON.stringify([rolesOf(ref.node), ref.output]);
-  const keyedInputs: Record<string, KeyedInput> = {};
-  for (const [name, value] of Object.entries(inputs)) {
-    keyedInputs[name] = isFileInput(value)
-      ? ["file", value[FILE_INPUT], await hashFile(value[FILE_INPUT])]
-      : ["value", canonical(value, refKey)];
-  }
-  const keyedDeps: Record<string, KeyedDep> = {};
-  for (const [role, dep] of Object.entries(roles)) {
-    const entry = entryOf(dep);
-    if (!entry) {
-      keyedDeps[role] = ["missing"];
-      continue;
-    }
-    const read = spec.pickedOutputs[role] ?? Object.keys(entry.outputHashes);
-    keyedDeps[role] = ["outputs", [...read].sort().map((o) => [o, entry.outputHashes[o] ?? null])];
-  }
-  return computeActionKey(spec.kind, keyedInputs, keyedDeps);
-}
 
 /** The node `name` of `graph`, refused when the graph holds none. */
 function nodeNamed<Ports, Meta>(graph: Graph<Ports, Meta>, name: string): GraphNode<Meta> {
@@ -204,14 +169,17 @@ export async function lookupNode<Ports, Meta>(
   const missing = requiredDeps(node).find((dep) => !entryOf(dep));
   if (missing !== undefined) return { name, status: "dep-failed", dep: missing };
 
+  const depOutputHashes = Object.fromEntries(
+    Object.entries(depEntries).map(([dep, entry]) => [dep, entry.outputHashes]),
+  );
   let actionKey: string;
   try {
-    actionKey = await actionKeyOf(found, entryOf, fs.hashFile);
+    actionKey = await computeActionKey(found, depOutputHashes, fs.hashFile);
   } catch (e) {
-    return { name, status: "failed", error: errorOf(e) };
+    return { name, status: "failed", error: failureErrorOf(e) };
   }
   if (node.cacheable !== false && forcedKeys !== "all" && !forcedKeys?.has(actionKey)) {
-    const entry = await lookupEntry(fs, cacheDir, actionKey, clock);
+    const entry = await lookupEntry(fs, cacheDir, actionKey, clock.epochMilliseconds());
     if (entry)
       return { name, status: "succeeded", details: { actionKey, entry, actionRan: false } };
   }
@@ -230,7 +198,7 @@ export async function runAction<Ports, Meta>(
   options: RunActionOptions<Meta> = {},
 ): Promise<NodeResult> {
   const found = nodeNamed(graph, name);
-  const { fs, cacheDir, ports, clock }: ExecutionContext = executionContext;
+  const { fs, cacheDir, ports, clock, startTimer }: ExecutionContext = executionContext;
   const { node, spec, roles } = found;
   const meta = node.meta === undefined ? {} : { meta: node.meta };
   const entryOf = (dep: string) => (Object.hasOwn(depEntries, dep) ? depEntries[dep] : undefined);
@@ -238,7 +206,7 @@ export async function runAction<Ports, Meta>(
   const notRun = (e: unknown): NodeResult => ({
     name,
     status: "failed",
-    error: errorOf(e),
+    error: failureErrorOf(e),
     details: { actionKey },
   });
 
@@ -261,19 +229,30 @@ export async function runAction<Ports, Meta>(
   const output = (chunk: string) => {
     if (open)
       ignoreRejection(
-        options.onEvent?.({ type: "output", node: name, ...meta, chunk, occurredAt: clock.now() }),
+        options.onEvent?.({
+          type: "output",
+          node: name,
+          ...meta,
+          chunk,
+          occurredAt: clock.epochMilliseconds(),
+        }),
       );
   };
   try {
-    await options.onEvent?.({ type: "start", node: name, ...meta, occurredAt: clock.now() });
+    await options.onEvent?.({
+      type: "start",
+      node: name,
+      ...meta,
+      occurredAt: clock.epochMilliseconds(),
+    });
   } catch (e) {
     return dropped(notRun(e));
   }
   // Checked after the last await before the action starts: a cancel during the start's record
   // holds it back, though the record says it started.
   if (cancel?.aborted) return dropped(cancelled);
-  let inputs: Record<string, unknown>;
-  let depOutputs: Record<string, unknown>;
+  let inputs: ErasedContext["inputs"];
+  let depOutputs: ErasedContext["depOutputs"];
   try {
     inputs = Object.fromEntries(
       Object.entries(found.inputs).map(([k, v]) => [
@@ -296,9 +275,9 @@ export async function runAction<Ports, Meta>(
   } catch (e) {
     return dropped(notRun(e));
   }
-  const { signal, dispose } = actionSignal(node.timeoutMs, cancel);
-  const startTime = clock.now();
-  const elapsed = () => clock.now() - startTime;
+  const { signal, dispose } = actionSignal(node.timeoutMs, cancel, startTimer);
+  const startTime = clock.epochMilliseconds();
+  const elapsed = () => clock.epochMilliseconds() - startTime;
   const failed = (error: FailureError, timedOut?: true): NodeResult => ({
     name,
     status: "failed",
@@ -328,25 +307,33 @@ export async function runAction<Ports, Meta>(
     const thrown = "error" in settled ? settled.error : undefined;
     if (signal.aborted) {
       const message = `timed out after ${node.timeoutMs} ms`;
-      const error = { ...errorOf(thrown, message), name: "TimeoutError" };
+      const error = { ...failureErrorOf(thrown, message), name: "TimeoutError" };
       return await dropped(failed(error, true));
     }
-    if ("error" in settled) return await dropped(failed(errorOf(thrown)));
+    if ("error" in settled) return await dropped(failed(failureErrorOf(thrown)));
     if (!isOutputs(settled.outputs))
       throw new Error(
         `the action returned ${JSON.stringify(settled.outputs)}, not a record of outputs: ` +
           "return { <name>: path }",
       );
-    const cacheable = node.cacheable !== false;
+    const writeManifest = node.cacheable !== false;
     const { outputs } = settled;
-    const entry = await commitEntry(fs, cacheDir, actionKey, outputDir, outputs, cacheable, clock);
+    const entry = await commitEntry(
+      fs,
+      cacheDir,
+      actionKey,
+      outputDir,
+      outputs,
+      writeManifest,
+      clock.epochMilliseconds(),
+    );
     return {
       name,
       status: "succeeded",
       details: { actionKey, entry, actionRan: true, elapsed: elapsed() },
     };
   } catch (e) {
-    return await dropped(failed(errorOf(e)));
+    return await dropped(failed(failureErrorOf(e)));
   } finally {
     // What the action prints after its result returns is dropped.
     open = false;
@@ -354,10 +341,10 @@ export async function runAction<Ports, Meta>(
 }
 
 /**
- * Process the node `name` of `graph` now: look it up, and run its action on a miss. For a test, a
- * script, or a worker.
+ * Look the node `name` of `graph` up now, and run its action on a miss. For a test, a script, or a
+ * worker.
  */
-export async function processNode<Ports, Meta>(
+export async function lookupOrRunNode<Ports, Meta>(
   graph: Graph<Ports, Meta>,
   name: string,
   depEntries: Record<string, CacheEntry>,
@@ -370,26 +357,53 @@ export async function processNode<Ports, Meta>(
 }
 
 /**
- * The signal an action runs under: the execution's cancel, or the node's own deadline. A timer
- * cleared by `dispose` rather than `AbortSignal.timeout`, so a long-lived worker keeps no timer
- * per finished node.
+ * The `RunNode` that `execute` uses: each node of `graph` looked up and run in this process, its
+ * lookup first, given its deps' entries, and, on a miss, its action once the scheduler lets it
+ * run. A cancel while it waits settles it `cancelled`.
  */
-function actionSignal(timeoutMs: number | undefined, cancel: AbortSignal | undefined) {
+export function runNode<Ports, Meta>(
+  graph: Graph<Ports, Meta>,
+  executionContext: ExecutionContext<NoInfer<Ports>>,
+  options: RunActionOptions<Meta> = {},
+): RunNode<Node<Meta>, SucceededNodeDetails, FailedNodeDetails, CancelledNodeDetails> {
+  return async (node, depDetails, waitForScheduler) => {
+    const depEntries = Object.fromEntries(
+      Object.entries(depDetails).map(([dep, details]) => [dep, details.entry]),
+    );
+    const found = await lookupNode(graph, node.name, depEntries, executionContext);
+    if (found.status !== "missed") return found;
+    try {
+      await waitForScheduler();
+    } catch {
+      return { name: found.name, status: "cancelled", details: { actionKey: found.actionKey } };
+    }
+    return runAction(graph, found, depEntries, executionContext, options);
+  };
+}
+
+/**
+ * The signal an action runs under: the execution's cancel, or the node's own deadline, started by
+ * `startTimer` and stopped by `dispose`, so a long-lived worker keeps no timer per finished node.
+ */
+function actionSignal(
+  timeoutMs: number | undefined,
+  cancel: AbortSignal | undefined,
+  startTimer: StartTimer,
+) {
   const controller = new AbortController();
   const onCancel = () => controller.abort(cancel?.reason);
   cancel?.addEventListener("abort", onCancel, { once: true });
   if (cancel?.aborted) onCancel();
-  const timer =
+  const stopTimer =
     timeoutMs === undefined
       ? undefined
-      : setTimeout(
-          () => controller.abort(new DOMException("The operation timed out.", "TimeoutError")),
-          timeoutMs,
+      : startTimer(timeoutMs, () =>
+          controller.abort(new DOMException("The operation timed out.", "TimeoutError")),
         );
   return {
     signal: controller.signal,
     dispose: () => {
-      clearTimeout(timer);
+      stopTimer?.();
       cancel?.removeEventListener("abort", onCancel);
     },
   };

@@ -1,5 +1,4 @@
-import type { DagFs } from "../cache.ts";
-import { hashBytes } from "../content-addressing.ts";
+import { hashBytes, type FileSystem } from "../cache/index.ts";
 
 /** A file of the memory filesystem. Two paths that hold one object are hard links to one file. */
 export interface MemoryFile {
@@ -8,19 +7,21 @@ export interface MemoryFile {
   mtimeMs: number;
 }
 
-export type MemoryDagFs = DagFs & {
+export type MemoryFileSystem = FileSystem & {
   files: Map<string, MemoryFile>;
   writeFile: (path: string, data: string | Uint8Array) => Promise<void>;
 };
 
 /**
- * In-memory DagFs for tests. `files` is exposed so a test can inspect or seed it directly. A
- * directory is the files under its path, so an empty one does not exist. A path is its own
- * absolute form: `resolve` returns it as given. A write to a read-only file fails with `EACCES`,
- * and each write gives its file an mtime a millisecond later than any before. A directory's mtime
- * is the one `utimes` last gave it, or else 0.
+ * The in-memory double of the cache's `FileSystem`, for tests. `files` is exposed so a test can inspect
+ * or seed it directly. A directory is the files under its path, so an empty one does not exist. A
+ * path is its own absolute form: `resolve` returns it as given. A write to a read-only file fails
+ * with `EACCES`, and each write gives its file an mtime a millisecond later than any before. A
+ * directory's mtime is the one `utimes` last gave it, or else 0.
  */
-export function createMemoryDagFs(initial: Record<string, string | Uint8Array> = {}): MemoryDagFs {
+export function createMemoryFileSystem(
+  initial: Record<string, string | Uint8Array> = {},
+): MemoryFileSystem {
   let lastMtimeMs = 0;
   const newFile = (data: string | Uint8Array): MemoryFile => ({
     data,
@@ -47,7 +48,6 @@ export function createMemoryDagFs(initial: Record<string, string | Uint8Array> =
   return {
     files,
     writeFile,
-    exists: async (path) => files.has(path),
     readText: async (path) => {
       const { data } = get(path);
       return typeof data === "string" ? data : new TextDecoder().decode(data);

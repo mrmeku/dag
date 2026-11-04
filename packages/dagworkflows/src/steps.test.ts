@@ -1,4 +1,12 @@
-import { execute, Graph, namedOutput, settled, type ExecutionListener } from "@mrmeku/dagraph";
+import {
+  execute,
+  Graph,
+  namedOutput,
+  settled,
+  startGlobalTimer,
+  wallClock,
+  type ExecutionListener,
+} from "@mrmeku/dagraph";
 import assert from "node:assert/strict";
 import { describe, test } from "node:test";
 import { addCommand } from "./commands.ts";
@@ -14,7 +22,11 @@ const newGraph = () => new Graph<Ports>();
 const parsed = async (fs: Ports["fs"], path: string): Promise<unknown> =>
   JSON.parse(await fs.readText(path));
 const executeUnder = (graph: Graph<Ports>, ports: Ports, onEvent: ExecutionListener = () => {}) =>
-  execute(graph, { ports, fs: ports.fs, clock: Date, cacheDir: CACHE_DIR }, { onEvent });
+  execute(
+    graph,
+    { ports, fs: ports.fs, clock: wallClock, startTimer: startGlobalTimer, cacheDir: CACHE_DIR },
+    { onEvent },
+  );
 
 describe("uploadArtifact", () => {
   test("dep outputs upload from the cache dir rooted at their common directory; a taken name needs overwrite; a failed settled dep is undefined and left out; no service uploads nothing; the client's response is the output", async () => {

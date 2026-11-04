@@ -4,29 +4,27 @@
  * module, so it runs where only deterministic code may, such as Temporal's workflow sandbox.
  * @module orchestration
  */
-export {
-  orchestrate,
-  type Ready,
-  type RunNode,
-  type Scheduler,
-  type SchedulerContext,
-} from "./orchestrate.ts";
-export {
-  throttledScheduler,
-  unboundedScheduler,
-  type ThrottledSchedulerOptions,
-} from "./schedulers.ts";
+export type { JsonValue } from "./json/index.ts";
 export {
   countResultsByStatus,
   isResult,
   isSucceeded,
+  orchestrate,
   requiredDeps,
   type Clock,
   type FailureError,
-  type JsonValue,
   type OrchestrationEvent,
   type OrchestrationListener,
+  type Ready,
   type Result,
+  type RunNode,
   type ScheduledNode,
+  type Scheduler,
+  type SchedulerContext,
   type Tally,
-} from "./types.ts";
+} from "./orchestration/index.ts";
+export {
+  throttledScheduler,
+  unboundedScheduler,
+  type ThrottledSchedulerOptions,
+} from "./schedulers/index.ts";

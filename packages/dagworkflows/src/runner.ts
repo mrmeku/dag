@@ -4,6 +4,7 @@ import {
   Graph,
   orchestrate,
   runNode,
+  startGlobalTimer,
   throttledScheduler,
   type ExecuteOptions,
   type Node,
@@ -258,6 +259,7 @@ export async function runWorkflow(opts: RunOptions): Promise<RunOutcome> {
         fs: ports.fs,
         cacheDir: opts.cacheDir,
         clock: ports.clock,
+        startTimer: startGlobalTimer,
         ...(opts.force && { forcedKeys: "all" }),
       },
       {
@@ -266,7 +268,7 @@ export async function runWorkflow(opts: RunOptions): Promise<RunOutcome> {
           store.onEvent(event);
           // A save carries this run's durations: they are written before its action starts.
           if (event.type === "start" && saves.has(event.node))
-            return Promise.all([history.onEvent(event), store.writeDurations()]);
+            return Promise.all([history.onEvent(event), store.writeDurations()]).then(() => {});
           return history.onEvent(event);
         },
         ...(opts.signal && { signal: opts.signal }),
@@ -344,6 +346,7 @@ async function postPass(
     fs: ports.fs,
     cacheDir: opts.cacheDir,
     clock: ports.clock,
+    startTimer: startGlobalTimer,
   };
   const runOwed = runNode(replayed, executionContext, {
     onEvent: (event) => {

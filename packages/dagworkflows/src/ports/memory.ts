@@ -1,4 +1,8 @@
-import { createMemoryDagFs, type ExecutionEvent, type MemoryDagFs } from "@mrmeku/dagraph";
+import {
+  createMemoryFileSystem,
+  type ExecutionEvent,
+  type MemoryFileSystem,
+} from "@mrmeku/dagraph";
 import { dirname } from "node:path";
 import type {
   AnnotationLevel,
@@ -6,6 +10,7 @@ import type {
   CiContext,
   Clock,
   Exec,
+  FileSystem,
   Host,
   Lockfile,
   Ports,
@@ -53,9 +58,9 @@ export function createRecordingHost(context: Partial<CiContext> = {}): RecordedH
   return rec;
 }
 
-/** A clock that reads its time from `now` and whose sleep ends at once: `clockAt(() => now)`. */
-export function clockAt(now: () => number = () => 0): Clock {
-  return { now, sleep: async () => {} };
+/** A clock that reads its time from `epochMilliseconds` and whose sleep ends at once: `clockAt(() => now)`. */
+export function clockAt(epochMilliseconds: () => number = () => 0): Clock {
+  return { epochMilliseconds, sleep: async () => {} };
 }
 
 /** Deterministic clock: each call advances by `step`, and a sleep ends at once. */
@@ -111,12 +116,13 @@ export function createTestPorts(
   } = {},
 ): {
   ports: Ports;
-  fs: MemoryDagFs;
+  fs: MemoryFileSystem & FileSystem;
   rec: RecordedHost;
   cacheStore: MemoryCacheStore;
   artifactStore: MemoryArtifactStore;
 } {
-  const fs = createMemoryDagFs(opts.files);
+  const memory = createMemoryFileSystem(opts.files);
+  const fs = { ...memory, exists: async (path: string) => memory.files.has(path) };
   const rec = createRecordingHost(opts.context);
   const cacheStore = opts.cacheStore ?? createMemoryCacheStore();
   const artifactStore = opts.artifactStore ?? createMemoryArtifactStore();

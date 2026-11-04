@@ -1,5 +1,5 @@
-import { addNode, type Graph } from "./graph/graph.ts";
-import { checkInputs } from "./graph/inputs.ts";
+import { addNode, type Graph } from "./graph.ts";
+import { checkInputs } from "./inputs.ts";
 import {
   DEP,
   depRefs,
@@ -13,7 +13,7 @@ import {
   type NodeParams,
   type NodeRef,
   type Outputs,
-} from "./graph/types.ts";
+} from "./types.ts";
 
 /** The longest delay setTimeout honors; a longer one fires at once. */
 const MAX_TIMEOUT_MS = 2_147_483_647;
@@ -66,6 +66,9 @@ export interface ActionSpec<
   timeoutMs?: number;
 }
 
+/** The context of an action as a graph holds it: any ports, any deps and any inputs. */
+export type ErasedContext = ActionContext<unknown>;
+
 /**
  * An action as a graph holds it, its types erased: the engine builds each context from its
  * node's inputs and its deps' entries, so the action takes the context of no action in particular.
@@ -74,15 +77,10 @@ export interface ErasedSpec extends Pick<
   ActionSpec<unknown, unknown, DepSpecs, InputRecord<unknown>, InputRecord, string>,
   "kind" | "cacheable" | "concurrencyGroup" | "timeoutMs"
 > {
-  inputs: Record<string, unknown>;
+  inputs: InputRecord<unknown>;
   requiredRoles: string[];
   pickedOutputs: Record<string, readonly string[]>;
-  action: (
-    context: Omit<ActionContext, "inputs" | "depOutputs"> & {
-      inputs: Record<string, unknown>;
-      depOutputs: Record<string, unknown>;
-    },
-  ) => Promise<Outputs>;
+  action: (context: ErasedContext) => Promise<Outputs>;
 }
 
 /**
@@ -124,13 +122,14 @@ function define<
     throw new RangeError(
       `${where}: timeoutMs must be a whole number of ms from 1 to ${MAX_TIMEOUT_MS}, got ${t}`,
     );
-  // eslint-disable-next-line @typescript-eslint/consistent-type-assertions -- a graph holds actions of many types as data, which erases each context's inputs, dep outputs and ports
-  const checked = {
+  const checked: ErasedSpec = {
     ...spec,
     inputs: checkInputs(spec.inputs, where),
     requiredRoles: requiredRoles(spec.deps ?? {}),
     pickedOutputs: pickedOutputs(spec.deps ?? {}),
-  } as unknown as ErasedSpec;
+    // eslint-disable-next-line @typescript-eslint/consistent-type-assertions -- a graph holds actions of many types as data, which erases each context's inputs, dep outputs and ports
+    action: spec.action as unknown as ErasedSpec["action"],
+  };
   return {
     [DEP]: true,
     addNode: <GraphPorts extends Ports, Meta, ND extends NodeDeps<D>, NI>(

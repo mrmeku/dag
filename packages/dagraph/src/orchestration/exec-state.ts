@@ -1,10 +1,5 @@
+import type { Ready } from "./ports.ts";
 import { isSucceeded, requiredDeps, type Result, type ScheduledNode } from "./types.ts";
-
-/** A node the scheduler may take: ready to be dispatched, or pending until it may take its slot. */
-export interface Ready<NodeData extends ScheduledNode = ScheduledNode> {
-  node: NodeData;
-  pending: boolean;
-}
 
 /** Build the reverse adjacency list: for each node, which nodes depend on it. */
 function buildDependents<NodeData extends ScheduledNode>(

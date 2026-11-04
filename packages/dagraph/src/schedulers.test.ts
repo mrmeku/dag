@@ -2,19 +2,18 @@ import { describe, expect, test } from "bun:test";
 import assert from "node:assert/strict";
 import { getEventListeners } from "node:events";
 
-import type { DagFs } from "./cache.ts";
-import { actionsFor } from "./define-action.ts";
-import { runNode } from "./execute.ts";
-import { Graph, nodeInputs } from "./graph/index.ts";
-import { orchestrate, type RunNode } from "./orchestrate.ts";
-import { createMemoryDagFs } from "./ports/memory-fs.ts";
+import type { FileSystem } from "./cache/index.ts";
+import { startGlobalTimer, wallClock } from "./execute.ts";
+import { createMemoryFileSystem } from "./filesystem/index.ts";
+import { actionsFor, Graph, nodeInputs } from "./graph/index.ts";
+import { runNode } from "./lookup-or-run/index.ts";
+import type { Result, ScheduledNode } from "./orchestration/index.ts";
+import { errorMessage, orchestrate, type RunNode } from "./orchestration/index.ts";
 import {
   throttledScheduler,
   unboundedScheduler,
   type ThrottledSchedulerOptions,
-} from "./schedulers.ts";
-import type { Result, ScheduledNode } from "./types.ts";
-import { errorMessage } from "./utils.ts";
+} from "./schedulers/index.ts";
 
 /** What a node of the harness made: whether it ran or was a hit. */
 type Made = "ran" | "hit";
@@ -39,7 +38,7 @@ function harness(
     await new Promise<void>((resolve) => finishers.set(node.name, resolve));
     return { name: node.name, status: "succeeded", details: "ran" };
   };
-  const done = orchestrate(nodes, run, throttledScheduler(opts), Date, (e) => {
+  const done = orchestrate(nodes, run, throttledScheduler(opts), wallClock, (e) => {
     if (e.type === "dispatch") log.push(`dispatch ${e.node}`);
     if (e.type === "result")
       log.push(`${e.result.status === "succeeded" ? e.result.details : e.result.status} ${e.node}`);
@@ -212,8 +211,8 @@ describe("orchestrate", () => {
 
   test("refuses nodes whose deps it was not given, naming them", async () => {
     const nodes = [node("a", undefined, ["x"]), node("b"), node("c", undefined, ["y", "b", "z"])];
-    const refused = await orchestrate(nodes, done, unboundedScheduler(), Date).catch((e: unknown) =>
-      errorMessage(e),
+    const refused = await orchestrate(nodes, done, unboundedScheduler(), wallClock).catch(
+      (e: unknown) => errorMessage(e),
     );
     expect(refused).toBe(
       'orchestrate: nodes depend on nodes it was not given: "a" needs "x"; "c" needs "y", "z"',
@@ -230,7 +229,7 @@ describe("orchestrate", () => {
         return done(n);
       },
       unboundedScheduler(),
-      Date,
+      wallClock,
       (event) => {
         if (event.type === "dispatch" && event.node === "a") throw new Error("dispatch of a");
         if (event.type === "result" && event.node === "b") throw new Error("result of b");
@@ -258,7 +257,7 @@ describe("orchestrate", () => {
       [node("first"), later],
       run,
       unboundedScheduler(),
-      Date,
+      wallClock,
       undefined,
       controller.signal,
     );
@@ -273,10 +272,16 @@ describe("orchestrate", () => {
   });
 
   test("with runNode given no signal, a cancel still ends a pending miss's wait: it settles cancelled", async () => {
-    const fs = createMemoryDagFs();
-    const ctx = { ports: { fs }, fs, cacheDir: "/cache", clock: Date };
+    const fs = createMemoryFileSystem();
+    const ctx = {
+      ports: { fs },
+      fs,
+      cacheDir: "/cache",
+      clock: wallClock,
+      startTimer: startGlobalTimer,
+    };
     const controller = new AbortController();
-    const defineActionWithPorts = actionsFor<{ fs: DagFs }, "heavy">();
+    const defineActionWithPorts = actionsFor<{ fs: FileSystem }, "heavy">();
     const heavy = defineActionWithPorts({
       kind: "heavy",
       nodeInputs: nodeInputs<{ id: number }>,
@@ -288,14 +293,14 @@ describe("orchestrate", () => {
         return { file: `${c.outputDir}/f` };
       },
     });
-    const g = new Graph<{ fs: DagFs }>();
+    const g = new Graph<{ fs: FileSystem }>();
     heavy.addNode(g, { name: "holder", inputs: { id: 1 } });
     heavy.addNode(g, { name: "waiter", inputs: { id: 2 } });
     const results = await orchestrate(
       g.describe(),
       runNode(g, ctx),
       throttledScheduler({ concurrencyLimits: { heavy: 1 } }),
-      Date,
+      wallClock,
       undefined,
       controller.signal,
     );

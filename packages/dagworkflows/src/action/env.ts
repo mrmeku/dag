@@ -7,7 +7,6 @@
 import { DefaultArtifactClient } from "@actions/artifact";
 import * as cache from "@actions/cache";
 import * as core from "@actions/core";
-import { createNodeDagFs } from "@mrmeku/dagraph/fs/node";
 import { registerHooks } from "node:module";
 import { resolve } from "node:path";
 import { pathToFileURL } from "node:url";
@@ -20,7 +19,7 @@ import {
 } from "../ports/artifact-store.ts";
 import { createActionsCacheStore, nullCacheStore } from "../ports/cache-store.ts";
 import { createGithubHost } from "../ports/github.ts";
-import { createExec, systemClock } from "../ports/real.ts";
+import { createExec, createFileSystem, systemClock } from "../ports/real.ts";
 import type { RunOptions } from "../runner.ts";
 import { workflowDefOf } from "../workflow.ts";
 
@@ -53,7 +52,7 @@ export async function actionOptions(bundleUrl: string): Promise<RunOptions> {
     workflowFile: file,
     ports: {
       exec: createExec(),
-      fs: createNodeDagFs(),
+      fs: createFileSystem(),
       clock: systemClock(),
       host,
       cacheStore: cache.isFeatureAvailable() ? createActionsCacheStore(cache) : nullCacheStore,

@@ -1,8 +1,4 @@
-/**
- * Draws a graph as a Mermaid flowchart. Published as `@mrmeku/dagraph/mermaid`, beside the engine:
- * it reads only `graph.describe()`, so a team can copy and change it.
- */
-import type { ScheduledNode } from "./types.ts";
+import type { ScheduledNode } from "../orchestration/index.ts";
 
 export interface MermaidOptions<NodeData extends ScheduledNode = ScheduledNode> {
   /** Text inside a node's box. Default: its full name. */

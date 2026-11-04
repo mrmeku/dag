@@ -1,18 +1,21 @@
-import type { Graph, Node } from "./graph/index.ts";
-import { orchestrate, type RunNode, type Scheduler } from "./orchestrate.ts";
+import type { Graph } from "./graph/index.ts";
 import {
-  lookupNode,
-  runAction,
+  runNode,
   type ActionEvent,
   type CancelledNodeDetails,
   type ExecutionContext,
   type FailedNodeDetails,
   type NodeResult,
-  type RunActionOptions,
+  type StartTimer,
   type SucceededNodeDetails,
-} from "./process-node.ts";
-import { unboundedScheduler } from "./schedulers.ts";
-import type { OrchestrationEvent } from "./types.ts";
+} from "./lookup-or-run/index.ts";
+import {
+  orchestrate,
+  type Clock,
+  type OrchestrationEvent,
+  type Scheduler,
+} from "./orchestration/index.ts";
+import { unboundedScheduler } from "./schedulers/index.ts";
 
 /** One stream of what happens in an execution: orchestration's events and lookup-or-run's. */
 export type ExecutionEvent<Meta = unknown> =
@@ -23,7 +26,9 @@ export type ExecutionEvent<Meta = unknown> =
  * Receives each `ExecutionEvent`, as an `OrchestrationListener` receives orchestration's and an
  * `ActionListener` lookup-or-run's.
  */
-export type ExecutionListener<Meta = unknown> = (event: ExecutionEvent<Meta>) => unknown;
+export type ExecutionListener<Meta = unknown> = (
+  event: ExecutionEvent<Meta>,
+) => void | Promise<void>;
 
 /** The options of one execution. The execution context outlives it. */
 export interface ExecuteOptions<Meta = unknown> {
@@ -37,9 +42,22 @@ export interface ExecuteOptions<Meta = unknown> {
   signal?: AbortSignal;
 }
 
+/** `Clock` from the global `Date`: what an `ExecutionContext` takes outside a test. */
+export const wallClock: Clock = {
+  // eslint-disable-next-line no-restricted-syntax -- the wall clock is what reads Date
+  epochMilliseconds: () => Date.now(),
+};
+
+/** `StartTimer` from the global timers: what an `ExecutionContext` takes outside a test. */
+export const startGlobalTimer: StartTimer = (ms, onTimeout) => {
+  const timer = setTimeout(onTimeout, ms);
+  return () => clearTimeout(timer);
+};
+
 /**
- * Run a graph in one process: orchestration, and each node processed in the same process with
- * the same graph and `onEvent`. Returns one result per node, in the order they settled.
+ * Run a graph in one process: orchestration, with lookup-or-run's `runNode` looking up and running
+ * each node in the same process with the same graph and `onEvent`. Returns one result per node,
+ * in the order they settled.
  */
 export function execute<Ports, Meta>(
   graph: Graph<Ports, Meta>,
@@ -52,29 +70,4 @@ export function execute<Ports, Meta>(
     ...(onEvent && { onEvent }),
   });
   return orchestrate(graph.describe(), run, scheduler, executionContext.clock, onEvent, signal);
-}
-
-/**
- * The `RunNode` that `execute` uses: each node of `graph` processed in this process, its lookup
- * first, given its deps' entries, and, on a miss, its action once the scheduler lets it run. A
- * cancel while it waits settles it `cancelled`.
- */
-export function runNode<Ports, Meta>(
-  graph: Graph<Ports, Meta>,
-  executionContext: ExecutionContext<NoInfer<Ports>>,
-  options: RunActionOptions<Meta> = {},
-): RunNode<Node<Meta>, SucceededNodeDetails, FailedNodeDetails, CancelledNodeDetails> {
-  return async (node, depDetails, waitForScheduler) => {
-    const depEntries = Object.fromEntries(
-      Object.entries(depDetails).map(([dep, details]) => [dep, details.entry]),
-    );
-    const found = await lookupNode(graph, node.name, depEntries, executionContext);
-    if (found.status !== "missed") return found;
-    try {
-      await waitForScheduler();
-    } catch {
-      return { name: found.name, status: "cancelled", details: { actionKey: found.actionKey } };
-    }
-    return runAction(graph, found, depEntries, executionContext, options);
-  };
 }

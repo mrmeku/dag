@@ -1,11 +1,12 @@
-import type { CacheEntry } from "../cache.ts";
-import { errorMessage, isPlainObject } from "../utils.ts";
+import { isPlainObject } from "../json/index.ts";
 import {
   isFileInput,
   isIdentifier,
+  isInputList,
   isOutputRef,
   type AnyOutputRef,
   type InputRecord,
+  type InputValue,
 } from "./types.ts";
 
 /**
@@ -13,7 +14,7 @@ import {
  * type sees is refused by its path: `NaN`, `Infinity`, an object that is not plain, and a value
  * that a narrower type hides: a function, a symbol, a bigint, and `undefined` in a list.
  */
-function jsonValue(value: unknown, path: string): unknown {
+function jsonValue(value: unknown, path: string): InputValue<unknown> {
   switch (typeof value) {
     case "string":
     case "boolean":
@@ -37,7 +38,7 @@ function jsonValue(value: unknown, path: string): unknown {
   }
 }
 
-function jsonObject(value: object, path: string): unknown {
+function jsonObject(value: object, path: string): InputValue<unknown> {
   if (Array.isArray(value)) return value.map((item, i) => jsonValue(item, `${path}[${i}]`));
   if (!isPlainObject(value)) {
     const name = path.slice(path.lastIndexOf(".") + 1);
@@ -63,7 +64,7 @@ function jsonObject(value: object, path: string): unknown {
 export function checkInputs(
   inputs: InputRecord<unknown> | undefined | (() => InputRecord<unknown> | undefined),
   where: string,
-): Record<string, unknown> {
+): InputRecord<unknown> {
   try {
     return Object.fromEntries(
       Object.entries((typeof inputs === "function" ? inputs() : inputs) ?? {})
@@ -71,39 +72,21 @@ export function checkInputs(
         .map(([name, v]) => [name, isFileInput(v) ? v : jsonValue(v, `inputs.${name}`)]),
     );
   } catch (e) {
-    throw new Error(`${where}: ${errorMessage(e)}`);
+    throw new Error(`${where}: ${e instanceof Error ? e.message : String(e)}`);
   }
 }
 
 /** A value as JSON with sorted keys, each output ref as `#ref(...)`, which no JSON value spells. */
-export function canonical(value: unknown, refKey: (ref: AnyOutputRef) => string): string {
+export function canonical(
+  value: InputValue<unknown> | undefined,
+  refKey: (ref: AnyOutputRef) => string,
+): string {
   if (isOutputRef(value)) return `#ref(${refKey(value)})`;
-  if (Array.isArray(value)) return `[${value.map((v) => canonical(v, refKey)).join(",")}]`;
+  if (isInputList(value)) return `[${value.map((v) => canonical(v, refKey)).join(",")}]`;
   if (typeof value === "object" && value !== null)
     return `{${Object.entries(value)
       .sort(([a], [b]) => (a < b ? -1 : 1))
       .map(([k, v]) => `${JSON.stringify(k)}:${canonical(v, refKey)}`)
       .join(",")}}`;
   return JSON.stringify(value);
-}
-
-/** A value as the action reads it: each output ref replaced by its dep's committed files' handles. */
-export function resolveValue(
-  value: unknown,
-  depEntries: Record<string, CacheEntry>,
-  handle: (path: string) => unknown,
-): unknown {
-  if (isOutputRef(value)) {
-    const entry = depEntries[value.node];
-    if (entry === undefined) return undefined;
-    const paths = entry.outputs[value.output];
-    if (paths === undefined) throw new Error(`"${value.node}" has no output "${value.output}"`);
-    return Array.isArray(paths) ? paths.map(handle) : handle(paths);
-  }
-  if (Array.isArray(value)) return value.map((v) => resolveValue(v, depEntries, handle));
-  if (typeof value === "object" && value !== null)
-    return Object.fromEntries(
-      Object.entries(value).map(([k, v]) => [k, resolveValue(v, depEntries, handle)]),
-    );
-  return value;
 }

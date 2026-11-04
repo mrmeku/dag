@@ -1,11 +1,13 @@
 import { describe, expect, test } from "bun:test";
 import assert from "node:assert/strict";
 
-import type { DagFs } from "./cache.ts";
-import { actionsFor, defineAction, type Action } from "./define-action.ts";
-import { execute } from "./execute.ts";
+import type { FileSystem } from "./cache/index.ts";
+import { execute, startGlobalTimer, wallClock } from "./execute.ts";
+import { createMemoryFileSystem } from "./filesystem/index.ts";
 import {
+  actionsFor,
   closure,
+  defineAction,
   dep,
   file,
   Graph,
@@ -13,22 +15,22 @@ import {
   nodeInputs,
   pick,
   settled,
+  type Action,
   type DepSpecs,
   type FileInput,
   type InputValue,
   type NodeRef,
   type OutputRef,
 } from "./graph/index.ts";
-import { createMemoryDagFs } from "./ports/memory-fs.ts";
-import { processNode, resultActionKey, type NodeResult } from "./process-node.ts";
-import { errorMessage } from "./utils.ts";
+import { lookupOrRunNode, resultActionKey, type NodeResult } from "./lookup-or-run/index.ts";
+import { errorMessage } from "./orchestration/index.ts";
 
 /** How a node settled: its status, or whether its action ran when it succeeded. */
 const outcome = (r: NodeResult) =>
   r.status === "succeeded" ? (r.details.actionRan ? "ran" : "hit") : r.status;
 
 interface Ports {
-  fs: DagFs;
+  fs: FileSystem;
 }
 type Meta = { video: string } | { channel: true };
 
@@ -93,8 +95,11 @@ function channel(videoIds: string[]) {
 }
 
 function setup() {
-  const fs = createMemoryDagFs();
-  return { fs, ctx: { ports: { fs }, fs, cacheDir: "/cache", clock: Date } };
+  const fs = createMemoryFileSystem();
+  return {
+    fs,
+    ctx: { ports: { fs }, fs, cacheDir: "/cache", clock: wallClock, startTimer: startGlobalTimer },
+  };
 }
 
 const refusal = (declare: () => unknown) => {
@@ -312,7 +317,7 @@ describe("graphs", () => {
     });
   });
 
-  test("processNode finds a node by name in any graph that declares it the same way, and refuses a name the graph does not hold", async () => {
+  test("lookupOrRunNode finds a node by name in any graph that declares it the same way, and refuses a name the graph does not hold", async () => {
     const { ctx } = setup();
     const results = await execute(channel(["v1", "v2"]), ctx);
     const entryOf = (name: string) => {
@@ -321,18 +326,18 @@ describe("graphs", () => {
     };
     const oneVideo = new Graph<Ports, Meta>();
     addVideo(oneVideo, "v2");
-    const viaOneVideo = await processNode(oneVideo, "v2:download", {}, ctx);
-    const failedDep = await processNode(oneVideo, "v2:captions", {}, ctx);
+    const viaOneVideo = await lookupOrRunNode(oneVideo, "v2:download", {}, ctx);
+    const failedDep = await lookupOrRunNode(oneVideo, "v2:captions", {}, ctx);
     const downloadEntry = entryOf("v2:download");
     assert.ok(downloadEntry, "v2:download's entry");
-    const settledMissing = await processNode(
+    const settledMissing = await lookupOrRunNode(
       oneVideo,
       "v2:entry",
       { "v2:download": downloadEntry },
       ctx,
     );
     let refused = "";
-    await processNode(oneVideo, "v1:download", {}, ctx).catch(
+    await lookupOrRunNode(oneVideo, "v1:download", {}, ctx).catch(
       (e: unknown) => (refused = errorMessage(e)),
     );
     const downloaded = results.find((r) => r.name === "v2:download");
@@ -673,8 +678,9 @@ export function wrongDeclarationsDoNotCompile() {
   feed.addNode(new Graph(), {});
   // @ts-expect-error ports that do not satisfy the graph's
   void execute(g, {
-    fs: createMemoryDagFs(),
-    clock: Date,
+    fs: createMemoryFileSystem(),
+    clock: wallClock,
+    startTimer: startGlobalTimer,
     cacheDir: "/cache",
   });
   // @ts-expect-error a graph typed as one that needs no ports: <P extends Ports>(graph: Graph<P>)

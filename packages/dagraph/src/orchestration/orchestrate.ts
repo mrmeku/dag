@@ -1,51 +1,14 @@
-import { ExecState, type Ready } from "./exec-state.ts";
+import { failureErrorOf } from "./errors.ts";
+import { ExecState } from "./exec-state.ts";
 import type {
   Clock,
-  OrchestrationEvent,
   OrchestrationListener,
-  Result,
-  ScheduledNode,
-} from "./types.ts";
-import { errorOf } from "./utils.ts";
-
-export type { Ready } from "./exec-state.ts";
-
-/**
- * Runs one node somewhere, given the details of its deps that succeeded by dep name, and returns
- * its result. Before the work that needs a slot it awaits `waitForScheduler`, which resolves once
- * the scheduler lets it run, and rejects once the execution is cancelled. A rejection of `RunNode`
- * settles the node `failed`, with no details, or `cancelled` once the execution is cancelled.
- */
-export type RunNode<
-  NodeData extends ScheduledNode,
-  SuccessDetails,
-  FailureDetails,
-  CancellationDetails,
-> = (
-  node: NodeData,
-  depDetails: Record<string, SuccessDetails>,
-  waitForScheduler: () => Promise<void>,
-) => Promise<Result<SuccessDetails, FailureDetails, CancellationDetails>>;
-
-/**
- * What a scheduler drives. `take` returns the first ready node, in orchestration's order, that
- * `filter` admits: a node comes once when it is ready and, when it waits for its slot and it has
- * a concurrency group, again `pending`. `run` dispatches a ready node, or lets a pending one run; it resolves once the node settles or, as it begins to pend, gives its place back. `workAvailable` resolves when that may have changed what `take` returns.
- */
-export interface SchedulerContext<NodeData extends ScheduledNode = ScheduledNode> {
-  take(filter?: (ready: Ready<NodeData>) => boolean): Ready<NodeData> | null;
-  run(ready: Ready<NodeData>): Promise<void>;
-  hasWork(): boolean;
-  workAvailable(): Promise<void>;
-}
-
-/**
- * The policy that admits ready nodes. It takes them in orchestration's order and only filters
- * it: it may hold a node back, but never reorders them.
- */
-export type Scheduler = <NodeData extends ScheduledNode>(
-  ctx: SchedulerContext<NodeData>,
-) => Promise<void>;
+  Ready,
+  RunNode,
+  Scheduler,
+  SchedulerContext,
+} from "./ports.ts";
+import type { OrchestrationEvent, Result, ScheduledNode } from "./types.ts";
 
 /**
  * The scheduling half of `execute`, for an executor that processes nodes elsewhere. It works on
@@ -110,7 +73,13 @@ export async function orchestrate<
   const meta = (node: ScheduledNode<Meta>) => (node.meta === undefined ? {} : { meta: node.meta });
   const settle = (node: NodeData, result: Settled) => {
     state.settle(node, result);
-    emit({ type: "result", node: node.name, ...meta(node), result, occurredAt: clock.now() });
+    emit({
+      type: "result",
+      node: node.name,
+      ...meta(node),
+      result,
+      occurredAt: clock.epochMilliseconds(),
+    });
     releasePlace(node.name);
     wake();
   };
@@ -133,7 +102,12 @@ export async function orchestrate<
       return new Promise<void>((resolve, reject) => {
         pendingRuns.set(node.name, { resolve, reject });
         state.waitForScheduler(node);
-        emit({ type: "pending", node: node.name, ...meta(node), occurredAt: clock.now() });
+        emit({
+          type: "pending",
+          node: node.name,
+          ...meta(node),
+          occurredAt: clock.epochMilliseconds(),
+        });
         releasePlace(node.name);
         wake();
       });
@@ -165,12 +139,17 @@ export async function orchestrate<
         settle(node, { name: node.name, status: "dep-failed", dep, rootCauses });
         return place;
       }
-      emit({ type: "dispatch", node: node.name, ...meta(node), occurredAt: clock.now() });
+      emit({
+        type: "dispatch",
+        node: node.name,
+        ...meta(node),
+        occurredAt: clock.epochMilliseconds(),
+      });
       processing++;
       void run(node, state.depDetails(node), waitForSchedulerOf(node))
         .catch((e: unknown): Settled => {
           if (signal?.aborted) return { name: node.name, status: "cancelled" };
-          return { name: node.name, status: "failed", error: errorOf(e) };
+          return { name: node.name, status: "failed", error: failureErrorOf(e) };
         })
         .then((result) => {
           processing--;

@@ -769,7 +769,7 @@ A process killed outright (`kill -9`) runs no handler: its history stays with a 
 stale, and its commands' process groups keep running.
 
 Where it lives: `ports/real.ts`, `runner.ts`, `cli.ts`, `action/main.ts`, `config.ts`; the
-cancel rules of the engine in dagraph's `process-node.ts` and `orchestrate.ts` ([dagraph-execution](dagraph-execution.md) domain).
+cancel rules of the engine in dagraph's `lookup-or-run/lookup-or-run.ts` and `orchestration/orchestrate.ts` ([dagraph-execution](dagraph-execution.md) domain).
 
 ## Timeouts
 
@@ -800,7 +800,7 @@ cancel (SIGINT, SIGTERM, SIGKILL). Then:
   it does not rebuild anything.
 - For a post, the timeout covers all its tries and the waits between them, and ends the retries.
 
-Where it lives: dagraph `process-node.ts` (the signal), `kernel/run-slice.ts` (the message),
+Where it lives: dagraph `lookup-or-run/lookup-or-run.ts` (the signal), `kernel/run-slice.ts` (the message),
 `github/renderer.ts` (the check conclusion); test `runner.test.ts` ("timeoutMs").
 
 ## Exit codes and the outcome
@@ -1141,8 +1141,10 @@ Everything a run touches outside itself goes through `Ports`:
   `not-started`, with code -1, when its program could not be spawned, with
   `spawn <program> <code>` as `stderr` and `output` (e.g. `spawn bash ENOENT`), or when the signal
   had already fired. A custom `Exec` must set it.
-- `fs`: dagraph's `DagFs`.
-- `clock` (`Clock`): dagraph's `Clock`, `now()`, and `sleep(ms, signal?)`, which ends early when
+- `fs` (`FileSystem`): dagraph's `FileSystem`, the cache's file system port, and `exists(path)`, whether
+  something is at `path`. `createFileSystem()` is the real one: dagraph's Node adapter, with
+  `exists` from `access`.
+- `clock` (`Clock`): dagraph's `Clock`, `epochMilliseconds()`, and `sleep(ms, signal?)`, which ends early when
   the signal fires.
   The runner gives it to dagraph as the execution's clock, so it stamps every engine event and
   times every action, in the run and in the post pass.
@@ -1189,7 +1191,8 @@ from. Options: `exec`, `clock`, `env`, `files` (initial in-memory files, path to
 - `ports`: with `exec` = `okExec` (every command succeeds silently) unless given, `clock` =
   `steppingClock()` unless given, an in-memory file system, a recording host, in-memory cache and
   artifact stores, an in-memory lockfile, and `env` = `{}`.
-- `fs`: the in-memory file system (dagraph's `MemoryDagFs`; `fs.files` is a map you can inspect).
+- `fs`: the in-memory file system (dagraph's `MemoryFileSystem`, with `exists`; `fs.files` is a map you
+  can inspect).
 - `rec`: the `RecordedHost`.
 - `cacheStore`, `artifactStore`: the in-memory stores.
 
@@ -1200,11 +1203,11 @@ creating them to script a test.
   as `{ title, lines }`, a plain line as a string), `annotations` (`{ level, title, message }`),
   `summaries` (markdown strings) and `checks` (check-run updates). Its context has provider
   `recording` and empty fields unless overridden.
-- `steppingClock(start = 0, step = 1000)`: each `now()` returns the next time, `start` first, then
+- `steppingClock(start = 0, step = 1000)`: each `epochMilliseconds()` returns the next time, `start` first, then
   `step` ms later each call; sleeps end at once. dagraph reads it for each event it stamps and
   at an action's start and end, so a test's times count those reads: an action that printed
   nothing as it ran takes `1.0s`.
-- `clockAt(now = () => 0)`: a clock that reads `now()` from the given function; sleeps end at
+- `clockAt(epochMilliseconds = () => 0)`: a clock that reads `epochMilliseconds()` from the given function; sleeps end at
   once.
 - `okExec`: an `Exec` whose every command exits 0 with no output.
 

@@ -165,7 +165,7 @@ So `workflow.ctx.ref === "refs/heads/main"` is true both on a push to main and o
 
 A `WorkflowPorts`: every port of the run but `exec`. A workflow and an action read:
 
-- `fs`: dagraph's file system port (`exists`, `readText`, `writeText`, which makes parent directories, `hashFile`, `ensureDir`, `rename`, `remove`, `lstat`, `chmod`, `fsync`, `utimes`, `readdir`, `resolve`).
+- `fs`: a `FileSystem`, dagraph's `FileSystem` plus `exists` (`exists`, `readText`, `writeText`, which makes parent directories, `hashFile`, `ensureDir`, `rename`, `remove`, `lstat`, `chmod`, `fsync`, `utimes`, `readdir`, `resolve`).
 - `env`: the process environment (`process.env` in the CLI and the action). Read it at build time and put what matters in `inputs`: `inputs: { mixEnv: workflow.ports.env.MIX_ENV ?? null }`. Nothing reads it for you; a command inherits the real process environment regardless.
 - `clock`, `host`, `cacheStore`, `artifactStore`, `lockfile`: the run's other ports. A workflow rarely touches them; the built-in tasks use them.
 
@@ -421,7 +421,7 @@ Consequences an author meets:
 
 A task with no inputs and no `cacheable: true` has a key all the same: its log is stored under it ([dagworkflows-output](dagworkflows-output.md)).
 
-Where it lives: `task.ts`, `commands.ts`, dagraph `content-addressing.ts` and `process-node.ts`.
+Where it lives: `task.ts`, `commands.ts`, dagraph `graph/action-key.ts` and `lookup-or-run/lookup-or-run.ts`.
 
 ## Outputs
 
@@ -452,7 +452,7 @@ A task joins a group with `concurrencyGroup: "test"`. Groups are checked by the 
 
 A task's duration counts from its action's start, never from its wait for a slot.
 
-Where it lives: `workflow.ts` (`GroupsOf`), dagraph `schedulers.ts`.
+Where it lives: `workflow.ts` (`GroupsOf`), dagraph `schedulers/schedulers.ts`.
 
 ## Helpers and composing workflows
 

@@ -369,7 +369,7 @@ describe("a release that fails", () => {
       // A wait that lasts until the release's timeout aborts it.
       const { ports } = createTestPorts({
         clock: {
-          now: () => 0,
+          epochMilliseconds: () => 0,
           sleep: (_ms, signal) =>
             new Promise((resolve) => signal?.addEventListener("abort", () => resolve())),
         },

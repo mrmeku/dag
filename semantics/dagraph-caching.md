@@ -14,64 +14,40 @@ Core idea: a node's key is built from its action's kind, its inputs and the cont
 
 ## Terms
 
-- **Action key** (`actionKey` on a `NodeResult`'s details, which `resultActionKey` finds on any status): a 64-character lowercase SHA-256 hex string. It names the node's work and its directory in the cache. A result has none when the node never got one: a required dep did not succeed, the key could not be computed, or the execution was cancelled before the node was processed.
+- **Action key** (`actionKey` on a `NodeResult`'s details, which `resultActionKey` finds on any status): a 64-character lowercase SHA-256 hex string. It names the node's work and its directory in the cache. A result has none when the node never got one: a required dep did not succeed, the key could not be computed, or the execution was cancelled before the node was dispatched. Graph computes it ([dagraph-graphs](dagraph-graphs.md), "The action key: exactly what is hashed").
 - **Cache entry** (type `CacheEntry`): `{ outputs, contentHash, outputHashes }`. `outputs` holds the files the action returned, in the record it returned: each value a path or a list of paths. `contentHash` is the hash of those files, and `outputHashes` holds each output's own hash, by name (see below). A result that succeeded carries its entry as `details.entry`.
 - **Content hash**: a SHA-256 hex string over each output's name, each file's path relative to its output directory, and each file's bytes.
-- **Cache directory** (`cacheDir` in the execution context): the root of the cache. Its `v1/` holds a directory per key, with the key's entry as `manifest.json` and each entry's files in a **content directory** named by its content hash; its `tmp/` holds what is not committed yet. The engine reads and writes all of it through the context's `DagFs`: usually the local disk (`createNodeDagFs`, `createBunDagFs`), but possibly memory (`createMemoryDagFs`).
+- **Cache directory** (`cacheDir` in the execution context): the root of the cache. Its `v1/` holds a directory per key, with the key's entry as `manifest.json` and each entry's files in a **content directory** named by its content hash; its `tmp/` holds what is not committed yet. The engine reads and writes all of it through the context's `fs`, which fills the cache's `FileSystem` port: usually the local disk (`createNodeFileSystem`, `createBunFileSystem`), but possibly memory (`createMemoryFileSystem`).
 - **Last use**: the mtime a prune judges by ("Pruning"). A hit sets its manifest's, and a commit its content directory's, to the context's `clock` time, best effort: a stamp that fails changes no result.
-- **DagFs**: the filesystem port the engine does all its file I/O through.
+- **`FileSystem`**: the cache's port, the filesystem the engine does all its file I/O through ("The cache's `FileSystem` port").
 
-## Where caching sits in processing a node
+## `cache/` (port: `FileSystem`)
 
-When the engine processes a node, these steps happen in this order. `execute` calls it only for the nodes that `orchestrate` dispatches: a node whose required dep failed is settled `dep-failed` by `orchestrate` before dispatch, and a node still waiting when the execution is cancelled is settled `cancelled` the same way. Neither gets a key, and neither reaches the steps below.
+`cache/` hashes outputs and owns the entries, the layout of the cache directory, commits and pruning, under a key it is given and never computes. It reads no clock: lookup-or-run hands it the time, read from the context's `clock`, for each last use it stamps, and tells a commit whether to write the key's manifest, which it does unless the node is `cacheable: false`. Its port is `FileSystem` ("The cache's `FileSystem` port"), declared in `cache/ports.ts` with `Stats`, the part of `lstat`'s result it reads, and `isMissingFileError`, which tells a read that failed for want of a file. Its one import edge is `graph/`, for `Outputs` and the walks over their paths, and for `HashFile`, which `FileSystem.hashFile` is. Its `index.ts` exports `lookupEntry`, `commitEntry`, `newStagingDir`, `discard`, `pruneCache`, `isCacheEntry`, `hashBytes`, `isMissingFileError` and the types `CacheEntry`, `PruneOptions`, `FileSystem` and `Stats`, for lookup-or-run and the filesystems; the package publishes `pruneCache`, `CacheEntry`, `PruneOptions` and `FileSystem`. The sections from here to "Finding out why a node reran" describe it and how lookup-or-run uses it.
 
-`lookupNode` takes the first three steps and `runAction` the last two. `processNode` runs both, and `runNode`, the `RunNode` that `execute` uses, waits for the scheduler between them ([dagraph-execution](dagraph-execution.md)).
+Where it lives: `packages/dagraph/src/cache/index.ts`, `packages/dagraph/src/cache/cache.ts`, `packages/dagraph/src/cache/content-addressing.ts`, `packages/dagraph/src/cache/ports.ts`.
+
+## Where caching sits in looking a node up and running it
+
+When lookup-or-run looks a node up and runs it ([dagraph-execution](dagraph-execution.md)), these steps happen in this order. `execute` calls it only for the nodes that `orchestrate` dispatches: a node whose required dep failed is settled `dep-failed` by `orchestrate` before dispatch, and a node still waiting when the execution is cancelled is settled `cancelled` the same way. Neither gets a key, and neither reaches the steps below.
+
+`lookupNode` takes the first three steps and `runAction` the last two. `lookupOrRunNode` runs both, and `runNode`, the `RunNode` that `execute` uses, waits for the scheduler between them ([dagraph-execution](dagraph-execution.md)).
 
 1. **Required deps.** `lookupNode` repeats the check for executors that call it directly. If a required dep (any dep not marked `settled`) has no entry in the `depEntries` it was given, the node settles `dep-failed` with `dep` set to that dep's name and no key. Nothing is hashed.
-2. **Key.** The engine hashes every file input, then builds the key. If a file cannot be read, the node settles `failed` with no details, so no key. The message is the file system's, such as `ENOENT: /missing.ts`.
+2. **Key.** The engine hashes every file input, then builds the key ([dagraph-graphs](dagraph-graphs.md), "The action key: exactly what is hashed"). If a file cannot be read, the node settles `failed` with no details, so no key. The message is the file system's, such as `ENOENT: /missing.ts`.
 3. **Lookup.** This step is skipped when the node is `cacheable: false` or its key is forced. The engine reads the key's `manifest.json`. One that is missing, cannot be read, is not JSON, or is not `{ outputs, contentHash, outputHashes }` with outputs that are a record and hashes that are strings, or has no `fileStats` of sizes and mtimes, counts as a miss and is not an error. If an entry exists, the engine checks the files it names in its content directory (this is **verification**, see "Output verification"). If they are unchanged, the engine stamps the manifest's last use and the node settles `succeeded` with a hit's details, `{ actionKey, entry, actionRan: false }`, the entry its paths absolute, as `lookupEntry` returned it. A hit has no `elapsed` and emits no `start` event. Otherwise the lookup is a miss, `{ name, actionKey, status: "missed" }`, which is not a result: it is what `runAction` runs.
 4. **Run.** The engine creates a staging directory, `<cacheDir>/tmp/<uuid>`, emits `start`, and calls the action with `outputDir` set to its absolute form. If the directory cannot be created, or a `start` listener's promise rejects, the node fails with that error and details with its key and no `elapsed`, and the action never runs.
 5. **Commit.** The engine checks that the returned paths are under `outputDir` and name regular files, records each file's size and mtime and makes it read-only, hashes them relative to it, renames the directory to the content directory `<cacheDir>/v1/<actionKey>/<contentHash>`, stamps that directory's last use, and writes the entry with those sizes and mtimes. This last write is skipped for `cacheable: false`. The node settles `succeeded` with `{ actionKey, entry, actionRan: true, elapsed }`, the entry its paths absolute, as `commitEntry` returned it.
 
 When the action throws, times out, is cancelled, misses an output, returns a path outside `outputDir` or one that is not a regular file, or the staging directory cannot be renamed into place (see "A damaged content directory"), the staging directory is removed and no entry is written. When the entry write fails, the node fails too, but its outputs are already committed to their content directory and are not removed.
 
-Where it lives: `packages/dagraph/src/process-node.ts`, `packages/dagraph/src/cache.ts`, `packages/dagraph/src/orchestrate.ts`, `packages/dagraph/src/execute.ts`.
+Where it lives: `packages/dagraph/src/lookup-or-run/lookup-or-run.ts`, `packages/dagraph/src/cache/cache.ts`, `packages/dagraph/src/orchestration/orchestrate.ts`, `packages/dagraph/src/execute.ts`.
 
-## The action key: exactly what is hashed
+## The action key
 
-The key is the SHA-256 hex of a JSON array with three parts:
+The key is graph's: [dagraph-graphs](dagraph-graphs.md), "The action key: exactly what is hashed", says exactly what joins it and what never does. In short, it hashes the action's kind, its inputs by name, a `file()` input with its content hash, and each dep role with the hashes of the outputs it reads, and nothing else: not the node's name, its meta, the action function or how it runs. The cache never computes a key: it stores and finds entries under the key lookup-or-run gives it.
 
-    [kind, [[inputName, keyedInput], ...sorted by name], [[role, keyedDep], ...sorted by role]]
-
-**Kind.** This is the action's `kind` string. Two actions with different kinds never share an entry, even with identical inputs.
-
-**Inputs.** These are the action's own `inputs` merged with the node's own inputs. A node may not repeat a name its action declares. Doing so fails `addNode` with `node "<name>": inputs.<input> is declared by its action "<kind>". Give the node's input another name.` A property whose value is `undefined` is dropped, as if it were absent. Each remaining input is keyed one of two ways:
-
-- **A file input**, `file(path)`, keys as `["file", path, sha256OfBytes]`. The path is the string exactly as given, not resolved. So `file("bun.lock")` and `file("./bun.lock")` key differently, and so does the same path holding different bytes. The engine hashes the file each time the node is processed, after the node's deps have settled. So a node that depends on the node that writes the file sees the bytes that dep wrote, even if an earlier node in the same execution hashed the old bytes. Each node that declares a file hashes it separately.
-- **A value input** (string, finite number, boolean, `null`, or an array or plain object of these) keys as `["value", canonical]`. `canonical` is JSON with object keys sorted at every level. Array order counts. `1` and `"1"` differ. An output ref (a pointer to one named output of a dep, made by a node's `inputs` function) keys as `#ref(<JSON of [sorted roles that name that dep, outputName]>)`. That is the role it points through plus the output's name. It is never the dep node's name and never the file's content, because the dep's content is already keyed through its role. A ref to a node that two roles name keys with both roles, sorted, whichever role it was written through.
-
-  Values that are not JSON are refused when the action is defined or the node is added, naming their path. Examples: `inputs.ratio is NaN, which is not JSON. Give a finite number, or null.`, and similar messages for `Infinity`, a bigint, a symbol, a function, a class instance (`inputs.when is a Date, which is not JSON. Give a plain object of its fields: { ...when }.`), and `undefined` inside a list. These are part of [dagraph-graphs](dagraph-graphs.md). The point here is that every input that reaches the key is plain, canonical JSON.
-
-**Deps, by role.** A role is the name a node gives a dep in `deps`. Each role the node gives is keyed one of two ways:
-
-- `["outputs", [[name, hash], ...]]`: the hash of each output the role reads, from the dep's `outputHashes`, sorted by name. A role reads every output of its dep unless the action declares it with `pick`, which names the outputs it reads ("Reading part of a dependency"). A picked output the dep did not produce keys as `null`.
-- `["missing"]`: a `settled` dep that did not succeed. The node runs without it, and runs again with a new key once the dep succeeds.
-
-A `maybe` role the node leaves out is not in the key at all. Deps are keyed by role, not by node name. Renaming the dep nodes leaves the key unchanged. Swapping two deps between roles changes it.
-
-**What never joins the key:**
-
-- the node's name, or its subgraph prefix;
-- the dep nodes' names;
-- the node's `meta`;
-- the action function itself;
-- `concurrencyGroup`, `timeoutMs` and `cacheable`;
-- file handles' absolute paths, the working directory, and the machine;
-- anything the action reads without declaring it: a file opened by a path it builds itself, an environment variable, a clock, a network call through its ports. A change there reruns nothing. To make a node rerun when such a thing changes, declare it: a `file()` input, a value input, or a dep on a node that fetches it (with `cacheable: false` if it must be fetched every time).
-
-A worked check, verified by running it: an action `{ kind: "hello", inputs: { version: 1 } }` with no deps has the key `sha256(JSON.stringify(["hello", [["version", ["value", "1"]]], []]))`.
-
-Where it lives: `packages/dagraph/src/content-addressing.ts`, `packages/dagraph/src/process-node.ts`, `packages/dagraph/src/graph/inputs.ts`.
+Where it lives: `packages/dagraph/src/graph/action-key.ts`.
 
 ## Version inputs
 
@@ -87,7 +63,7 @@ The construction has changed once already. The latest version on npm, `@mrmeku/d
 
 Outputs then became a record only. An action that returned a record keeps its content hash, so its dependents keep their keys. One that returned a bare path or a list now returns a record, which hashes differently, so its dependents rerun once. Its own key does not change, but the entry it wrote holds a bare path or a list, which the lookup no longer reads as an entry: it misses and the node runs once (pinned in `dag.test.ts`). Then `invalidateOn` was removed, and a role came to key on the hashes of the outputs it reads instead of its dep's content hash. Every node with a dep gets a new key, and an entry without `outputHashes` is no longer read as an entry, so every node runs once. Whether a later release may change the construction again is not settled (see Open questions).
 
-Where it lives: `packages/dagraph/src/content-addressing.ts`, `packages/dagraph/src/dag.test.ts`.
+Where it lives: `packages/dagraph/src/graph/action-key.ts`, `packages/dagraph/src/cache/content-addressing.ts`, `packages/dagraph/src/dag.test.ts`.
 
 ## Content hash and early cutoff
 
@@ -117,8 +93,15 @@ A two-node graph: `count` counts the words of its input, `report` writes a sente
 import { mkdtemp, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { defineAction, execute, Graph, nodeInputs } from "@mrmeku/dagraph";
-import { createNodeDagFs } from "@mrmeku/dagraph/fs/node";
+import {
+  startGlobalTimer,
+  wallClock,
+  defineAction,
+  execute,
+  Graph,
+  nodeInputs,
+} from "@mrmeku/dagraph";
+import { createNodeFileSystem } from "@mrmeku/dagraph/fs/node";
 
 const count = defineAction({
   kind: "count",
@@ -141,8 +124,8 @@ const report = defineAction({
 });
 
 const cacheDir = join(await mkdtemp(join(tmpdir(), "quick-")), "cache");
-const fs = createNodeDagFs();
-const context = { fs, cacheDir, clock: Date };
+const fs = createNodeFileSystem();
+const context = { fs, cacheDir, clock: wallClock, startTimer: startGlobalTimer };
 async function run(text: string) {
   const graph = new Graph();
   report.addNode(graph, { deps: { count: count.addNode(graph, { inputs: { text } }) } });
@@ -170,7 +153,7 @@ report hit
 
 The first run runs both. The second finds both keys in the cache. The third changes `count`'s input, so `count` gets a new key and runs; it writes `3` again, its content hash is unchanged, so `report` keeps its key and is a hit: early cutoff.
 
-Where it lives: `packages/dagraph/src/content-addressing.ts`.
+Where it lives: `packages/dagraph/src/cache/content-addressing.ts`.
 
 ## Output verification
 
@@ -188,7 +171,7 @@ Two mtimes less than a millisecond apart match: a copy that keeps timestamps, su
 
 **Outputs outside the directory.** A returned path, absolute or relative (a relative path is resolved against the working directory), that does not resolve under `outputDir` fails with `output not under the output dir: <path> is not under <outputDir>`. `../sibling` and `/elsewhere` are both refused.
 
-Where it lives: `packages/dagraph/src/content-addressing.ts`, `packages/dagraph/src/cache.ts`.
+Where it lives: `packages/dagraph/src/cache/content-addressing.ts`, `packages/dagraph/src/cache/cache.ts`.
 
 ## The cache directory layout
 
@@ -209,7 +192,7 @@ Rules that always hold:
 - **Only a prune removes a content directory that verifies.** Older content directories of a key stay after a newer attempt commits. A forced rerun to different content adds another content directory and repoints the manifest. `cacheable: false` nodes commit a new content directory on every run whose content differs, and they never have a manifest.
 - **An output named `manifest.json` is fine.** It lives inside `<contentHash>/`, not beside the entry.
 - **An entry is written whole.** The engine writes `tmp/<uuid>.json`, then renames it over the key's `manifest.json`, so a concurrent lookup finds the whole last entry or the whole new one, never half of either (pinned by a test).
-- **Paths.** The action always sees absolute paths, in `outputDir` and in file handles' `.path`. The manifest holds each path relative to its content directory, normalized, whichever form the action returned. Each process resolves `cacheDir` with its `DagFs`'s `resolve` when it looks an entry up or commits one, so results and `depEntries` hold absolute paths, into the cache where that process found it. So a relative `cacheDir`, its other spellings (`cache`, `./cache`, `cache/`) and the absolute directory it resolves to are one cache, and a cache copied or restored to another directory hits there, its results naming the copy's files (pinned by a test). A relative `cacheDir` that resolves to another directory, under another working directory, is another cache.
+- **Paths.** The action always sees absolute paths, in `outputDir` and in file handles' `.path`. The manifest holds each path relative to its content directory, normalized, whichever form the action returned. Each process resolves `cacheDir` with its `FileSystem`' `resolve` when it looks an entry up or commits one, so results and `depEntries` hold absolute paths, into the cache where that process found it. So a relative `cacheDir`, its other spellings (`cache`, `./cache`, `cache/`) and the absolute directory it resolves to are one cache, and a cache copied or restored to another directory hits there, its results naming the copy's files (pinned by a test). A relative `cacheDir` that resolves to another directory, under another working directory, is another cache.
 
 Example manifest (written with two-space indentation):
 
@@ -219,7 +202,7 @@ Example manifest (written with two-space indentation):
       "fileStats": { "page.json": { "size": 17, "mtimeMs": 1793208241958.45 } }
     }
 
-Where it lives: `packages/dagraph/src/process-node.ts`, `packages/dagraph/src/cache.ts`.
+Where it lives: `packages/dagraph/src/lookup-or-run/lookup-or-run.ts`, `packages/dagraph/src/cache/cache.ts`.
 
 ## Pruning
 
@@ -231,13 +214,13 @@ Where it lives: `packages/dagraph/src/process-node.ts`, `packages/dagraph/src/ca
 
 A key or content directory is renamed into `tmp/` before it is removed, so a lookup finds it whole or gone. A file beside the key directories, such as a Finder `.DS_Store`, is left alone. A prune is not locked against a run on the same cache: a run that uses a directory the prune read as unused, as it removes it, loses those files, and its node, or the prune, can fail.
 
-Where it lives: `packages/dagraph/src/cache.ts`.
+Where it lives: `packages/dagraph/src/cache/cache.ts`.
 
 ## Nodes that share a key
 
 The key depends only on kind, inputs and dep content. So two nodes declared the same way share one key, one directory in the cache and one entry, even under different names, in different graphs, or with different `meta`, timeouts or groups. A test pins this: node `a` in one graph runs, then a node named `v:b` in another graph, with the same kind and inputs but a different group and timeout, is a hit with `a`'s output.
 
-For the same reason `lookupNode`, `runAction` and `processNode` can be given any graph that declares the node the same way; [dagraph-execution](dagraph-execution.md) covers its graph argument and the error when the node is missing.
+For the same reason `lookupNode`, `runAction` and `lookupOrRunNode` can be given any graph that declares the node the same way; [dagraph-execution](dagraph-execution.md) covers its graph argument and the error when the node is missing.
 
 Within one execution, nodes that share a key are **not** deduplicated. If both miss, both run, each in its own `tmp/<uuid>/`:
 
@@ -254,7 +237,7 @@ A node that reads only part of one file, such as a few fields of a JSON file, st
 
 An action whose work is too costly to repeat can also skip it itself: it keeps its results in a store of its own, outside the cache, named by what it reads, and links a stored result back on a run whose part is unchanged.
 
-Where it lives: `packages/dagraph/src/process-node.ts`, `packages/dagraph/src/content-addressing.ts`, `packages/dagraph/src/graph/types.ts` (`pick`).
+Where it lives: `packages/dagraph/src/lookup-or-run/lookup-or-run.ts`, `packages/dagraph/src/graph/action-key.ts`, `packages/dagraph/src/graph/types.ts` (`pick`).
 
 ## Running a node each time: `cacheable: false`
 
@@ -302,7 +285,7 @@ dagraph keeps only the key, never what went into it. A result carries `actionKey
 
 1. **Compare the node's `actionKey` across the two executions.** A result is plain JSON, so save each execution's results to compare later. If the key is the same and the node's action ran the second time, the key did not cause the rerun. The node was forced, is `cacheable: false`, had no entry (an earlier run failed, or the cache directory is a different one), or its entry failed verification (a file was deleted or edited). `<cacheDir>/v1/<actionKey>/manifest.json` shows whether the entry exists and which files it names. If the key differs, one of its parts changed, or the dagraph version did (see "Keys across dagraph versions").
 2. **Compare the parts the reader can see.** The kind and the inputs come from the reader's own code. A role is the `outputHashes` of the outputs it reads, on that dep's result. A file input is its path as given plus the SHA-256 of its bytes.
-3. **Rebuild the whole preimage and diff it.** Built by hand from "The action key: exactly what is hashed", the preimage reproduces the engine's key exactly. `canonical` is `JSON.stringify` of the value with object keys sorted at every level, so a string `"v1"` keys as `"\"v1\""` and `1` as `"1"`. Inputs and roles are sorted with the default `sort()`. The hash is the SHA-256 hex of `JSON.stringify(preimage)`, the same from `node:crypto` (`createHash("sha256").update(text).digest("hex")`) as from `js-sha256`. Print one preimage per execution and diff the two to name the part that changed.
+3. **Rebuild the whole preimage and diff it.** Built by hand from [dagraph-graphs](dagraph-graphs.md), "The action key: exactly what is hashed", the preimage reproduces the engine's key exactly. `canonical` is `JSON.stringify` of the value with object keys sorted at every level, so a string `"v1"` keys as `"\"v1\""` and `1` as `"1"`. Inputs and roles are sorted with the default `sort()`. The hash is the SHA-256 hex of `JSON.stringify(preimage)`, the same from `node:crypto` (`createHash("sha256").update(text).digest("hex")`) as from `js-sha256`. Print one preimage per execution and diff the two to name the part that changed.
 
 Verified under Bun and Node 25, against the `actionKey` of an executed node. The node is a `summarize` action with inputs `version: "v1"` and `options: { b: 1, a: [true, null] }`, a node input `config: file(<path>)`, and a role `source`. Its preimage is:
 
@@ -314,18 +297,17 @@ Verified under Bun and Node 25, against the `actionKey` of an executed node. The
 
 An output ref inside a value input appears in its `canonical` string as `#ref(<JSON of [roles, outputName]>)`.
 
-Where it lives: `packages/dagraph/src/content-addressing.ts`, `packages/dagraph/src/process-node.ts`, `packages/dagraph/src/graph/inputs.ts`, `packages/dagraph/package.json` (`exports`).
+Where it lives: `packages/dagraph/src/graph/action-key.ts`, `packages/dagraph/src/graph/inputs.ts`, `packages/dagraph/src/index.ts`, `packages/dagraph/package.json` (`exports`).
 
-## The DagFs port
+## The cache's `FileSystem` port
 
-`DagFs` is every filesystem operation the engine performs: hashing, the cache and its entries, and file handles. Each is a plain function, and the engine calls each one detached (`fs.hashFile(path)`), so an implementation must not use `this`. The members:
+`FileSystem` is every filesystem operation the engine performs: hashing, the cache and its entries, and file handles. The cache declares it, and lookup-or-run imports it to hand its files to the cache's functions and to read file handles through. Each member is a plain function, and the engine calls each one detached (`fs.hashFile(path)`), so an implementation must not use `this`. The members:
 
 | Member                     | Takes               | Gives                                                                                                                                                                                      |
 | -------------------------- | ------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `exists(path)`             | a path              | whether a file is there. Reliable only for files: the Node implementation reports true for a directory, the Bun and memory ones false for every directory. The engine never calls it.      |
 | `readText(path)`           | a path              | the file's text                                                                                                                                                                            |
 | `writeText(path, content)` | a path and a string | writes the file, creating missing parent directories in all three implementations                                                                                                          |
-| `hashFile(path)`           | a path              | the SHA-256 hex of the bytes                                                                                                                                                               |
+| `hashFile(path)`           | a path              | the SHA-256 hex of the bytes. Its type is graph's `HashFile`, so `FileSystem` fills that port for the key's `file()` inputs.                                                               |
 | `ensureDir(path)`          | a path              | makes the directory, with its parents                                                                                                                                                      |
 | `rename(from, to)`         | two paths           | POSIX rename: replaces a file at `to` atomically; fails when `to` is a non-empty directory. A commit relies on this.                                                                       |
 | `remove(path)`             | a path              | deletes a file, or a directory recursively; does nothing if it is absent                                                                                                                   |
@@ -336,31 +318,37 @@ Where it lives: `packages/dagraph/src/content-addressing.ts`, `packages/dagraph/
 | `readdir(dir)`             | a directory         | entry names; `[]` if the directory is absent                                                                                                                                               |
 | `resolve(path)`            | a path              | the absolute form, as an action sees it                                                                                                                                                    |
 
-The execution context passed to `execute`, `lookupNode`, `runAction` and `processNode` is `ExecutionContext`: `{ fs, cacheDir, clock, forcedKeys?, ports? }` ([dagraph-execution](dagraph-execution.md)). `ports` is required exactly when the graph's actions need ports. The engine passes them through untouched. The action context (`ActionContext`: `inputs`, `depOutputs`, `ports`, `outputDir`, `signal`, `output`) holds no file system, so an action writes its files any way it chooses: directly with `node:fs`, as the quick start does, or through a port, as the complete example below does. The engine then reads, hashes and moves them through the context's `fs`. The tests put the same `DagFs` in both places.
+The execution context passed to `execute`, `lookupNode`, `runAction` and `lookupOrRunNode` is `ExecutionContext`: `{ fs, cacheDir, clock, startTimer, forcedKeys?, ports? }` ([dagraph-execution](dagraph-execution.md)). Its `fs` is a `FileSystem`. `ports` is required exactly when the graph's actions need ports. The engine passes them through untouched. The action context (`ActionContext`: `inputs`, `depOutputs`, `ports`, `outputDir`, `signal`, `output`) holds no file system, so an action writes its files any way it chooses: directly with `node:fs`, as the quick start does, or through a port, as the complete example below does. The engine then reads, hashes and moves them through the context's `fs`. The tests put the same `FileSystem` in both places.
+
+Where it lives: `packages/dagraph/src/cache/ports.ts` (`FileSystem`, `Stats`, `isMissingFileError`), `packages/dagraph/src/graph/ports.ts` (`HashFile`), `packages/dagraph/src/lookup-or-run/lookup-or-run.ts` (`ExecutionContext`).
+
+## `filesystem/` (no ports: its adapters fill the cache's `FileSystem` port)
+
+`filesystem/` holds the two adapters that fill the cache's `FileSystem` port from a real disk, and the in-memory double for tests. Its one import edge is `cache/`, for `FileSystem`, `isMissingFileError` and `hashBytes`. Its `index.ts` exports the memory adapter only, and the package index re-exports it; the disk adapters are reached only through the `./fs` and `./fs/node` subpaths. `FileSystem` has no `exists`, and none of the three implements one: a caller that wants to know whether something is at a path calls `lstat`, which rejects with code `ENOENT` when nothing is.
 
 Three implementations:
 
-- **`createNodeDagFs()`**, from the `@mrmeku/dagraph/fs/node` entry point. Built on `node:fs/promises`. `writeText` creates missing parent directories with `mkdir -p`. `hashFile` streams the file through `node:crypto`.
-- **`createBunDagFs()`**, from the `@mrmeku/dagraph/fs` entry point. Built on `Bun.file`, `Bun.write` and `Bun.CryptoHasher`, so it needs the Bun runtime. `Bun.write` creates missing parent directories. Hashing streams the file.
-- **`createMemoryDagFs(initial?)`** and its type `MemoryDagFs`, from the package index. Files live in a `Map` exposed as `.files`, from path to `{ data, mode, mtimeMs }`, so a test can seed or inspect it. Two paths that hold one such object are hard links to one file, and a write changes the object, so every link sees it. `initial` is a record of path to string or bytes, each a file of mode `0o644`, and `writeFile(path, data)` writes either, as `writeText` writes text. Hashing a string hashes its UTF-8 bytes, and `lstat`'s `size` counts them. A write to a file whose mode has no owner write bit fails with code `EACCES`, as on disk, and each write gives its file an mtime a millisecond later than any before. It differs from a real disk in these ways:
-  - only files exist: a directory is just the files under its prefix, which `readdir`, `rename`, `remove`, `lstat` and `utimes` see, and `exists(dir)` is false for every directory, empty or not. A directory's mtime is the one `utimes` last gave it, or else 0. There are no symbolic links;
+- **`createNodeFileSystem()`**, from the `@mrmeku/dagraph/fs/node` entry point. Built on `node:fs/promises`. `writeText` creates missing parent directories with `mkdir -p`. `hashFile` streams the file through `node:crypto`.
+- **`createBunFileSystem()`**, from the `@mrmeku/dagraph/fs` entry point. Built on `Bun.file`, `Bun.write` and `Bun.CryptoHasher`, so it needs the Bun runtime. `Bun.write` creates missing parent directories. Hashing streams the file.
+- **`createMemoryFileSystem(initial?)`** and its type `MemoryFileSystem`, from the package index. Files live in a `Map` exposed as `.files`, from path to `{ data, mode, mtimeMs }`, so a test can seed or inspect it. Two paths that hold one such object are hard links to one file, and a write changes the object, so every link sees it. `initial` is a record of path to string or bytes, each a file of mode `0o644`, and `writeFile(path, data)` writes either, as `writeText` writes text. Hashing a string hashes its UTF-8 bytes, and `lstat`'s `size` counts them. A write to a file whose mode has no owner write bit fails with code `EACCES`, as on disk, and each write gives its file an mtime a millisecond later than any before. It differs from a real disk in these ways:
+  - only files exist: a directory is just the files under its prefix, which `readdir`, `rename`, `remove`, `lstat` and `utimes` see. A directory's mtime is the one `utimes` last gave it, or else 0. There are no symbolic links;
   - `lstat`'s `mode` holds the permission bits alone, without the file type's;
   - `ensureDir` does nothing;
   - `resolve` returns the path unchanged;
   - `rename` moves a file or every file under a directory. It throws `ENOENT: <from>` if nothing is there. When the source is a directory, it throws `ENOTEMPTY: <to>` if the target holds files. When the source is a file, it never checks the target, so renaming a file onto a non-empty directory succeeds and leaves a file and a directory sharing one name, which POSIX refuses.
 
-Why the two real ones are separate entry points: they import `node:fs`, and the package index must stay free of I/O modules because it is bundled into Temporal's workflow sandbox. Import the index for the engine and the memory filesystem; import `/fs` or `/fs/node` for disk.
+Why the two real ones are separate entry points: they import `node:fs`, and only `filesystem/` may import an I/O module, so the package index, which re-exports the memory adapter alone, loads none. Import the index for the engine and the memory filesystem; import `/fs` or `/fs/node` for disk.
 
-A file handle (what an action receives for a file input or a dep output) reads through the same `DagFs`. Its `text()` refuses a file whose bytes are not valid UTF-8, with `<abs> is not UTF-8 text: decoding it lost bytes. Hash its bytes with hash().`. A file that genuinely contains U+FFFD reads normally.
+A file handle (what an action receives for a file input or a dep output) reads through the same `FileSystem`; lookup-or-run makes it. Its `text()` refuses a file whose bytes are not valid UTF-8, with `<abs> is not UTF-8 text: decoding it lost bytes. Hash its bytes with hash().`. A file that genuinely contains U+FFFD reads normally.
 
-Where it lives: `packages/dagraph/src/cache.ts` (`DagFs`), `packages/dagraph/src/ports/node-fs.ts`, `packages/dagraph/src/ports/fs.ts`, `packages/dagraph/src/ports/memory-fs.ts`, `packages/dagraph/src/file-handle.ts`, `packages/dagraph/package.json` (`exports`).
+Where it lives: `packages/dagraph/src/filesystem/node.ts`, `packages/dagraph/src/filesystem/bun.ts`, `packages/dagraph/src/filesystem/memory.ts`, `packages/dagraph/src/filesystem/index.ts`, `packages/dagraph/src/lookup-or-run/handles.ts`, `packages/dagraph/package.json` (`exports`).
 
 ## A complete example (runs with Node's filesystem; verified)
 
-    import { Graph, actionsFor, execute, type DagFs } from "@mrmeku/dagraph";
-    import { createNodeDagFs } from "@mrmeku/dagraph/fs/node";
+    import { Graph, actionsFor, startGlobalTimer, wallClock, execute, type FileSystem } from "@mrmeku/dagraph";
+    import { createNodeFileSystem } from "@mrmeku/dagraph/fs/node";
 
-    type Ports = { fs: DagFs };
+    type Ports = { fs: FileSystem };
     const defineActionWithPorts = actionsFor<Ports>();
     const fetchPage = defineActionWithPorts({
       kind: "fetch",
@@ -386,8 +374,8 @@ Where it lives: `packages/dagraph/src/cache.ts` (`DagFs`), `packages/dagraph/src
       title.addNode(g, { deps: { fetchPage: fetchPage.addNode(g, {}) } });
       return g;
     };
-    const fs = createNodeDagFs();
-    const ctx = { ports: { fs }, fs, cacheDir: "cache", clock: Date };
+    const fs = createNodeFileSystem();
+    const ctx = { ports: { fs }, fs, cacheDir: "cache", clock: wallClock, startTimer: startGlobalTimer };
     await execute(build(), ctx); // fetch: ran, title: ran
     await execute(build(), ctx); // fetch: hit, title: hit
 

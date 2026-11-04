@@ -40,7 +40,14 @@ export async function addChecks(
   // Each check orders after the cache restore.
   const afterRestore = { deps: { cache: cacheRestore } };
   const [all, engine, runner] = await Promise.all([
-    workflow.glob("packages/*/src/**", "scripts/**", "eslint.config.ts", ...TOOLCHAIN),
+    workflow.glob(
+      "packages/*/src/**",
+      "packages/dagraph/lint/**",
+      "scripts/**",
+      "eslint.config.ts",
+      "eslint.dagraph.ts",
+      ...TOOLCHAIN,
+    ),
     workflow.glob(ENGINE, ...TOOLCHAIN),
     workflow.glob(ENGINE, "packages/dagworkflows/src/**", "scripts/**", ...TOOLCHAIN),
   ]);

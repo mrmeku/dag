@@ -5,7 +5,9 @@
  */
 import {
   isSucceeded,
-  processNode,
+  lookupOrRunNode,
+  startGlobalTimer,
+  wallClock,
   type CacheEntry,
   type Graph,
   type NodeResult,
@@ -47,10 +49,11 @@ export async function processEach(
       ports: { ...ports, fs, exec },
       fs,
       cacheDir: CACHE_DIR,
-      clock: Date,
+      clock: wallClock,
+      startTimer: startGlobalTimer,
     };
     let log = "";
-    const result = await processNode(graph, node.name, depEntries, context, {
+    const result = await lookupOrRunNode(graph, node.name, depEntries, context, {
       onEvent: (event) => {
         if (event.type === "output") log += event.chunk;
       },

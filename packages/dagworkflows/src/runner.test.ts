@@ -1,4 +1,4 @@
-import { settled, type MemoryDagFs, type NodeResult } from "@mrmeku/dagraph";
+import { settled, type MemoryFileSystem, type NodeResult } from "@mrmeku/dagraph";
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
 import { describe, test } from "node:test";
@@ -30,14 +30,14 @@ const HISTORY_DIR = "/state/history";
 const DURATIONS_DIR = "/state/durations";
 
 /** The history files runs left in HISTORY_DIR, parsed. */
-const histories = async (fs: MemoryDagFs) =>
+const histories = async (fs: MemoryFileSystem) =>
   Promise.all(
     [...fs.files.keys()]
       .filter((k) => k.startsWith(`${HISTORY_DIR}/`) && k.endsWith(".json"))
       .map((k) => readRunHistory(fs, k)),
   );
 
-const parsed = async (fs: MemoryDagFs, path: string): Promise<unknown> =>
+const parsed = async (fs: MemoryFileSystem, path: string): Promise<unknown> =>
   JSON.parse(await fs.readText(path));
 
 const signalOf = (opts: ExecOptions | undefined) => {

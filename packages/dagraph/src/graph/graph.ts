@@ -1,4 +1,4 @@
-import type { ErasedSpec } from "../define-action.ts";
+import type { ErasedSpec } from "./define-action.ts";
 import { checkInputs } from "./inputs.ts";
 import {
   nodeRef,
@@ -16,7 +16,7 @@ export interface GraphNode<Meta = unknown> {
   /** Each role's dep, by node name. */
   roles: Record<string, string>;
   /** The action's inputs and the node's own, checked. */
-  inputs: Record<string, unknown>;
+  inputs: InputRecord<unknown>;
 }
 
 interface GraphState<Meta> {

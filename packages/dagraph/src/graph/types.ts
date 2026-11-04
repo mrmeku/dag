@@ -1,4 +1,4 @@
-import type { ScheduledNode } from "../types.ts";
+import type { ScheduledNode } from "../orchestration/index.ts";
 
 /** What an action returns: named outputs, each a path or a list of paths under its outputDir. */
 export type Outputs = Record<string, string | string[]>;
@@ -12,6 +12,16 @@ export const isOutputs = (value: unknown): value is Outputs =>
   value !== null &&
   !Array.isArray(value) &&
   Object.values(value).every(isPaths);
+
+/** Every path the outputs hold, in one list. */
+export const collectPaths = (outputs: Outputs): string[] => Object.values(outputs).flat();
+
+/** The same outputs with each path passed through `f`. */
+export function mapPaths<T>(outputs: Outputs, f: (path: string) => T): Record<string, T | T[]> {
+  return Object.fromEntries(
+    Object.entries(outputs).map(([name, v]) => [name, Array.isArray(v) ? v.map(f) : f(v)]),
+  );
+}
 
 /** The path a node's outputs hold as `name`; refused when they hold none. */
 export function namedOutput(outputs: Outputs, name: string): string {
@@ -162,6 +172,11 @@ export type InputValue<S = never> =
   | readonly InputValue<S>[]
   | { readonly [key: string]: InputValue<S> | undefined }
   | AnyOutputRef<string | string[], S>;
+
+/** Whether a value input is a list. `Array.isArray` leaves a readonly list in its false branch. */
+export const isInputList = <S>(
+  value: InputValue<S> | FileInput | undefined,
+): value is readonly InputValue<S>[] => Array.isArray(value);
 
 /**
  * Inputs by name, as an action and a node declare them: each a `file(path)`, only ever a whole
@@ -443,7 +458,7 @@ export type Resolved<V> = V extends FileInput
  * or the execution's cancel; and `output`, for what the action prints, in chunks as printed. `D`
  * is the deps the action declares, and `I` its inputs and its nodes' together.
  */
-export interface ActionContext<Ports = unknown, D = DepSpecs, I = Record<string, unknown>> {
+export interface ActionContext<Ports, D = DepSpecs, I = InputRecord<unknown>> {
   inputs: Resolved<I>;
   depOutputs: DepOutputsOf<D>;
   ports: Ports;

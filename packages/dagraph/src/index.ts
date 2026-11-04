@@ -1,24 +1,20 @@
 // The API reference's name for this entry point: TypeDoc names the "." export "".
 /** @module index */
-export { pruneCache, type CacheEntry, type DagFs, type PruneOptions } from "./cache.ts";
-export {
-  actionsFor,
-  defineAction,
-  type Action,
-  type ActionSpec,
-  type NodeRefOf,
-  type OutputOf,
-} from "./define-action.ts";
+export { pruneCache, type CacheEntry, type FileSystem, type PruneOptions } from "./cache/index.ts";
 export {
   execute,
-  runNode,
+  startGlobalTimer,
+  wallClock,
   type ExecuteOptions,
   type ExecutionEvent,
   type ExecutionListener,
 } from "./execute.ts";
+export { createMemoryFileSystem, type MemoryFileSystem } from "./filesystem/index.ts";
 export {
   Graph,
+  actionsFor,
   closure,
+  defineAction,
   dep,
   file,
   isFileHandle,
@@ -29,47 +25,43 @@ export {
   notAString,
   pick,
   settled,
+  type Action,
+  type ActionContext,
+  type ActionSpec,
+  type AnyNodeRef,
+  type AnyOutputRef,
+  type Dep,
+  type DepRecord,
+  type DepRefs,
+  type DepSpecs,
+  type DepSpecsOf,
+  type FileHandle,
+  type FileInput,
+  type Handles,
+  type InputRecord,
+  type InputValue,
+  type Node,
+  type NodeInputsSpec,
+  type NodeParams,
+  type NodeRef,
+  type NodeRefOf,
+  type NotAString,
+  type OutputOf,
+  type OutputRef,
+  type Outputs,
+  type Resolved,
+  type SettledDep,
+  type SettledOutputRef,
+  type SettledRef,
 } from "./graph/index.ts";
-export type {
-  ActionContext,
-  AnyNodeRef,
-  AnyOutputRef,
-  Dep,
-  DepRecord,
-  DepRefs,
-  DepSpecs,
-  DepSpecsOf,
-  FileHandle,
-  FileInput,
-  Handles,
-  InputRecord,
-  InputValue,
-  Node,
-  NodeInputsSpec,
-  NodeParams,
-  NodeRef,
-  NotAString,
-  OutputRef,
-  Outputs,
-  Resolved,
-  SettledDep,
-  SettledOutputRef,
-  SettledRef,
-} from "./graph/index.ts";
-export {
-  orchestrate,
-  type Ready,
-  type RunNode,
-  type Scheduler,
-  type SchedulerContext,
-} from "./orchestrate.ts";
-export { createMemoryDagFs, type MemoryDagFs } from "./ports/memory-fs.ts";
+export type { JsonValue } from "./json/index.ts";
 export {
   isNodeResult,
   lookupNode,
-  processNode,
+  lookupOrRunNode,
   resultActionKey,
   runAction,
+  runNode,
   type ActionEvent,
   type ActionListener,
   type CancelledNodeDetails,
@@ -80,24 +72,29 @@ export {
   type Miss,
   type NodeResult,
   type RunActionOptions,
+  type StartTimer,
   type SucceededNodeDetails,
-} from "./process-node.ts";
-export {
-  throttledScheduler,
-  unboundedScheduler,
-  type ThrottledSchedulerOptions,
-} from "./schedulers.ts";
+} from "./lookup-or-run/index.ts";
 export {
   countResultsByStatus,
   isResult,
   isSucceeded,
+  orchestrate,
   requiredDeps,
   type Clock,
   type FailureError,
-  type JsonValue,
   type OrchestrationEvent,
   type OrchestrationListener,
+  type Ready,
   type Result,
+  type RunNode,
   type ScheduledNode,
+  type Scheduler,
+  type SchedulerContext,
   type Tally,
-} from "./types.ts";
+} from "./orchestration/index.ts";
+export {
+  throttledScheduler,
+  unboundedScheduler,
+  type ThrottledSchedulerOptions,
+} from "./schedulers/index.ts";

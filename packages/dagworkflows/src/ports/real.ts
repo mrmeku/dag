@@ -1,7 +1,8 @@
+import { createNodeFileSystem } from "@mrmeku/dagraph/fs/node";
 import { spawn } from "node:child_process";
 import * as fs from "node:fs";
 import { CHILD_SIGINT_GRACE_MS, CHILD_SIGTERM_GRACE_MS, STREAM_DRAIN_GRACE_MS } from "../config.ts";
-import type { Clock, Exec, ExecResult, SyncFs } from "../ports.ts";
+import type { Clock, Exec, ExecResult, FileSystem, SyncFs } from "../ports.ts";
 
 /** The process groups of the commands running now: a second signal kills them on its way out. */
 const groups = new Set<number>();
@@ -86,8 +87,8 @@ export function createExec(
           for (const t of timers) clearTimeout(t);
           if (signal?.aborted && pid !== undefined && groupAlive(pid)) {
             kill("SIGTERM");
-            const deadline = clock.now() + sigtermGraceMs;
-            while (groupAlive(pid) && clock.now() < deadline)
+            const deadline = clock.epochMilliseconds() + sigtermGraceMs;
+            while (groupAlive(pid) && clock.epochMilliseconds() < deadline)
               await new Promise((r) => setTimeout(r, 20));
             kill("SIGKILL");
           }
@@ -148,10 +149,22 @@ export function createExec(
 
 export const syncFs: SyncFs = fs;
 
+/** The real FileSystem: dagraph's Node adapter, and `access` for whether a path exists. */
+export function createFileSystem(): FileSystem {
+  return {
+    ...createNodeFileSystem(),
+    exists: (path) =>
+      fs.promises.access(path).then(
+        () => true,
+        () => false,
+      ),
+  };
+}
+
 export function systemClock(): Clock {
   return {
     // eslint-disable-next-line no-restricted-syntax -- the real clock is what reads the wall clock
-    now: () => Date.now(),
+    epochMilliseconds: () => Date.now(),
     sleep: (ms, signal) =>
       new Promise((resolve) => {
         const done = () => {

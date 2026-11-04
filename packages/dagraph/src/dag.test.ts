@@ -5,11 +5,19 @@ import { cp, mkdir, mkdtemp, realpath, rm, symlink } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join, relative } from "node:path";
 
-import { commitEntry, lookupEntry, newStagingDir, pruneCache, type DagFs } from "./cache.ts";
-import { actionsFor } from "./define-action.ts";
-import { execute, type ExecutionEvent } from "./execute.ts";
-import { fileHandle } from "./file-handle.ts";
 import {
+  commitEntry,
+  lookupEntry,
+  newStagingDir,
+  pruneCache,
+  type FileSystem,
+} from "./cache/index.ts";
+import { execute, startGlobalTimer, wallClock, type ExecutionEvent } from "./execute.ts";
+import { createBunFileSystem } from "./filesystem/bun.ts";
+import { createMemoryFileSystem } from "./filesystem/index.ts";
+import { createNodeFileSystem } from "./filesystem/node.ts";
+import {
+  actionsFor,
   dep,
   file,
   Graph,
@@ -32,26 +40,33 @@ import {
   type Outputs,
   type SettledOutputRef,
 } from "./graph/index.ts";
-import { createBunDagFs } from "./ports/fs.ts";
-import { createMemoryDagFs } from "./ports/memory-fs.ts";
-import { createNodeDagFs } from "./ports/node-fs.ts";
 import {
+  fileHandle,
   isNodeResult,
   lookupNode,
-  processNode,
+  lookupOrRunNode,
   resultActionKey,
   type NodeResult,
   type RunActionOptions,
-} from "./process-node.ts";
-import { throttledScheduler } from "./schedulers.ts";
-import { countResultsByStatus } from "./types.ts";
-import { errorMessage } from "./utils.ts";
+} from "./lookup-or-run/index.ts";
+import { countResultsByStatus, errorMessage } from "./orchestration/index.ts";
+import { throttledScheduler } from "./schedulers/index.ts";
 
 interface Ports {
-  fs: DagFs;
+  fs: FileSystem;
 }
 
 type Group = "group_a" | "group_b" | "heavy";
+
+/** The time a test that calls the cache itself gives it: none of them reads a last use. */
+const NOW = 0;
+
+/** Whether anything is at `path`, as `lstat` finds it. */
+const isAt = (fs: FileSystem, path: string) =>
+  fs.lstat(path).then(
+    () => true,
+    () => false,
+  );
 
 const defineActionWithPorts = actionsFor<Ports, Group>();
 /** Deps in any role, as an action declares a record that its nodes name. */
@@ -99,8 +114,11 @@ function task<Meta, D extends DepRecord = Record<never, never>>(
 }
 
 function setup() {
-  const fs = createMemoryDagFs();
-  return { fs, ctx: { ports: { fs }, fs, cacheDir: "/cache", clock: Date } };
+  const fs = createMemoryFileSystem();
+  return {
+    fs,
+    ctx: { ports: { fs }, fs, cacheDir: "/cache", clock: wallClock, startTimer: startGlobalTimer },
+  };
 }
 
 const matching = (re: RegExp): unknown => expect.stringMatching(re);
@@ -794,7 +812,7 @@ describe("file handles", () => {
       "/thumb.jpg": Uint8Array.of(0xff, 0xd8, 0xff, 0xe0),
       "/replaced.txt": utf8("a \uFFFD in UTF-8"),
     };
-    const fs = createMemoryDagFs(files);
+    const fs = createMemoryFileSystem(files);
     const read = async ([path, bytes]: [string, Uint8Array]) => {
       const handle = fileHandle(fs, path);
       const sha256 = createHash("sha256").update(bytes).digest("hex");
@@ -913,7 +931,7 @@ describe("the cache", () => {
   });
 
   test("a manifest whose outputs are no record, as a bare path or a list once stored, reads as a miss", async () => {
-    const fs = createMemoryDagFs();
+    const fs = createMemoryFileSystem();
     const stored = { bare: "f", list: ["f"] };
     for (const [key, outputs] of Object.entries(stored))
       await fs.writeText(
@@ -921,16 +939,16 @@ describe("the cache", () => {
         JSON.stringify({ outputs, contentHash: "1", outputHashes: {} }),
       );
     expect([
-      await lookupEntry(fs, "/cache", "bare", Date),
-      await lookupEntry(fs, "/cache", "list", Date),
+      await lookupEntry(fs, "/cache", "bare", NOW),
+      await lookupEntry(fs, "/cache", "list", NOW),
     ]).toEqual([undefined, undefined]);
   });
 
   test("a read while a manifest is half written sees the old entry, then the new one", async () => {
-    const base = createMemoryDagFs();
+    const base = createMemoryFileSystem();
     const halfWritten = Promise.withResolvers<void>();
     const resume = Promise.withResolvers<void>();
-    const fs: DagFs = {
+    const fs: FileSystem = {
       ...base,
       writeText: async (path, content) => {
         await base.writeText(path, content.slice(0, content.length / 2));
@@ -939,7 +957,7 @@ describe("the cache", () => {
         await base.writeText(path, content);
       },
     };
-    const commit = async (commitFs: DagFs, content: string) => {
+    const commit = async (commitFs: FileSystem, content: string) => {
       const stagingDir = newStagingDir(base, "/cache");
       await base.writeText(`${stagingDir}/f`, content);
       return commitEntry(
@@ -949,16 +967,16 @@ describe("the cache", () => {
         stagingDir,
         { out: `${stagingDir}/f` },
         true,
-        Date,
+        NOW,
       );
     };
     const old = await commit(base, "old");
     const writing = commit(fs, "new");
     await halfWritten.promise;
-    const during = await lookupEntry(base, "/cache", "k", Date);
+    const during = await lookupEntry(base, "/cache", "k", NOW);
     resume.resolve();
     const next = await writing;
-    expect({ during, after: await lookupEntry(base, "/cache", "k", Date) }).toEqual({
+    expect({ during, after: await lookupEntry(base, "/cache", "k", NOW) }).toEqual({
       during: old,
       after: next,
     });
@@ -997,13 +1015,13 @@ describe("the cache", () => {
     const first = by(await execute(build(["v1", "v2"]), ctx));
     const both = (node: string) => [first[`v1:${node}`], first[`v2:${node}`]].map(outputsOf);
     const cleaned = successDetailsOf(first["v1:clean_description"]);
-    const entry = await lookupEntry(fs, "/cache", cleaned.actionKey, Date);
+    const entry = await lookupEntry(fs, "/cache", cleaned.actionKey, NOW);
     const together = {
       statuses: Object.values(first).map(outcome),
       chapters: new Set(both("chapters")).size,
-      cleaned: await Promise.all(both("clean_description").map((p) => fs.exists(p))),
+      cleaned: await Promise.all(both("clean_description").map((p) => isAt(fs, p))),
       entry: both("clean_description").includes(depPath(entry?.outputs)),
-      uploaded: await Promise.all(both("upload").map((p) => fs.exists(p))),
+      uploaded: await Promise.all(both("upload").map((p) => isAt(fs, p))),
     };
     const next = by(await execute(build(["v1"]), { ...ctx, forcedKeys: "all" }));
     const dirsOf = async (node: string) => {
@@ -1050,7 +1068,7 @@ describe("the cache", () => {
   });
 
   test("a cache hits under a relative or absolute cacheDir and wherever it is copied: manifests hold paths relative to their content dir, results absolute ones", async () => {
-    const fs = createNodeDagFs();
+    const fs = createNodeFileSystem();
     const tmp = await realpath(await mkdtemp(join(tmpdir(), "dagraph-")));
     const home = process.cwd();
     const seen: string[] = [];
@@ -1073,7 +1091,13 @@ describe("the cache", () => {
       await mkdir(dir, { recursive: true });
       process.chdir(dir);
       try {
-        const [r] = await execute(build(), { ports: { fs }, fs, cacheDir, clock: Date });
+        const [r] = await execute(build(), {
+          ports: { fs },
+          fs,
+          cacheDir,
+          clock: wallClock,
+          startTimer: startGlobalTimer,
+        });
         return successDetailsOf(r);
       } finally {
         process.chdir(home);
@@ -1115,16 +1139,16 @@ describe("the cache", () => {
     }
   });
 
-  const filesystems: [string, () => DagFs][] = [
-    ["memory", createMemoryDagFs],
-    ["Bun", createBunDagFs],
-    ["Node", createNodeDagFs],
+  const filesystems: [string, () => FileSystem][] = [
+    ["memory", createMemoryFileSystem],
+    ["Bun", createBunFileSystem],
+    ["Node", createNodeFileSystem],
   ];
   for (const [label, createFs] of filesystems)
     test(`${label} fs: a concurrent run that rewrites its output while another run's dependent reads it never poisons that dependent's entry`, async () => {
       const fs = createFs();
       const cacheDir = `${await mkdtemp(join(tmpdir(), "dagraph-"))}/cache`;
-      const c = { ports: { fs }, fs, cacheDir, clock: Date };
+      const c = { ports: { fs }, fs, cacheDir, clock: wallClock, startTimer: startGlobalTimer };
       const aInDouble = Promise.withResolvers<void>();
       const bTruncated = Promise.withResolvers<void>();
       const bMayFinish = Promise.withResolvers<void>();
@@ -1171,7 +1195,7 @@ describe("the cache", () => {
     test(`${label} fs: a damaged content dir is replaced when two nodes of one key rerun over it, and then hits`, async () => {
       const fs = createFs();
       const cacheDir = `${await mkdtemp(join(tmpdir(), "dagraph-"))}/cache`;
-      const ctx = { ports: { fs }, fs, cacheDir, clock: Date };
+      const ctx = { ports: { fs }, fs, cacheDir, clock: wallClock, startTimer: startGlobalTimer };
       const build = () => {
         const g = new Graph<Ports>();
         const same = defineActionWithPorts({
@@ -1208,7 +1232,7 @@ describe("the cache", () => {
     test(`${label} fs: a returned path with no file fails its node, naming the output and its file, and the failure is never cached`, async () => {
       const fs = createFs();
       const cacheDir = `${await mkdtemp(join(tmpdir(), "dagraph-"))}/cache`;
-      const c = { ports: { fs }, fs, cacheDir, clock: Date };
+      const c = { ports: { fs }, fs, cacheDir, clock: wallClock, startTimer: startGlobalTimer };
       const build = () => {
         const g = new Graph<Ports>();
         defineActionWithPorts({
@@ -1229,7 +1253,7 @@ describe("the cache", () => {
       const first = await execute(build(), c);
       const second = await execute(build(), c);
       const stored = await Promise.all(
-        second.map((r) => fs.exists(`${cacheDir}/v1/${resultActionKey(r)}/manifest.json`)),
+        second.map((r) => isAt(fs, `${cacheDir}/v1/${resultActionKey(r)}/manifest.json`)),
       );
       await rm(dirname(cacheDir), { recursive: true, force: true });
       const fix = (file: string) =>
@@ -1266,7 +1290,13 @@ describe("the cache", () => {
         return `${c.outputDir}/escape`;
       });
       returning("under", async (c) => `${await write(c, "file", "x")}/inner`);
-      const results = await execute(g, { ports: { fs }, fs, cacheDir, clock: Date });
+      const results = await execute(g, {
+        ports: { fs },
+        fs,
+        cacheDir,
+        clock: wallClock,
+        startTimer: startGlobalTimer,
+      });
       const outsideWritable = ((await fs.lstat(outside)).mode & 0o200) !== 0;
       await rm(dirname(cacheDir), { recursive: true, force: true });
       const refused = (path: string) =>
@@ -1296,7 +1326,17 @@ describe("the cache", () => {
           return { out };
         },
       }).addNode(g, {});
-      const out = outputsOf((await execute(g, { ports: { fs }, fs, cacheDir, clock: Date }))[0]);
+      const out = outputsOf(
+        (
+          await execute(g, {
+            ports: { fs },
+            fs,
+            cacheDir,
+            clock: wallClock,
+            startTimer: startGlobalTimer,
+          })
+        )[0],
+      );
       const mode = (await fs.lstat(out)).mode & 0o777;
       const rewrite = await fs.writeText(out, "echo bye").then(
         () => "rewritten",
@@ -1311,11 +1351,17 @@ describe("the cache", () => {
       const disk = createFs();
       const cacheDir = `${await mkdtemp(join(tmpdir(), "dagraph-"))}/cache`;
       const hashed: string[] = [];
-      const counting: DagFs = {
+      const counting: FileSystem = {
         ...disk,
         hashFile: async (path) => (hashed.push(path), disk.hashFile(path)),
       };
-      const ctx = { ports: { fs: disk }, fs: counting, cacheDir, clock: Date };
+      const ctx = {
+        ports: { fs: disk },
+        fs: counting,
+        cacheDir,
+        clock: wallClock,
+        startTimer: startGlobalTimer,
+      };
       const build = () => {
         const g = new Graph<Ports>();
         task(g, "a", { run: () => "original" });
@@ -1360,7 +1406,7 @@ describe("the cache", () => {
 
   test("a commit whose rename keeps failing fails its node with the rename's own error", async () => {
     const { ctx, fs } = setup();
-    const refusing: DagFs = {
+    const refusing: FileSystem = {
       ...fs,
       rename: async () => {
         throw new Error("EACCES: refused");
@@ -1379,7 +1425,13 @@ describe("the cache", () => {
       const hitAt = Date.parse("2026-10-02");
       const keptAt = Date.parse("2026-10-03");
       let now = committedAt;
-      const ctx = { ports: { fs }, fs, cacheDir, clock: { now: () => now } };
+      const ctx = {
+        ports: { fs },
+        fs,
+        cacheDir,
+        clock: { epochMilliseconds: () => now },
+        startTimer: startGlobalTimer,
+      };
       const build = () => {
         const g = new Graph<Ports>();
         task(g, "a");
@@ -1484,7 +1536,7 @@ describe("cacheable: false", () => {
     const probe = successDetailsOf(second.find((r) => r.name === "probe"));
     expect({
       second: statuses(second),
-      stored: await fs.exists(`/cache/v1/${probe.actionKey}/manifest.json`),
+      stored: await isAt(fs, `/cache/v1/${probe.actionKey}/manifest.json`),
     }).toEqual({ second: { probe: "ran", report: "hit" }, stored: false });
   });
 });
@@ -1520,7 +1572,9 @@ describe("events", () => {
     const events: [string, string][] = [];
     await execute(g, ctx, {
       scheduler: throttledScheduler({ concurrencyLimits: { heavy: 1 } }),
-      onEvent: (e) => events.push([e.node, e.type]),
+      onEvent: (e) => {
+        events.push([e.node, e.type]);
+      },
     });
     const of = (node: string) => events.filter(([n]) => n === node).map(([, type]) => type);
     expect({ warm: of("warm"), grouped: of("grouped"), plain: of("plain") }).toEqual({
@@ -1546,7 +1600,7 @@ describe("events", () => {
     const events: ExecutionEvent[] = [];
     await execute(
       g,
-      { ...ctx, clock: { now: () => time } },
+      { ...ctx, clock: { epochMilliseconds: () => time } },
       {
         scheduler: throttledScheduler({ concurrencyLimits: { heavy: 1 } }),
         onEvent: (e) => {
@@ -1902,7 +1956,7 @@ test("a listener's promise for a start holds the action back until it resolves, 
 test("a failed or cancelled node's details carry their key once it has one, and an elapsed exactly when its action ran", async () => {
   const { ctx } = setup();
   let time = 0;
-  const context = { ...ctx, clock: { now: () => time } };
+  const context = { ...ctx, clock: { epochMilliseconds: () => time } };
   const caught = new AbortController();
   const held = new AbortController();
   const g = new Graph<Ports>();
@@ -1925,11 +1979,11 @@ test("a failed or cancelled node's details carry their key once it has one, and 
     },
   });
   const process = (name: string, options: RunActionOptions<undefined> = {}) =>
-    processNode(g, name, {}, context, options);
+    lookupOrRunNode(g, name, {}, context, options);
   const results = [
     await process("unkeyable"),
     // Its dep's entry lacks the output it reads.
-    await processNode(
+    await lookupOrRunNode(
       g,
       "unresolvable",
       { made: { outputs: {}, contentHash: "h", outputHashes: {} } },
@@ -1940,7 +1994,9 @@ test("a failed or cancelled node's details carry their key once it has one, and 
     }),
     await process("held", {
       signal: held.signal,
-      onEvent: (e) => e.type === "start" && held.abort(),
+      onEvent: (e) => {
+        if (e.type === "start") held.abort();
+      },
     }),
     await process("broke"),
     await process("caught", { signal: caught.signal }),
@@ -1982,7 +2038,11 @@ test("an interrupted execution resumes from where it left off", async () => {
   bFails = false;
   const started: string[] = [];
   const second = statuses(
-    await execute(build(), ctx, { onEvent: (e) => e.type === "start" && started.push(e.node) }),
+    await execute(build(), ctx, {
+      onEvent: (e) => {
+        if (e.type === "start") started.push(e.node);
+      },
+    }),
   );
   expect({ first, second, started }).toEqual({
     first: { a: "ran", b: "failed", c: "dep-failed", d: "dep-failed" },
@@ -2192,7 +2252,9 @@ describe("cancellation and timeouts", () => {
     const results = await execute(g, ctx, {
       signal: controller.signal,
       scheduler: throttledScheduler({ concurrencyLimits: { heavy: 1 } }),
-      onEvent: (e) => e.type === "start" && setTimeout(() => controller.abort(), 5),
+      onEvent: (e) => {
+        if (e.type === "start") setTimeout(() => controller.abort(), 5);
+      },
     });
     expect({
       ran,
@@ -2294,7 +2356,7 @@ describe("cancellation and timeouts", () => {
   test("a cancel that lands while the node's output directory is made holds the action back", async () => {
     const controller = new AbortController();
     const { ctx, fs } = setup();
-    const slowMkdir: DagFs = {
+    const slowMkdir: FileSystem = {
       ...fs,
       ensureDir: async (path) => {
         controller.abort();

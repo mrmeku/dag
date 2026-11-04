@@ -40,9 +40,9 @@
     // Path aliases
     "paths": {
       "@mrmeku/dagraph": ["./packages/dagraph/src/index.ts"],
-      "@mrmeku/dagraph/fs": ["./packages/dagraph/src/ports/fs.ts"],
-      "@mrmeku/dagraph/fs/node": ["./packages/dagraph/src/ports/node-fs.ts"],
-      "@mrmeku/dagraph/mermaid": ["./packages/dagraph/src/mermaid.ts"],
+      "@mrmeku/dagraph/fs": ["./packages/dagraph/src/filesystem/bun.ts"],
+      "@mrmeku/dagraph/fs/node": ["./packages/dagraph/src/filesystem/node.ts"],
+      "@mrmeku/dagraph/mermaid": ["./packages/dagraph/src/mermaid/index.ts"],
       "@mrmeku/dagraph/orchestration": ["./packages/dagraph/src/orchestration.ts"],
       "@mrmeku/dagworkflows": ["./packages/dagworkflows/src/index.ts"],
       "@mrmeku/dagworkflows/github": ["./packages/dagworkflows/src/ports/github.ts"]

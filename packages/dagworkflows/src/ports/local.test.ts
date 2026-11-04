@@ -1,5 +1,12 @@
-import { actionsFor, execute, Graph, type DagFs } from "@mrmeku/dagraph";
-import { createNodeDagFs } from "@mrmeku/dagraph/fs/node";
+import {
+  actionsFor,
+  execute,
+  Graph,
+  startGlobalTimer,
+  wallClock,
+  type FileSystem,
+} from "@mrmeku/dagraph";
+import { createNodeFileSystem } from "@mrmeku/dagraph/fs/node";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import {
@@ -22,7 +29,7 @@ import { check, lock } from "proper-lockfile";
 import type { Exec } from "../ports.ts";
 import { createLocalHost, createWorktreeCacheStore } from "./local.ts";
 import { createTestPorts } from "./memory.ts";
-import { createExec } from "./real.ts";
+import { createExec, createFileSystem } from "./real.ts";
 
 test("the local summary across processes and passes, without escape codes", async () => {
   const { ports, fs } = createTestPorts({ files: { "s.md": "an earlier process's summary\n" } });
@@ -113,7 +120,7 @@ test("the local context's ref is the branch's, refs/heads/<branch>, as GitHub's 
   };
   const contextIn = (dir: string) =>
     from(dir, () =>
-      createLocalHost({ exec: isolated, fs: createNodeDagFs(), summaryPath: "s.md" }).context(),
+      createLocalHost({ exec: isolated, fs: createFileSystem(), summaryPath: "s.md" }).context(),
     );
   const local = {
     isCi: false,
@@ -170,8 +177,8 @@ describe("the local cache store, what each checkout holds on disk", () => {
 
   test("a worktree restore keeps cache hits stat-only", async () => {
     const checkout = checkouts("worktree");
-    const graph = new Graph<{ fs: DagFs }>();
-    actionsFor<{ fs: DagFs }>()({
+    const graph = new Graph<{ fs: FileSystem }>();
+    actionsFor<{ fs: FileSystem }>()({
       kind: "written",
       action: async ({ outputDir, ports }) => {
         const out = `${outputDir}/out`;
@@ -181,14 +188,20 @@ describe("the local cache store, what each checkout holds on disk", () => {
         return { out };
       },
     }).addNode(graph, {});
-    const disk = createNodeDagFs();
+    const disk = createNodeFileSystem();
     const hashed: string[] = [];
-    const counting: DagFs = {
+    const counting: FileSystem = {
       ...disk,
       hashFile: async (path) => (hashed.push(path), disk.hashFile(path)),
     };
-    const run = (fs: DagFs) =>
-      execute(graph, { ports: { fs }, fs, cacheDir: "cache", clock: Date });
+    const run = (fs: FileSystem) =>
+      execute(graph, {
+        ports: { fs },
+        fs,
+        cacheDir: "cache",
+        clock: wallClock,
+        startTimer: startGlobalTimer,
+      });
     await from(checkout("main"), () => run(disk));
     const statuses = await from(checkout("worktree"), async () => {
       await worktreeStore().restore(["cache/v1"], "k-1", []);

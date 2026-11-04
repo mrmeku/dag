@@ -2,12 +2,13 @@ import {
   execute,
   file,
   Graph,
+  startGlobalTimer,
+  wallClock,
   type DepRecord,
   type ExecutionListener,
   type InputRecord,
   type NodeResult,
 } from "@mrmeku/dagraph";
-import { createNodeDagFs } from "@mrmeku/dagraph/fs/node";
 import assert from "node:assert/strict";
 import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -16,13 +17,17 @@ import { describe, test } from "node:test";
 import { addCommand } from "./commands.ts";
 import type { ExecResult, Ports } from "./ports.ts";
 import { createOutputRecorder, createTestPorts } from "./ports/memory.ts";
-import { createExec } from "./ports/real.ts";
+import { createExec, createFileSystem } from "./ports/real.ts";
 import { runWorkflow } from "./runner.ts";
 import { addTask, type ActionTaskSpec } from "./task.ts";
 
 const CACHE_DIR = "/cache";
 const executeUnder = (graph: Graph<Ports>, ports: Ports, onEvent: ExecutionListener = () => {}) =>
-  execute(graph, { ports, fs: ports.fs, clock: Date, cacheDir: CACHE_DIR }, { onEvent });
+  execute(
+    graph,
+    { ports, fs: ports.fs, clock: wallClock, startTimer: startGlobalTimer, cacheDir: CACHE_DIR },
+    { onEvent },
+  );
 const exited = (code: number, stdout = ""): ExecResult => ({
   ended: "exited",
   code,
@@ -162,7 +167,7 @@ describe("a task", () => {
     try {
       mkdirSync(join(root, "sub"));
       const { ports } = createTestPorts({ exec: createExec() });
-      ports.fs = createNodeDagFs();
+      ports.fs = createFileSystem();
       // Relative, as the CLI's .dag/cache is.
       const cacheDir = relative(process.cwd(), join(root, "cache"));
       const sub = relative(process.cwd(), join(root, "sub"));

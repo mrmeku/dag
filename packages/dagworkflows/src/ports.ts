@@ -134,10 +134,15 @@ export interface Host {
 /** proper-lockfile: a run's lock on its history says the run is still going. */
 export type Lockfile = Pick<typeof properLockfile, "lock" | "check">;
 
+/** dagraph's `FileSystem`, which the cache reads and writes, and whether something is at a path. */
+export interface FileSystem extends dagraph.FileSystem {
+  exists: (path: string) => Promise<boolean>;
+}
+
 /** The context every step is bound to. */
 export interface Ports {
   exec: Exec;
-  fs: dagraph.DagFs;
+  fs: FileSystem;
   clock: Clock;
   host: Host;
   cacheStore: CacheStore;

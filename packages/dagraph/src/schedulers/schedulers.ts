@@ -1,6 +1,4 @@
-import type { Ready } from "./exec-state.ts";
-import type { Scheduler, SchedulerContext } from "./orchestrate.ts";
-import type { ScheduledNode } from "./types.ts";
+import type { Ready, ScheduledNode, Scheduler, SchedulerContext } from "../orchestration/index.ts";
 
 /**
  * Core scheduling loop: repeatedly take ready nodes, run them, and wait for in-flight work to

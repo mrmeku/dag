@@ -3,9 +3,10 @@ import {
   file,
   Graph,
   settled as settledDep,
+  startGlobalTimer,
   type ExecutionEvent,
   type JsonValue,
-  type MemoryDagFs,
+  type MemoryFileSystem,
   type Node,
   type NodeResult,
 } from "@mrmeku/dagraph";
@@ -87,7 +88,7 @@ const files = {
   [`${BUILD_LOG_DIR}/kc.log`]: "c from an earlier run\n",
   [`${BUILD_LOG_DIR}/kf.log`]: "f from an earlier build\n",
 };
-const buildLogsOf = (fs: MemoryDagFs) =>
+const buildLogsOf = (fs: MemoryFileSystem) =>
   Object.fromEntries(
     [...fs.files]
       .filter(([path]) => path.startsWith(`${BUILD_LOG_DIR}/`))
@@ -109,7 +110,9 @@ function storeOf(listeners: RunListener[]) {
     store,
     events: (...events: ExecutionEvent[]) =>
       events.forEach((event) =>
-        store.onEvent(event.type === "output" ? event : { ...event, occurredAt: clock.now() }),
+        store.onEvent(
+          event.type === "output" ? event : { ...event, occurredAt: clock.epochMilliseconds() },
+        ),
       ),
   };
 }
@@ -305,7 +308,7 @@ describe("run store", () => {
     store.begin(pass);
     const [hashResult, journalResult] = await execute(
       graph,
-      { ports, fs, cacheDir: "/cache", clock: steppingClock() },
+      { ports, fs, cacheDir: "/cache", clock: steppingClock(), startTimer: startGlobalTimer },
       {
         // Heard before a record of the start that fails.
         onEvent: (event) => {
@@ -648,7 +651,7 @@ describe("run store", () => {
     store.begin({ title: "main", nodes: graph.describe() });
     await execute(
       graph,
-      { ports, fs, cacheDir: "/cache", clock: steppingClock() },
+      { ports, fs, cacheDir: "/cache", clock: steppingClock(), startTimer: startGlobalTimer },
       { onEvent: (event) => store.onEvent(event) },
     );
     const run = store.getState();

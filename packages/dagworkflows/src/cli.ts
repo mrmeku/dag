@@ -1,6 +1,5 @@
 #!/usr/bin/env node
 import { Command, Option, type OptionValues } from "@commander-js/extra-typings";
-import { createNodeDagFs } from "@mrmeku/dagraph/fs/node";
 import { resolve } from "node:path";
 import { check, lock } from "proper-lockfile";
 import {
@@ -13,7 +12,7 @@ import {
   OUTPUT_STYLES,
 } from "./config.ts";
 import { createLocalHost, createWorktreeCacheStore } from "./ports/local.ts";
-import { abortOnSignals, createExec, systemClock } from "./ports/real.ts";
+import { abortOnSignals, createExec, createFileSystem, systemClock } from "./ports/real.ts";
 import { runJob, runPost, type RunOptions } from "./runner.ts";
 import { peer, pickArtifactStore, pickCacheStore } from "./services.ts";
 import { workflowDefOf } from "./workflow.ts";
@@ -49,7 +48,7 @@ async function runOptionsFor(
 ): Promise<RunOptions & { workflowFile: string }> {
   const def = workflowDefOf(await import(resolve(file)), file);
   const exec = createExec();
-  const fs = createNodeDagFs();
+  const fs = createFileSystem();
   const clock = systemClock();
   const lockfile = { lock, check };
   // The GitHub adapter loads Octokit; a local run never needs it.

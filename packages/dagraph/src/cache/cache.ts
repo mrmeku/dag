@@ -1,8 +1,7 @@
 import { dirname, join, normalize } from "pathe";
-import { collectPaths, hashOutputFiles, mapPaths, verifyOutputs } from "./content-addressing.ts";
-import { isOutputs, type Outputs } from "./graph/index.ts";
-import type { Clock } from "./types.ts";
-import { isMissingFileError } from "./utils.ts";
+import { collectPaths, isOutputs, mapPaths, type Outputs } from "../graph/index.ts";
+import { hashOutputFiles, verifyOutputs } from "./content-addressing.ts";
+import { isMissingFileError, type FileSystem, type Stats } from "./ports.ts";
 
 /** A node's entry in the cache: what a result that succeeded carries, its paths absolute. */
 export interface CacheEntry {
@@ -25,9 +24,6 @@ export const isCacheEntry = (value: unknown): value is CacheEntry =>
   typeof value.outputHashes === "object" &&
   value.outputHashes !== null &&
   Object.values(value.outputHashes).every((hash) => typeof hash === "string");
-
-// Named as a type alone: the index imports no I/O module (eslint.config.ts).
-type Stats = import("node:fs").Stats;
 
 /** What a manifest records of each file, and a hit compares. */
 type FileStats = Pick<Stats, "size" | "mtimeMs">;
@@ -55,35 +51,6 @@ const isManifest = (value: unknown): value is Manifest =>
   value.fileStats !== null &&
   Object.values(value.fileStats).every(isFileStats);
 
-/**
- * Minimal filesystem contract the DAG executor needs. Implementations ship in `ports/fs`. The
- * engine calls its members detached, as `fs.hashFile`, so none may read `this`.
- */
-export interface DagFs {
-  exists: (path: string) => Promise<boolean>;
-  readText: (path: string) => Promise<string>;
-  writeText: (path: string, content: string) => Promise<void>;
-  /** The SHA256 hex of a file's content. */
-  hashFile: (path: string) => Promise<string>;
-  ensureDir: (path: string) => Promise<void>;
-  /** POSIX `rename`: replaces a file at `to` atomically; fails when `to` is a non-empty directory. */
-  rename: (from: string, to: string) => Promise<void>;
-  /** Removes a file, or a directory and everything in it; nothing when the path does not exist. */
-  remove: (path: string) => Promise<void>;
-  /** POSIX `lstat`; rejects with code `ENOENT` when nothing is at `path`, as node:fs does. */
-  lstat: (path: string) => Promise<Pick<Stats, "isFile" | "mode" | "size" | "mtimeMs">>;
-  /** POSIX `chmod`: sets a file's permission bits. */
-  chmod: (path: string, mode: number) => Promise<void>;
-  /** POSIX `fsync`: flushes a file's data to disk. */
-  fsync: (path: string) => Promise<void>;
-  /** POSIX `utimes`: sets the access and modification times of a file or a directory. */
-  utimes: (path: string, atime: Date, mtime: Date) => Promise<void>;
-  /** The names of the entries in a directory; none when the directory does not exist. */
-  readdir: (dir: string) => Promise<string[]>;
-  /** The absolute form of `path`, as an action sees it. */
-  resolve: (path: string) => string;
-}
-
 /** Bump on any change to the on-disk format: a new format, a new directory. */
 const CACHE_FORMAT_VERSION = "v1";
 
@@ -101,22 +68,22 @@ function cacheLayout(cacheDir: string): { formatDir: string; tmpDir: string } {
 const PLACE_TRIES = 5;
 
 /** Removes a directory, best effort: whether it is gone never changes a result. */
-export const discard = (fs: DagFs, dir: string) => fs.remove(dir).catch(() => {});
+export const discard = (fs: FileSystem, dir: string) => fs.remove(dir).catch(() => {});
 
-/** Sets `path`'s mtime to the clock's now, the last use a prune reads; best effort. */
-async function stampLastUse(fs: DagFs, clock: Clock, path: string): Promise<void> {
-  const now = new Date(clock.now());
-  await fs.utimes(path, now, now).catch(() => {});
+/** Sets `path`'s mtime to `now`, the last use a prune reads; best effort. */
+async function stampLastUse(fs: FileSystem, now: number, path: string): Promise<void> {
+  const time = new Date(now);
+  await fs.utimes(path, time, time).catch(() => {});
 }
 
 /** The absolute path of a new staging directory in the cache at `cacheDir`, not yet made. */
-export function newStagingDir(fs: DagFs, cacheDir: string): string {
+export function newStagingDir(fs: FileSystem, cacheDir: string): string {
   return join(cacheLayout(fs.resolve(cacheDir)).tmpDir, crypto.randomUUID());
 }
 
 /** Whether each of `paths` in `dir` has the size and mtime that `fileStats` records for it. */
 async function statsMatch(
-  fs: DagFs,
+  fs: FileSystem,
   dir: string,
   paths: string[],
   fileStats: FileStatsByPath,
@@ -138,7 +105,7 @@ async function statsMatch(
 }
 
 /** The manifest at `path`, or `undefined` when it is missing, unreadable or no manifest. */
-async function readManifest(fs: DagFs, path: string): Promise<Manifest | undefined> {
+async function readManifest(fs: FileSystem, path: string): Promise<Manifest | undefined> {
   try {
     const manifest: unknown = JSON.parse(await fs.readText(path));
     return isManifest(manifest) ? manifest : undefined;
@@ -150,13 +117,13 @@ async function readManifest(fs: DagFs, path: string): Promise<Manifest | undefin
 /**
  * The entry of `key` in the cache at `cacheDir`, its paths absolute, when its manifest reads as an
  * entry whose files match the stats it records, or else hash to it; anything else is a miss. A hit
- * stamps the manifest's last use.
+ * stamps the manifest's last use as `now`, in milliseconds since the epoch.
  */
 export async function lookupEntry(
-  fs: DagFs,
+  fs: FileSystem,
   cacheDir: string,
   key: string,
-  clock: Clock,
+  now: number,
 ): Promise<CacheEntry | undefined> {
   const keyDir = join(cacheLayout(fs.resolve(cacheDir)).formatDir, key);
   const manifestFile = join(keyDir, MANIFEST_FILE);
@@ -166,7 +133,7 @@ export async function lookupEntry(
   const contentDir = join(keyDir, entry.contentHash);
   const unchanged = await statsMatch(fs, contentDir, collectPaths(entry.outputs), fileStats);
   if (!unchanged && !(await verifyOutputs(entry, fs.hashFile, contentDir))) return undefined;
-  await stampLastUse(fs, clock, manifestFile);
+  await stampLastUse(fs, now, manifestFile);
   return { ...entry, outputs: mapPaths(entry.outputs, (path) => join(contentDir, path)) };
 }
 
@@ -175,7 +142,7 @@ export async function lookupEntry(
  * right, returning their stats. A damaged copy is moved into `tmpDir`, replaced, then removed.
  */
 async function placeContent(
-  fs: DagFs,
+  fs: FileSystem,
   entry: CacheEntry,
   stagingDir: string,
   contentDir: string,
@@ -211,7 +178,11 @@ async function placeContent(
  * it to disk, so a crash cannot leave one whose stats match but whose data is lost, and returns
  * the stats a hit compares, by path.
  */
-async function sealFiles(fs: DagFs, outputs: Outputs, outputDir: string): Promise<FileStatsByPath> {
+async function sealFiles(
+  fs: FileSystem,
+  outputs: Outputs,
+  outputDir: string,
+): Promise<FileStatsByPath> {
   const fileStats: FileStatsByPath = {};
   for (const [name, value] of Object.entries(outputs))
     for (const path of [value].flat()) {
@@ -237,17 +208,18 @@ async function sealFiles(fs: DagFs, outputs: Outputs, outputDir: string): Promis
 
 /**
  * Commits `stagingDir` as the entry of `key` whose files are `outputs`, each a regular file inside
- * it, made read-only, stamps its content dir's last use, and returns the entry. The manifest, with
- * the stats of the files left in place, is written over the key's last one only when `cacheable`.
+ * it, made read-only, stamps its content dir's last use as `now`, and returns the entry. The
+ * manifest, with the stats of the files left in place, is written over the key's last one only
+ * when `writeManifest`.
  */
 export async function commitEntry(
-  fs: DagFs,
+  fs: FileSystem,
   cacheDir: string,
   key: string,
   stagingDir: string,
   outputs: Outputs,
-  cacheable: boolean,
-  clock: Clock,
+  writeManifest: boolean,
+  now: number,
 ): Promise<CacheEntry> {
   const { formatDir, tmpDir } = cacheLayout(fs.resolve(cacheDir));
   const under = `${stagingDir}/`;
@@ -264,8 +236,8 @@ export async function commitEntry(
   const keyDir = join(formatDir, key);
   const contentDir = join(keyDir, relativeEntry.contentHash);
   const keptFileStats = await placeContent(fs, relativeEntry, stagingDir, contentDir, tmpDir);
-  await stampLastUse(fs, clock, contentDir);
-  if (cacheable) {
+  await stampLastUse(fs, now, contentDir);
+  if (writeManifest) {
     // Renamed into place, so a reader sees the whole last manifest or the whole new one.
     const stagedManifestFile = join(tmpDir, `${crypto.randomUUID()}.json`);
     const fileStats = keptFileStats ?? stagedFileStats;
@@ -279,7 +251,7 @@ export async function commitEntry(
 }
 
 export interface PruneOptions {
-  /** A time in milliseconds since the epoch, as a `Clock` gives it: what no run used since goes. */
+  /** A time in milliseconds since the epoch: what no run used since goes. */
   unusedSince: number;
 }
 
@@ -288,7 +260,7 @@ export interface PruneOptions {
  * first, and resolves to the removed paths, sorted. Not locked against a run.
  */
 export async function pruneCache(
-  fs: DagFs,
+  fs: FileSystem,
   cacheDir: string,
   { unusedSince }: PruneOptions,
 ): Promise<string[]> {

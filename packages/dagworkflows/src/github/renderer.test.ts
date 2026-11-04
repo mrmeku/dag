@@ -311,7 +311,7 @@ describe("GitHub renderer", () => {
       },
       {
         recap: [
-          "✖︎ test, require-all, down:db and 1 more failed · ci.ts · built 2 · cached 0 · failed 4 · skipped 0 · wall 29.0s",
+          "✖︎ test, require-all, down:db and 1 more failed · ci.ts · built 2 · cached 0 · failed 4 · skipped 0 · wall 30.0s",
           "failed: test, require-all, down:db, save:cas",
           "reproduce: npx --no dag run ci.ts --only test,require-all,down:db,save:cas",
         ],

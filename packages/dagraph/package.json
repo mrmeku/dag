@@ -11,9 +11,9 @@
   "type": "module",
   "exports": {
     ".": "./src/index.ts",
-    "./fs": "./src/ports/fs.ts",
-    "./fs/node": "./src/ports/node-fs.ts",
-    "./mermaid": "./src/mermaid.ts",
+    "./fs": "./src/filesystem/bun.ts",
+    "./fs/node": "./src/filesystem/node.ts",
+    "./mermaid": "./src/mermaid/index.ts",
     "./orchestration": "./src/orchestration.ts"
   },
   "dependencies": {

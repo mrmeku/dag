@@ -5,10 +5,11 @@ import {
   Graph,
   resultActionKey,
   settled,
+  startGlobalTimer,
+  wallClock,
   type ExecutionListener,
   type NodeResult,
 } from "@mrmeku/dagraph";
-import { createNodeDagFs } from "@mrmeku/dagraph/fs/node";
 import assert from "node:assert/strict";
 import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -17,7 +18,7 @@ import { describe, test } from "node:test";
 import { addCommand } from "./commands.ts";
 import type { ExecResult, Ports } from "./ports.ts";
 import { createOutputRecorder, createTestPorts } from "./ports/memory.ts";
-import { createExec } from "./ports/real.ts";
+import { createExec, createFileSystem } from "./ports/real.ts";
 import { runWorkflow } from "./runner.ts";
 
 const CACHE_DIR = "/cache";
@@ -27,7 +28,12 @@ const executeUnder = (
   ports: Ports,
   cacheDir = CACHE_DIR,
   onEvent: ExecutionListener = () => {},
-) => execute(graph, { ports, fs: ports.fs, clock: Date, cacheDir }, { onEvent });
+) =>
+  execute(
+    graph,
+    { ports, fs: ports.fs, clock: wallClock, startTimer: startGlobalTimer, cacheDir },
+    { onEvent },
+  );
 const exited = (code: number, output = ""): ExecResult => ({
   ended: "exited",
   code,
@@ -42,7 +48,7 @@ const outcomeOf = (result: NodeResult) =>
 const byName = (results: NodeResult[]) => new Map(results.map((r) => [r.name, r]));
 const statuses = (results: NodeResult[]) =>
   Object.fromEntries(results.map((r) => [r.name, outcomeOf(r)]));
-const errorOf = (result: NodeResult | undefined) =>
+const failureErrorOf = (result: NodeResult | undefined) =>
   result?.status === "failed" && result.error.message;
 const refusal = (add: () => unknown) => {
   try {
@@ -104,7 +110,7 @@ describe("a command", () => {
           env: { ...publish.env, OUT: publish.env?.OUT?.replace(/[0-9a-f-]{36}$/, "<uuid>") },
         },
         publishLog: output.printed.get("publish"),
-        bad: errorOf(results.get("bad")),
+        bad: failureErrorOf(results.get("bad")),
       },
       {
         packOutputs: { tarball },
@@ -327,7 +333,7 @@ describe("a command's paths", () => {
     const root = mkdtempSync(join(tmpdir(), "dag-cwd-"));
     try {
       mkdirSync(join(root, "sub"));
-      const fs = createNodeDagFs();
+      const fs = createFileSystem();
       const { ports } = createTestPorts({ exec: createExec() });
       ports.fs = fs;
       // Relative, as the CLI's .dag/cache is.
@@ -423,11 +429,11 @@ describe("a shell task", () => {
     assert.deepEqual(
       {
         statuses: Object.fromEntries([...results].map(([name, r]) => [name, outcomeOf(r)])),
-        tests: errorOf(results.get("tests")),
-        pipe: [errorOf(results.get("pipe")), output.printed.get("pipe") ?? ""],
+        tests: failureErrorOf(results.get("tests")),
+        pipe: [failureErrorOf(results.get("pipe")), output.printed.get("pipe") ?? ""],
         report: output.printed.get("report"),
-        noBash: errorOf(results.get("no-bash")),
-        missing: errorOf(results.get("missing")),
+        noBash: failureErrorOf(results.get("no-bash")),
+        missing: failureErrorOf(results.get("missing")),
       },
       {
         statuses: {

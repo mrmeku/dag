@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import type { Node } from "./graph/index.ts";
-import { mermaidBody } from "./mermaid.ts";
+import { mermaidBody } from "./mermaid/index.ts";
 
 const node = (
   name: string,

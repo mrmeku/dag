@@ -1,4 +1,11 @@
-import { execute, Graph, namedOutput, type NodeResult } from "@mrmeku/dagraph";
+import {
+  execute,
+  Graph,
+  namedOutput,
+  startGlobalTimer,
+  wallClock,
+  type NodeResult,
+} from "@mrmeku/dagraph";
 import assert from "node:assert/strict";
 import { describe, test } from "node:test";
 import { cache } from "./cache.ts";
@@ -14,7 +21,7 @@ async function executeUnder(graph: Graph<Ports>, ports: Ports) {
   const output = createOutputRecorder();
   const results = await execute(
     graph,
-    { ports, fs: ports.fs, clock: Date, cacheDir: CACHE_DIR },
+    { ports, fs: ports.fs, clock: wallClock, startTimer: startGlobalTimer, cacheDir: CACHE_DIR },
     { onEvent: output.onEvent },
   );
   return { results, printed: output.printed };

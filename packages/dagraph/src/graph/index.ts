@@ -1,11 +1,27 @@
-export { Graph, addNode, closure, graphNodes, type GraphNode } from "./graph.ts";
-export { checkInputs } from "./inputs.ts";
+export { computeActionKey, type ActionKeyDep, type ActionKeyInput } from "./action-key.ts";
 export {
+  actionsFor,
+  defineAction,
+  type Action,
+  type ActionSpec,
+  type ErasedContext,
+  type NodeRefOf,
+  type OutputOf,
+} from "./define-action.ts";
+export { Graph, closure, graphNodes, type GraphNode } from "./graph.ts";
+export type { HashFile } from "./ports.ts";
+export {
+  FILE_HANDLE,
+  FILE_INPUT,
+  collectPaths,
   dep,
   file,
   isFileHandle,
   isFileInput,
+  isInputList,
+  isOutputRef,
   isOutputs,
+  mapPaths,
   maybe,
   namedOutput,
   nodeInputs,
