@@ -3,15 +3,31 @@ import { orchestrate, type RunNode, type Scheduler } from "./orchestrate.ts";
 import {
   lookupNode,
   runAction,
+  type ActionEvent,
+  type CancelledNodeDetails,
   type ExecutionContext,
+  type FailedNodeDetails,
+  type NodeResult,
   type RunActionOptions,
+  type SucceededNodeDetails,
 } from "./process-node.ts";
 import { unboundedScheduler } from "./schedulers.ts";
-import type { ExecListener, Result } from "./types.ts";
+import type { OrchestrationEvent } from "./types.ts";
+
+/** One stream of what happens in an execution: orchestration's events and lookup-or-run's. */
+export type ExecutionEvent<Meta = unknown> =
+  | OrchestrationEvent<Meta, SucceededNodeDetails, FailedNodeDetails, CancelledNodeDetails>
+  | ActionEvent<Meta>;
+
+/**
+ * Receives each `ExecutionEvent`, as an `OrchestrationListener` receives orchestration's and an
+ * `ActionListener` lookup-or-run's.
+ */
+export type ExecutionListener<Meta = unknown> = (event: ExecutionEvent<Meta>) => unknown;
 
 /** The options of one execution. The execution context outlives it. */
 export interface ExecuteOptions<Meta = unknown> {
-  onEvent?: ExecListener<Meta>;
+  onEvent?: ExecutionListener<Meta>;
   scheduler?: Scheduler;
   /**
    * Cancels the execution: nodes still waiting settle `cancelled` and nothing new starts. A
@@ -29,7 +45,7 @@ export function execute<Ports, Meta>(
   graph: Graph<Ports, Meta>,
   executionContext: ExecutionContext<NoInfer<Ports>>,
   options: ExecuteOptions<Meta> = {},
-): Promise<Result[]> {
+): Promise<NodeResult[]> {
   const { onEvent, scheduler = unboundedScheduler(), signal } = options;
   const run = runNode(graph, executionContext, {
     ...(signal && { signal }),
@@ -40,21 +56,24 @@ export function execute<Ports, Meta>(
 
 /**
  * The `RunNode` that `execute` uses: each node of `graph` processed in this process, its lookup
- * first and, on a miss, its action once the scheduler lets it run. A cancel while it waits settles it
- * `cancelled`.
+ * first, given its deps' entries, and, on a miss, its action once the scheduler lets it run. A
+ * cancel while it waits settles it `cancelled`.
  */
 export function runNode<Ports, Meta>(
   graph: Graph<Ports, Meta>,
   executionContext: ExecutionContext<NoInfer<Ports>>,
   options: RunActionOptions<Meta> = {},
-): RunNode<Node<Meta>> {
-  return async (node, depEntries, waitForScheduler) => {
+): RunNode<Node<Meta>, SucceededNodeDetails, FailedNodeDetails, CancelledNodeDetails> {
+  return async (node, depDetails, waitForScheduler) => {
+    const depEntries = Object.fromEntries(
+      Object.entries(depDetails).map(([dep, details]) => [dep, details.entry]),
+    );
     const found = await lookupNode(graph, node.name, depEntries, executionContext);
     if (found.status !== "missed") return found;
     try {
       await waitForScheduler();
     } catch {
-      return { name: found.name, actionKey: found.actionKey, status: "cancelled" };
+      return { name: found.name, status: "cancelled", details: { actionKey: found.actionKey } };
     }
     return runAction(graph, found, depEntries, executionContext, options);
   };

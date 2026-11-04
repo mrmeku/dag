@@ -7,7 +7,7 @@ import { dirname, join, relative } from "node:path";
 
 import { commitEntry, lookupEntry, newStagingDir, pruneCache, type DagFs } from "./cache.ts";
 import { actionsFor } from "./define-action.ts";
-import { execute } from "./execute.ts";
+import { execute, type ExecutionEvent } from "./execute.ts";
 import { fileHandle } from "./file-handle.ts";
 import {
   dep,
@@ -35,15 +35,16 @@ import {
 import { createBunDagFs } from "./ports/fs.ts";
 import { createMemoryDagFs } from "./ports/memory-fs.ts";
 import { createNodeDagFs } from "./ports/node-fs.ts";
-import { lookupNode, processNode, type RunActionOptions } from "./process-node.ts";
-import { throttledScheduler } from "./schedulers.ts";
 import {
-  countResultsByStatus,
-  isResult,
-  isSucceeded,
-  type ExecEvent,
-  type Result,
-} from "./types.ts";
+  isNodeResult,
+  lookupNode,
+  processNode,
+  resultActionKey,
+  type NodeResult,
+  type RunActionOptions,
+} from "./process-node.ts";
+import { throttledScheduler } from "./schedulers.ts";
+import { countResultsByStatus } from "./types.ts";
 import { errorMessage } from "./utils.ts";
 
 interface Ports {
@@ -106,17 +107,20 @@ const matching = (re: RegExp): unknown => expect.stringMatching(re);
 const anyHash = matching(/^[0-9a-f]{64}$/);
 const anyNumber: unknown = expect.any(Number);
 
-const statuses = (rs: Result[]) => Object.fromEntries(rs.map((r) => [r.name, r.status]));
-const counts = (rs: Result[]) => ({
-  ran: countResultsByStatus(rs).done,
-  hit: countResultsByStatus(rs).cached,
+/** How a node settled: its status, or whether its action ran when it succeeded. */
+const outcome = (r: NodeResult) =>
+  r.status === "succeeded" ? (r.details.actionRan ? "ran" : "hit") : r.status;
+const statuses = (rs: NodeResult[]) => Object.fromEntries(rs.map((r) => [r.name, outcome(r)]));
+const counts = (rs: NodeResult[]) => ({
+  ran: rs.filter((r) => outcome(r) === "ran").length,
+  hit: rs.filter((r) => outcome(r) === "hit").length,
 });
-const outputsOf = (r: Result | undefined) =>
-  r && isSucceeded(r) ? namedOutput(r.outputs, "out") : "";
-/** A result that succeeded; refused when it did not. */
-const succeeded = (r: Result | undefined) => {
-  assert.ok(r && isSucceeded(r), `${r?.name ?? "the node"} did not succeed`);
-  return r;
+const outputsOf = (r: NodeResult | undefined) =>
+  r?.status === "succeeded" ? namedOutput(r.details.entry.outputs, "out") : "";
+/** The details of a result that succeeded; refused when it did not. */
+const successDetailsOf = (r: NodeResult | undefined) => {
+  assert.ok(r?.status === "succeeded", `${r?.name ?? "the node"} did not succeed`);
+  return r.details;
 };
 /** The path of a dep's `out`. */
 const depPath = (outputs: Outputs | undefined) => {
@@ -246,18 +250,22 @@ describe("execute", () => {
       Object.fromEntries(
         results.map((r) => [
           r.name,
-          [r.status, /^[0-9a-f]{64}$/.test(r.actionKey), r.status === "dep-failed" ? r.dep : ""],
+          [
+            outcome(r),
+            /^[0-9a-f]{64}$/.test(resultActionKey(r) ?? ""),
+            r.status === "dep-failed" ? r.dep : "",
+          ],
         ]),
       ),
     ).toEqual({
-      good_root: ["done", true, ""],
-      good_child: ["done", true, ""],
+      good_root: ["ran", true, ""],
+      good_child: ["ran", true, ""],
       bad_root: ["failed", true, ""],
       mid: ["dep-failed", false, "bad_root"],
       leaf: ["dep-failed", false, "mid"],
-      top: ["done", true, ""],
+      top: ["ran", true, ""],
       left: ["failed", true, ""],
-      right: ["done", true, ""],
+      right: ["ran", true, ""],
       bottom: ["dep-failed", false, "left"],
     });
   });
@@ -274,7 +282,7 @@ describe("execute", () => {
     task(g, "leaf", { deps: { mid, worse, bad } });
     task(g, "tolerant", { deps: { worse: settled(worse), mid } });
     const results = await execute(g, ctx);
-    const held = { actionKey: "", status: "dep-failed" } as const;
+    const held = { status: "dep-failed" } as const;
     expect(
       Object.fromEntries(results.filter((r) => r.status === "dep-failed").map((r) => [r.name, r])),
     ).toEqual({
@@ -345,14 +353,14 @@ describe("the action key", () => {
     const [two] = await execute(third, ctx);
     assert.ok(one && again && two, "each graph settles its node");
     expect({
-      one: one.status,
-      again: [again.name, again.status, again.actionKey === one.actionKey],
-      two: [two.status, two.actionKey === one.actionKey],
+      one: outcome(one),
+      again: [again.name, outcome(again), resultActionKey(again) === resultActionKey(one)],
+      two: [outcome(two), resultActionKey(two) === resultActionKey(one)],
       read: [await fs.readText(outputsOf(again)), await fs.readText(outputsOf(two))],
     }).toEqual({
-      one: "done",
-      again: ["v:b", "cached", true],
-      two: ["done", false],
+      one: "ran",
+      again: ["v:b", "hit", true],
+      two: ["ran", false],
       read: ["made by one", "made by two"],
     });
   });
@@ -371,9 +379,9 @@ describe("the action key", () => {
       statuses(await execute(build(["x", "y"]), ctx)),
       statuses(await execute(build(["x", "y"], true), ctx)),
     ]).toEqual([
-      { a: "done", b: "done", join: "done" },
-      { x: "cached", y: "cached", join: "cached" },
-      { x: "cached", y: "cached", join: "done" },
+      { a: "ran", b: "ran", join: "ran" },
+      { x: "hit", y: "hit", join: "hit" },
+      { x: "hit", y: "hit", join: "ran" },
     ]);
   });
 
@@ -384,7 +392,7 @@ describe("the action key", () => {
       task(g, "n", { inputs });
       const [r] = await execute(g, ctx);
       assert.ok(r, "the node settles");
-      return [r.status, await fs.readText(outputsOf(r))];
+      return [outcome(r), await fs.readText(outputsOf(r))];
     };
     expect([
       await run({ opts: { a: 1, b: [1, 2] } }),
@@ -392,10 +400,10 @@ describe("the action key", () => {
       await run({ opts: { a: "1", b: [1, 2] } }),
       await run({ opts: { a: 1, b: [2, 1] } }),
     ]).toEqual([
-      ["done", '{"id":"n","opts":{"a":1,"b":[1,2]}}'],
-      ["cached", '{"id":"n","opts":{"a":1,"b":[1,2]}}'],
-      ["done", '{"id":"n","opts":{"a":"1","b":[1,2]}}'],
-      ["done", '{"id":"n","opts":{"a":1,"b":[2,1]}}'],
+      ["ran", '{"id":"n","opts":{"a":1,"b":[1,2]}}'],
+      ["hit", '{"id":"n","opts":{"a":1,"b":[1,2]}}'],
+      ["ran", '{"id":"n","opts":{"a":"1","b":[1,2]}}'],
+      ["ran", '{"id":"n","opts":{"a":1,"b":[2,1]}}'],
     ]);
   });
 
@@ -428,11 +436,11 @@ describe("the action key", () => {
     await fs.writeText("/src/a.ts", "a2");
     const edited = await run(asFile);
     const asValue = await run((g, name) => task(g, name, { inputs: { src: "/src/a.ts" } }));
-    const ran = { one: "done", two: "done", three: "done" } as const;
+    const ran = { one: "ran", two: "ran", three: "ran" } as const;
     expect({ first, firstHashed, same, edited, asValue }).toEqual({
       first: [ran, "/src/a.ts: a1"],
       firstHashed: 3,
-      same: [{ one: "cached", two: "cached", three: "cached" }, "/src/a.ts: a1"],
+      same: [{ one: "hit", two: "hit", three: "hit" }, "/src/a.ts: a1"],
       edited: [ran, "/src/a.ts: a2"],
       asValue: [ran, '{"id":"one","src":"/src/a.ts"}'],
     });
@@ -457,11 +465,11 @@ describe("the action key", () => {
       });
       reader.addNode(g, { name: "late", deps: { gen }, inputs: { id: "late", src } });
       const late = (await execute(g, ctx)).find((r) => r.name === "late");
-      return [late?.status, await fs.readText(outputsOf(late))];
+      return [late && outcome(late), await fs.readText(outputsOf(late))];
     };
     expect([await run("one"), await run("two")]).toEqual([
-      ["done", "one"],
-      ["done", "two"],
+      ["ran", "one"],
+      ["ran", "two"],
     ]);
   });
 
@@ -493,7 +501,7 @@ describe("the action key", () => {
       });
       const results = await execute(g, ctx);
       const [packed, published] = results;
-      const tarball = namedOutput(succeeded(packed).outputs, "tarball");
+      const tarball = namedOutput(successDetailsOf(packed).entry.outputs, "tarball");
       return {
         statuses: statuses(results),
         reads:
@@ -501,8 +509,8 @@ describe("the action key", () => {
       };
     };
     expect([await run("1.0"), await run("1.1")]).toEqual([
-      { statuses: { pack: "done", publish: "done" }, reads: true },
-      { statuses: { pack: "done", publish: "cached" }, reads: false },
+      { statuses: { pack: "ran", publish: "ran" }, reads: true },
+      { statuses: { pack: "ran", publish: "hit" }, reads: false },
     ]);
   });
 });
@@ -555,19 +563,19 @@ describe("refs and outputs in the key", () => {
       extraChanged: await run("a", "y"),
       mainChanged: await run("b", "y"),
     }).toEqual({
-      first: { "pair-of-files": "done", required: "done", settled: "done", maybe: "done" },
+      first: { "pair-of-files": "ran", required: "ran", settled: "ran", maybe: "ran" },
       readFirst: [
         ["required", "main"],
         ["settled", "main"],
         ["maybe", "main"],
       ],
       extraChanged: {
-        "pair-of-files": "done",
-        required: "cached",
-        settled: "cached",
-        maybe: "cached",
+        "pair-of-files": "ran",
+        required: "hit",
+        settled: "hit",
+        maybe: "hit",
       },
-      mainChanged: { "pair-of-files": "done", required: "done", settled: "done", maybe: "done" },
+      mainChanged: { "pair-of-files": "ran", required: "ran", settled: "ran", maybe: "ran" },
     });
   });
 
@@ -591,7 +599,7 @@ describe("refs and outputs in the key", () => {
     declare(g, pair.addNode(g, { name: names[0] }), pair.addNode(g, { name: names[1] }));
     const use = (await execute(g, ctx)).find((r) => r.name === "use");
     assert.ok(use, "use settles");
-    return use.actionKey;
+    return resultActionKey(use);
   };
   const leftAndRight =
     (role: "left" | "right", output: keyof Pair) =>
@@ -660,7 +668,7 @@ describe("refs and outputs in the key", () => {
         },
       }).addNode(g, {});
       const [r] = await execute(g, ctx);
-      return succeeded(r).contentHash;
+      return successDetailsOf(r).entry.contentHash;
     };
     const base = await hashOf(1, { main: ["x.txt", "A"], extra: ["y.txt", "B"] });
     expect({
@@ -682,11 +690,11 @@ describe("refs and outputs in the key", () => {
       Object.fromEntries(
         results.map((r) => [
           r.name,
-          r.status === "failed" ? [r.status, r.actionKey, r.error.message] : r.status,
+          r.status === "failed" ? [r.status, r.details, r.error.message] : r.status,
         ]),
       ),
     ).toEqual({
-      unreadable: ["failed", "", "ENOENT: /missing.ts"],
+      unreadable: ["failed", undefined, "ENOENT: /missing.ts"],
       after: "dep-failed",
     });
   });
@@ -721,7 +729,7 @@ describe("file handles", () => {
       }),
     }).addNode(g, { deps: { record } });
     const [recorded, reads] = await execute(g, ctx);
-    const outputs = succeeded(recorded).outputs;
+    const outputs = successDetailsOf(recorded).entry.outputs;
     const parts = outputs["parts"];
     assert.ok(Array.isArray(parts));
     expect(JSON.parse(await ctx.fs.readText(outputsOf(reads)))).toEqual({
@@ -772,7 +780,7 @@ describe("file handles", () => {
       },
     }).addNode(g, { deps: { data } });
     const [made, parsed] = await execute(g, ctx);
-    const outputs = succeeded(made).outputs;
+    const outputs = successDetailsOf(made).entry.outputs;
     expect(JSON.parse(await ctx.fs.readText(outputsOf(parsed)))).toEqual({
       value: { count: 3 },
       refused: `${namedOutput(outputs, "counted")} holds JSON that isWords refuses`,
@@ -856,9 +864,10 @@ describe("the cache", () => {
       });
       return g;
     };
-    const m = succeeded((await execute(build(), ctx)).find((r) => r.name === "m"));
+    const m = (await execute(build(), ctx)).find((r) => r.name === "m");
+    const { actionKey, entry } = successDetailsOf(m);
     const second = await execute(build(), ctx);
-    const dir = `/cache/v1/${m.actionKey}`;
+    const dir = `/cache/v1/${actionKey}`;
     const [outputDir] = seen;
     assert.ok(outputDir, "the action saw its output dir");
     expect({
@@ -868,9 +877,9 @@ describe("the cache", () => {
       files: [...fs.files.keys()].sort(),
     }).toEqual({
       outputDir: "/cache/tmp/<uuid>",
-      outputs: `${dir}/${m.contentHash}/manifest.json`,
-      second: { m: "cached", broken: "failed" },
-      files: [`${dir}/${m.contentHash}/manifest.json`, `${dir}/manifest.json`],
+      outputs: `${dir}/${entry.contentHash}/manifest.json`,
+      second: { m: "hit", broken: "failed" },
+      files: [`${dir}/${entry.contentHash}/manifest.json`, `${dir}/manifest.json`],
     });
   });
 
@@ -984,14 +993,13 @@ describe("the cache", () => {
       }
       return g;
     };
-    const by = (rs: Result[]) => Object.fromEntries(rs.map((r) => [r.name, r]));
+    const by = (rs: NodeResult[]) => Object.fromEntries(rs.map((r) => [r.name, r]));
     const first = by(await execute(build(["v1", "v2"]), ctx));
     const both = (node: string) => [first[`v1:${node}`], first[`v2:${node}`]].map(outputsOf);
-    const cleaned = first["v1:clean_description"];
-    assert.ok(cleaned, "v1:clean_description settles");
+    const cleaned = successDetailsOf(first["v1:clean_description"]);
     const entry = await lookupEntry(fs, "/cache", cleaned.actionKey, Date);
     const together = {
-      statuses: Object.values(first).map((r) => r.status),
+      statuses: Object.values(first).map(outcome),
       chapters: new Set(both("chapters")).size,
       cleaned: await Promise.all(both("clean_description").map((p) => fs.exists(p))),
       entry: both("clean_description").includes(depPath(entry?.outputs)),
@@ -999,10 +1007,12 @@ describe("the cache", () => {
     };
     const next = by(await execute(build(["v1"]), { ...ctx, forcedKeys: "all" }));
     const dirsOf = async (node: string) => {
-      const r = succeeded(next[`v1:${node}`]);
-      const dirs = await fs.readdir(`/cache/v1/${r.actionKey}`);
+      const { actionKey, entry } = successDetailsOf(next[`v1:${node}`]);
+      const dirs = await fs.readdir(`/cache/v1/${actionKey}`);
       return dirs
-        .map((d) => (d === r.contentHash ? "<its own>" : d === "manifest.json" ? d : "<earlier>"))
+        .map((d) =>
+          d === entry.contentHash ? "<its own>" : d === "manifest.json" ? d : "<earlier>",
+        )
         .sort();
     };
     expect({
@@ -1012,7 +1022,7 @@ describe("the cache", () => {
       upload: await dirsOf("upload"),
     }).toEqual({
       together: {
-        statuses: ["done", "done", "done", "done", "done", "done"],
+        statuses: ["ran", "ran", "ran", "ran", "ran", "ran"],
         chapters: 1,
         cleaned: [true, true],
         entry: true,
@@ -1031,11 +1041,11 @@ describe("the cache", () => {
       task(g, "a");
       const [r] = await execute(g, { ...ctx, cacheDir });
       assert.ok(r, "the node settles");
-      return [r.status, outputsOf(r).startsWith(`/cache/v1/${r.actionKey}/`)];
+      return [outcome(r), outputsOf(r).startsWith(`/cache/v1/${resultActionKey(r)}/`)];
     };
     expect([await run("/cache/"), await run("/cache")]).toEqual([
-      ["done", true],
-      ["cached", true],
+      ["ran", true],
+      ["hit", true],
     ]);
   });
 
@@ -1064,7 +1074,7 @@ describe("the cache", () => {
       process.chdir(dir);
       try {
         const [r] = await execute(build(), { ports: { fs }, fs, cacheDir, clock: Date });
-        return succeeded(r);
+        return successDetailsOf(r);
       } finally {
         process.chdir(home);
       }
@@ -1081,21 +1091,21 @@ describe("the cache", () => {
       await rm(`${tmp}/first`, { recursive: true });
       const restored = await runIn(`${tmp}/restored`, "cache");
       const outputsIn = (tree: string) => {
-        const dir = `${tmp}/${tree}/${keyDir}/${first.contentHash}`;
+        const dir = `${tmp}/${tree}/${keyDir}/${first.entry.contentHash}`;
         return { joined: `${dir}/srt`, relative: `${dir}/b` };
       };
       expect({
-        statuses: [first.status, absolute.status, restored.status],
+        ran: [first.actionRan, absolute.actionRan, restored.actionRan],
         outputDir: seen.map((d) => d.replace(/[0-9a-f-]{36}$/, "<uuid>")),
         manifest,
-        outputs: [first.outputs, absolute.outputs, restored.outputs],
+        outputs: [first.entry.outputs, absolute.entry.outputs, restored.entry.outputs],
       }).toEqual({
-        statuses: ["done", "cached", "cached"],
+        ran: [true, false, false],
         outputDir: [`${tmp}/first/cache/tmp/<uuid>`],
         manifest: {
           outputs: { joined: "srt", relative: "b" },
-          contentHash: first.contentHash,
-          outputHashes: first.outputHashes,
+          contentHash: first.entry.contentHash,
+          outputHashes: first.entry.outputHashes,
           fileStats: { srt: { size: 9, mtimeMs: anyNumber }, b: { size: 1, mtimeMs: anyNumber } },
         },
         outputs: [outputsIn("first"), outputsIn("first"), outputsIn("restored")],
@@ -1149,10 +1159,10 @@ describe("the cache", () => {
       await Promise.all([execute(graph("A"), c), execute(graph("B"), c)]);
       const third = await execute(graph("C"), c);
       const double = third.find((r) => r.name === "double");
-      const read = double?.status === "cached" && (await fs.readText(outputsOf(double)));
+      const read = double && outcome(double) === "hit" && (await fs.readText(outputsOf(double)));
       await rm(dirname(cacheDir), { recursive: true, force: true });
       expect({ statuses: statuses(third), double: read }).toEqual({
-        statuses: { count: "cached", double: "cached" },
+        statuses: { count: "hit", double: "hit" },
         double: "84",
       });
     });
@@ -1177,21 +1187,21 @@ describe("the cache", () => {
       await fs.writeText(out, "damaged");
       const rerun = async () =>
         Object.fromEntries(
-          (await execute(build(), ctx)).map((r) => [r.name, [r.status, outputsOf(r)]]),
+          (await execute(build(), ctx)).map((r) => [r.name, [outcome(r), outputsOf(r)]]),
         );
       const again = await rerun();
       const third = await rerun();
       const left = { content: await fs.readText(out), tmp: await fs.readdir(`${cacheDir}/tmp`) };
       await rm(dirname(cacheDir), { recursive: true, force: true });
       expect({ again, third, left }).toEqual({
-        again: { first: ["done", out], second: ["done", out] },
-        third: { first: ["cached", out], second: ["cached", out] },
+        again: { first: ["ran", out], second: ["ran", out] },
+        third: { first: ["hit", out], second: ["hit", out] },
         left: { content: "original", tmp: [] },
       });
     });
 
   /** Each node's error message, or its status when it did not fail. */
-  const errors = (rs: Result[]) =>
+  const errors = (rs: NodeResult[]) =>
     Object.fromEntries(rs.map((r) => [r.name, r.status === "failed" ? r.error.message : r.status]));
 
   for (const [label, createFs] of filesystems)
@@ -1219,7 +1229,7 @@ describe("the cache", () => {
       const first = await execute(build(), c);
       const second = await execute(build(), c);
       const stored = await Promise.all(
-        second.map((r) => fs.exists(`${cacheDir}/v1/${r.actionKey}/manifest.json`)),
+        second.map((r) => fs.exists(`${cacheDir}/v1/${resultActionKey(r)}/manifest.json`)),
       );
       await rm(dirname(cacheDir), { recursive: true, force: true });
       const fix = (file: string) =>
@@ -1289,7 +1299,7 @@ describe("the cache", () => {
       const out = outputsOf((await execute(g, { ports: { fs }, fs, cacheDir, clock: Date }))[0]);
       const mode = (await fs.lstat(out)).mode & 0o777;
       const rewrite = await fs.writeText(out, "echo bye").then(
-        () => "done",
+        () => "rewritten",
         (e: unknown) => (e instanceof Error && "code" in e ? e.code : e),
       );
       await rm(dirname(cacheDir), { recursive: true, force: true });
@@ -1313,16 +1323,18 @@ describe("the cache", () => {
       };
       const lookup = async () => {
         hashed.length = 0;
-        return [(await lookupNode(build(), "a", {}, ctx)).status, hashed.length];
+        const found = await lookupNode(build(), "a", {}, ctx);
+        return [found.status === "succeeded" ? "hit" : found.status, hashed.length];
       };
-      const first = succeeded((await execute(build(), ctx))[0]);
+      const [first] = await execute(build(), ctx);
+      const { actionKey, entry } = successDetailsOf(first);
       const out = outputsOf(first);
       const hit = await lookup();
       await execute(build(), { ...ctx, forcedKeys: "all" });
       const afterForced = await lookup();
-      const manifestFile = `${cacheDir}/v1/${first.actionKey}/manifest.json`;
+      const manifestFile = `${cacheDir}/v1/${actionKey}/manifest.json`;
       const recorded = await disk.readText(manifestFile);
-      const { contentHash, outputHashes } = first;
+      const { contentHash, outputHashes } = entry;
       await disk.writeText(
         manifestFile,
         JSON.stringify({ outputs: { out: "out" }, contentHash, outputHashes }),
@@ -1338,8 +1350,8 @@ describe("the cache", () => {
       const gone = await lookup();
       await rm(dirname(cacheDir), { recursive: true, force: true });
       expect({ hit, afterForced, unrecorded, changed, gone }).toEqual({
-        hit: ["cached", 0],
-        afterForced: ["cached", 0],
+        hit: ["hit", 0],
+        afterForced: ["hit", 0],
         unrecorded: ["missed", 0],
         changed: ["missed", 1],
         gone: ["missed", 1],
@@ -1373,11 +1385,11 @@ describe("the cache", () => {
         task(g, "a");
         return g;
       };
-      const { actionKey, contentHash } = succeeded((await execute(build(), ctx))[0]);
+      const { actionKey, entry } = successDetailsOf((await execute(build(), ctx))[0]);
       const keyDir = `${cacheDir}/v1/${actionKey}`;
       const lastUses = async () => ({
         manifest: (await fs.lstat(`${keyDir}/manifest.json`)).mtimeMs,
-        contentDir: (await fs.lstat(`${keyDir}/${contentHash}`)).mtimeMs,
+        contentDir: (await fs.lstat(`${keyDir}/${entry.contentHash}`)).mtimeMs,
       });
       const committed = await lastUses();
       now = hitAt;
@@ -1469,12 +1481,11 @@ describe("cacheable: false", () => {
     };
     await execute(build(), ctx);
     const second = await execute(build(), ctx);
-    const probe = second.find((r) => r.name === "probe");
-    assert.ok(probe, "probe settles");
+    const probe = successDetailsOf(second.find((r) => r.name === "probe"));
     expect({
       second: statuses(second),
       stored: await fs.exists(`/cache/v1/${probe.actionKey}/manifest.json`),
-    }).toEqual({ second: { probe: "done", report: "cached" }, stored: false });
+    }).toEqual({ second: { probe: "ran", report: "hit" }, stored: false });
   });
 });
 
@@ -1492,9 +1503,9 @@ test("early cutoff: a node that runs again to the same content keeps its depende
     statuses(await execute(build(2, "stable"), ctx)),
     statuses(await execute(build(3, "changed"), ctx)),
   ]).toEqual([
-    { a: "done", b: "done", c: "done" },
-    { a: "done", b: "cached", c: "cached" },
-    { a: "done", b: "done", c: "cached" },
+    { a: "ran", b: "ran", c: "ran" },
+    { a: "ran", b: "hit", c: "hit" },
+    { a: "ran", b: "ran", c: "hit" },
   ]);
 });
 
@@ -1532,7 +1543,7 @@ describe("events", () => {
         return "grouped";
       },
     });
-    const events: ExecEvent[] = [];
+    const events: ExecutionEvent[] = [];
     await execute(
       g,
       { ...ctx, clock: { now: () => time } },
@@ -1555,18 +1566,23 @@ describe("events", () => {
         occurredAt: 1250,
         result: {
           name: "grouped",
-          actionKey: anyHash,
-          status: "done",
-          outputs: { out: matching(/^\/cache\/v1\/[0-9a-f]{64}\/[0-9a-f]{64}\/out$/) },
-          contentHash: anyHash,
-          outputHashes: { out: anyHash },
-          elapsed: 247,
+          status: "succeeded",
+          details: {
+            actionKey: anyHash,
+            entry: {
+              outputs: { out: matching(/^\/cache\/v1\/[0-9a-f]{64}\/[0-9a-f]{64}\/out$/) },
+              contentHash: anyHash,
+              outputHashes: { out: anyHash },
+            },
+            actionRan: true,
+            elapsed: 247,
+          },
         },
       },
     ]);
   });
 
-  test("a node's dispatch, start, output and result come in that order, each named by node with its meta; start is live while other nodes run, a cached node never starts, and what prints after the result is dropped", async () => {
+  test("a node's dispatch, start, output and result come in that order, each named by node with its meta; start is live while other nodes run, a hit never starts, and what prints after the result is dropped", async () => {
     const { ctx } = setup();
     const releaseSlow = Promise.withResolvers<void>();
     const late = Promise.withResolvers<void>();
@@ -1591,8 +1607,8 @@ describe("events", () => {
     const events: string[][] = [];
     let slowWhenFastSettled: string[][] = [];
     await execute(build(true), ctx, {
-      onEvent: (e: ExecEvent<{ video: string }>) => {
-        const detail = e.type === "output" ? e.chunk : e.type === "result" ? e.result.status : "";
+      onEvent: (e: ExecutionEvent<{ video: string }>) => {
+        const detail = e.type === "output" ? e.chunk : e.type === "result" ? outcome(e.result) : "";
         events.push([e.type, e.node, e.meta?.video ?? "", detail]);
         if (e.type === "result" && e.node === "v1:fast") {
           slowWhenFastSettled = events.filter((ev) => ev[1] === "slow");
@@ -1610,19 +1626,19 @@ describe("events", () => {
     }).toEqual({
       warm: [
         ["dispatch", "v1:warm", "v1", ""],
-        ["result", "v1:warm", "v1", "cached"],
+        ["result", "v1:warm", "v1", "hit"],
       ],
       fast: [
         ["dispatch", "v1:fast", "v1", ""],
         ["start", "v1:fast", "v1", ""],
         ["output", "v1:fast", "v1", "one\n"],
         ["output", "v1:fast", "v1", "two"],
-        ["result", "v1:fast", "v1", "done"],
+        ["result", "v1:fast", "v1", "ran"],
       ],
       slow: [
         ["dispatch", "slow", "", ""],
         ["start", "slow", "", ""],
-        ["result", "slow", "", "done"],
+        ["result", "slow", "", "ran"],
       ],
       slowWhenFastSettled: [
         ["dispatch", "slow", "", ""],
@@ -1649,30 +1665,29 @@ describe("events", () => {
       },
     });
     const results = await execute(g, ctx);
-    const failed = { actionKey: anyHash, status: "failed" };
+    const details = { actionKey: anyHash, elapsed: anyNumber };
     expect(Object.fromEntries(results.map((r) => [r.name, r]))).toStrictEqual<unknown>({
       bad: {
         name: "bad",
-        ...failed,
+        status: "failed",
         error: { name: "RangeError", message: "bad exited 1", cause: { argv: ["bad"], code: 1 } },
-        elapsed: anyNumber,
+        details,
       },
       slow: {
         name: "slow",
-        ...failed,
+        status: "failed",
         error: {
           name: "TimeoutError",
           message: "timed out after 5 ms",
           cause: { argv: ["slow"], code: 1 },
         },
-        elapsed: anyNumber,
-        timedOut: true,
+        details: { ...details, timedOut: true },
       },
       fetch: {
         name: "fetch",
-        ...failed,
+        status: "failed",
         error: { name: "TimeoutError", message: "The operation timed out." },
-        elapsed: anyNumber,
+        details,
       },
     });
   });
@@ -1734,7 +1749,7 @@ describe("a result is plain data", () => {
       ),
       counts: countResultsByStatus(results),
       received,
-      everyIsResult: Array.isArray(received) && received.every(isResult),
+      everyIsResult: Array.isArray(received) && received.every(isNodeResult),
     }).toStrictEqual({
       errors: {
         command: {
@@ -1765,102 +1780,82 @@ describe("a result is plain data", () => {
         mutated: { name: "Error", message: "mutated failed", cause: { code: 1 } },
         normalized: { name: "Error", message: "normalized failed", cause: { code: 0 } },
       },
-      counts: { done: 1, cached: 1, failed: 20, "dep-failed": 2, cancelled: 12 },
+      counts: { succeeded: 2, failed: 20, "dep-failed": 2, cancelled: 12 },
       received: results,
       everyIsResult: true,
     });
   });
 
-  test("isResult accepts a failure with no elapsed, one timedOut, a cancel with elapsed, and a failure an earlier version wrote with elapsed 0, and refuses a record that lacks a field its status needs, whose optional field is malformed, or whose status no result has", () => {
-    const outputs = { out: "/o" };
-    const cached = {
+  test("isNodeResult accepts a hit, a failure with no details or no elapsed, one timedOut, and a cancel with or without details, and refuses a record that lacks a field its status needs, whose optional field is malformed, that is timedOut without an elapsed, that an earlier version wrote as a hit, or whose status no result has", () => {
+    const entry = { outputs: { out: "/o" }, contentHash: "h", outputHashes: {} };
+    const hit = {
       name: "a",
-      actionKey: "k",
-      status: "cached",
-      outputs,
-      contentHash: "h",
-      outputHashes: {},
+      status: "succeeded",
+      details: { actionKey: "k", entry, actionRan: false },
+    };
+    const failed = { name: "a", status: "failed", error: { name: "Error", message: "m" } };
+    const timedOut = {
+      ...failed,
+      error: { name: "TimeoutError", message: "m" },
+      details: { actionKey: "k", elapsed: 1, timedOut: true },
     };
     const records = {
-      // Only a node that ran has an elapsed time.
-      cached,
-      doneWithoutElapsed: { ...cached, status: "done" },
-      cachedWithoutHash: { name: "a", actionKey: "k", status: "cached", outputs },
-      outputsNotPaths: { ...cached, outputs: { out: 1 } },
-      outputsNotRecord: { ...cached, outputs: "/o" },
-      failedWithoutMessage: {
-        name: "a",
-        actionKey: "k",
-        status: "failed",
-        error: { name: "Error" },
-        elapsed: 1,
+      hit,
+      // Only a node whose action ran has an elapsed time.
+      ranWithoutElapsed: { ...hit, details: { ...hit.details, actionRan: true } },
+      entryWithoutHash: {
+        ...hit,
+        details: { ...hit.details, entry: { outputs: entry.outputs, outputHashes: {} } },
       },
-      causeNotJson: {
-        name: "a",
-        actionKey: "k",
-        status: "failed",
-        error: { name: "Error", message: "m", cause: 1n },
-        elapsed: 1,
+      outputsNotPaths: {
+        ...hit,
+        details: { ...hit.details, entry: { ...entry, outputs: { out: 1 } } },
       },
-      failedBeforeStart: {
+      failedWithoutMessage: { ...failed, error: { name: "Error" } },
+      causeNotJson: { ...failed, error: { name: "Error", message: "m", cause: 1n } },
+      failedWithoutKey: failed,
+      failedBeforeStart: { ...failed, details: { actionKey: "k" } },
+      detailsWithoutKey: { ...failed, details: { elapsed: 1 } },
+      timedOut,
+      timedOutWithoutElapsed: { ...timedOut, details: { actionKey: "k", timedOut: true } },
+      timedOutNotTrue: { ...timedOut, details: { actionKey: "k", elapsed: 1, timedOut: false } },
+      depFailedWithoutDep: { name: "a", status: "dep-failed" },
+      rootCausesNotNames: { name: "a", status: "dep-failed", dep: "b", rootCauses: [1] },
+      cancelledBeforeDispatch: { name: "a", status: "cancelled" },
+      cancelledWhileRunning: {
         name: "a",
-        actionKey: "",
-        status: "failed",
-        error: { name: "Error", message: "m" },
+        status: "cancelled",
+        details: { actionKey: "k", elapsed: 1 },
       },
-      failedWithElapsedZero: {
+      cancelledElapsedNotNumber: {
         name: "a",
-        actionKey: "",
-        status: "failed",
-        error: { name: "Error", message: "m" },
-        elapsed: 0,
+        status: "cancelled",
+        details: { actionKey: "k", elapsed: "1" },
       },
-      timedOut: {
-        name: "a",
-        actionKey: "k",
-        status: "failed",
-        error: { name: "TimeoutError", message: "m" },
-        elapsed: 1,
-        timedOut: true,
-      },
-      timedOutNotTrue: {
-        name: "a",
-        actionKey: "k",
-        status: "failed",
-        error: { name: "TimeoutError", message: "m" },
-        elapsed: 1,
-        timedOut: false,
-      },
-      depFailedWithoutDep: { name: "a", actionKey: "", status: "dep-failed" },
-      rootCausesNotNames: {
-        name: "a",
-        actionKey: "",
-        status: "dep-failed",
-        dep: "b",
-        rootCauses: [1],
-      },
-      cancelledWhileRunning: { name: "a", actionKey: "k", status: "cancelled", elapsed: 1 },
-      cancelledElapsedNotNumber: { name: "a", actionKey: "k", status: "cancelled", elapsed: "1" },
-      withoutActionKey: { name: "a", status: "cancelled" },
-      unknownStatus: { name: "a", actionKey: "", status: "skipped" },
+      earlierHit: { name: "a", actionKey: "k", status: "cached", ...entry },
+      unknownStatus: { name: "a", status: "skipped" },
     };
-    expect(Object.fromEntries(Object.entries(records).map(([k, v]) => [k, isResult(v)]))).toEqual({
-      cached: true,
-      doneWithoutElapsed: false,
-      cachedWithoutHash: false,
+    expect(
+      Object.fromEntries(Object.entries(records).map(([k, v]) => [k, isNodeResult(v)])),
+    ).toEqual({
+      hit: true,
+      ranWithoutElapsed: false,
+      entryWithoutHash: false,
       outputsNotPaths: false,
-      outputsNotRecord: false,
       failedWithoutMessage: false,
       causeNotJson: false,
+      failedWithoutKey: true,
       failedBeforeStart: true,
-      failedWithElapsedZero: true,
+      detailsWithoutKey: false,
       timedOut: true,
+      timedOutWithoutElapsed: false,
       timedOutNotTrue: false,
       depFailedWithoutDep: false,
       rootCausesNotNames: false,
+      cancelledBeforeDispatch: true,
       cancelledWhileRunning: true,
       cancelledElapsedNotNumber: false,
-      withoutActionKey: false,
+      earlierHit: false,
       unknownStatus: false,
     });
   });
@@ -1895,16 +1890,16 @@ test("a listener's promise for a start holds the action back until it resolves, 
     ranWhileRecording,
     ran,
     results: Object.fromEntries(
-      results.map((r) => [r.name, r.status === "failed" ? r.error.message : r.status]),
+      results.map((r) => [r.name, r.status === "failed" ? r.error.message : outcome(r)]),
     ),
   }).toEqual({
     ranWhileRecording: [],
     ran: ["recorded"],
-    results: { recorded: "done", unrecorded: "the journal is full" },
+    results: { recorded: "ran", unrecorded: "the journal is full" },
   });
 });
 
-test("a failed or cancelled node has an elapsed exactly when its action ran", async () => {
+test("a failed or cancelled node's details carry their key once it has one, and an elapsed exactly when its action ran", async () => {
   const { ctx } = setup();
   let time = 0;
   const context = { ...ctx, clock: { now: () => time } };
@@ -1952,17 +1947,17 @@ test("a failed or cancelled node has an elapsed exactly when its action ran", as
   ];
   const failed = (name: string, message: string) => ({
     name,
-    actionKey: anyHash,
     status: "failed",
     error: { name: "Error", message },
   });
+  const keyed = { actionKey: anyHash };
   expect(results).toStrictEqual<unknown>([
-    { ...failed("unkeyable", "ENOENT: /missing.ts"), actionKey: "" },
-    failed("unresolvable", '"made" has no output "out"'),
-    failed("unrecorded", "journal full"),
-    { name: "held", actionKey: anyHash, status: "cancelled" },
-    { ...failed("broke", "broke"), elapsed: 40 },
-    { name: "caught", actionKey: anyHash, status: "cancelled", elapsed: 25 },
+    failed("unkeyable", "ENOENT: /missing.ts"),
+    { ...failed("unresolvable", '"made" has no output "out"'), details: keyed },
+    { ...failed("unrecorded", "journal full"), details: keyed },
+    { name: "held", status: "cancelled", details: keyed },
+    { ...failed("broke", "broke"), details: { ...keyed, elapsed: 40 } },
+    { name: "caught", status: "cancelled", details: { ...keyed, elapsed: 25 } },
   ]);
 });
 
@@ -1990,8 +1985,8 @@ test("an interrupted execution resumes from where it left off", async () => {
     await execute(build(), ctx, { onEvent: (e) => e.type === "start" && started.push(e.node) }),
   );
   expect({ first, second, started }).toEqual({
-    first: { a: "done", b: "failed", c: "dep-failed", d: "dep-failed" },
-    second: { a: "cached", b: "done", c: "done", d: "done" },
+    first: { a: "ran", b: "failed", c: "dep-failed", d: "dep-failed" },
+    second: { a: "hit", b: "ran", c: "ran", d: "ran" },
     started: ["b", "c", "d"],
   });
 });
@@ -2078,10 +2073,10 @@ test("a settled dep: its dependent runs without it, keyed as missing, and runs a
     received,
   }).toEqual({
     runs: [
-      { captions: "failed", entry: "done" },
-      { captions: "failed", entry: "cached" },
-      { captions: "done", entry: "done" },
-      { captions: "cached", entry: "cached" },
+      { captions: "failed", entry: "ran" },
+      { captions: "failed", entry: "hit" },
+      { captions: "ran", entry: "ran" },
+      { captions: "hit", entry: "hit" },
     ],
     received: [
       [true, true],
@@ -2119,7 +2114,7 @@ test("a node two roles name is one dep: the dependent runs once with it in both 
   const ok = await run();
   broken = true;
   expect({ ok, srcBroken: await run(), runs }).toEqual({
-    ok: { described: ["src"], statuses: { src: "done", both: "done" } },
+    ok: { described: ["src"], statuses: { src: "ran", both: "ran" } },
     srcBroken: { described: ["src"], statuses: { src: "failed", both: "dep-failed" } },
     runs: [true],
   });
@@ -2149,7 +2144,7 @@ describe("cancellation and timeouts", () => {
       signal: controller.signal,
       onEvent: (e) => {
         if (e.type === "start") events.push(`start:${e.node}`);
-        if (e.type === "result") events.push(`${e.result.status}:${e.node}`);
+        if (e.type === "result") events.push(`${outcome(e.result)}:${e.node}`);
         // quick settles first; `after` is then ready, and the cancel lands before it starts.
         if (e.type === "result" && e.node === "quick") controller.abort();
       },
@@ -2159,24 +2154,24 @@ describe("cancellation and timeouts", () => {
     expect({
       ran: seen,
       statuses: statuses(results),
-      keyed: results.filter((r) => r.actionKey !== "").map((r) => r.name),
+      keyed: results.filter((r) => resultActionKey(r) !== undefined).map((r) => r.name),
       events,
       counts: countResultsByStatus(results),
       rerun: statuses(rerun),
     }).toEqual({
       ran: ["slow", "quick", "slow", "after", "never"],
-      statuses: { quick: "done", after: "cancelled", slow: "cancelled", never: "cancelled" },
+      statuses: { quick: "ran", after: "cancelled", slow: "cancelled", never: "cancelled" },
       keyed: ["quick", "slow"],
       events: [
         "start:slow",
         "start:quick",
-        "done:quick",
+        "ran:quick",
         "cancelled:after",
         "cancelled:slow",
         "cancelled:never",
       ],
-      counts: { done: 1, cached: 0, failed: 0, "dep-failed": 0, cancelled: 3 },
-      rerun: { quick: "cached", slow: "done", after: "done", never: "done" },
+      counts: { succeeded: 1, failed: 0, "dep-failed": 0, cancelled: 3 },
+      rerun: { quick: "hit", slow: "ran", after: "ran", never: "ran" },
     });
   });
 
@@ -2201,7 +2196,9 @@ describe("cancellation and timeouts", () => {
     });
     expect({
       ran,
-      results: Object.fromEntries(results.map((r) => [r.name, [r.status, r.actionKey !== ""]])),
+      results: Object.fromEntries(
+        results.map((r) => [r.name, [r.status, resultActionKey(r) !== undefined]]),
+      ),
     }).toEqual({
       ran: ["holder"],
       results: { holder: ["cancelled", true], waiter: ["cancelled", true] },
@@ -2230,11 +2227,11 @@ describe("cancellation and timeouts", () => {
       task(g, "report", { timeoutMs: 1000, deps: { hung: settled(hung) } });
       return g;
     };
-    const summarize = (rs: Result[]) =>
+    const summarize = (rs: NodeResult[]) =>
       Object.fromEntries(
         rs.map((r) => [
           r.name,
-          r.status === "failed" ? [r.status, r.error.name, r.error.message] : r.status,
+          r.status === "failed" ? [r.status, r.error.name, r.error.message] : outcome(r),
         ]),
       );
     expect({
@@ -2247,15 +2244,15 @@ describe("cancellation and timeouts", () => {
     }).toEqual({
       first: {
         hung: ["failed", "TimeoutError", "timed out after 20 ms"],
-        quick: "done",
+        quick: "ran",
         needs: "dep-failed",
-        report: "done",
+        report: "ran",
       },
       second: {
         hung: ["failed", "TimeoutError", "timed out after 20 ms"],
-        quick: "cached",
+        quick: "hit",
         needs: "dep-failed",
-        report: "cached",
+        report: "hit",
       },
       reasons: ["TimeoutError", "TimeoutError"],
       timeoutOnNode: [
@@ -2285,12 +2282,13 @@ describe("cancellation and timeouts", () => {
       onEvent: (e) => void events.push(e.type === "result" ? e.result.status : e.type),
     });
     assert.ok(result, "the node settles");
-    const { status, actionKey } = result;
-    expect({ status, keyed: actionKey !== "", events }).toEqual({
-      status: "cancelled",
-      keyed: true,
-      events: ["dispatch", "start", "cancelled"],
-    });
+    expect({ status: result.status, keyed: resultActionKey(result) !== undefined, events }).toEqual(
+      {
+        status: "cancelled",
+        keyed: true,
+        events: ["dispatch", "start", "cancelled"],
+      },
+    );
   });
 
   test("a cancel that lands while the node's output directory is made holds the action back", async () => {

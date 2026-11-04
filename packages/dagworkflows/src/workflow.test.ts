@@ -1,4 +1,4 @@
-import { Graph, type Outputs } from "@mrmeku/dagraph";
+import { Graph, resultActionKey, type Outputs } from "@mrmeku/dagraph";
 import assert from "node:assert/strict";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
@@ -201,21 +201,23 @@ describe("two of every node the facade adds", () => {
     const nodes = Object.fromEntries(
       await Promise.all(
         results.map(async (result): Promise<[string, unknown]> => {
-          const log = `/state/build-logs/${result.actionKey}.log`;
+          const key = resultActionKey(result);
+          const log = `/state/build-logs/${key}.log`;
           return [
             result.name,
             {
               status: result.status,
-              ownKey: results.filter((other) => other.actionKey === result.actionKey).length === 1,
+              ownKey: results.filter((other) => resultActionKey(other) === key).length === 1,
               log: (await fs.exists(log)) ? await fs.readText(log) : null,
-              outputs: result.status === "done" ? await read(result.outputs) : null,
+              outputs:
+                result.status === "succeeded" ? await read(result.details.entry.outputs) : null,
             },
           ];
         }),
       ),
     );
     const node = (log: string | null, outputs: unknown) => ({
-      status: "done",
+      status: "succeeded",
       ownKey: true,
       log,
       outputs,

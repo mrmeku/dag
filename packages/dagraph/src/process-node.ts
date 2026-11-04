@@ -1,6 +1,7 @@
 import {
   commitEntry,
   discard,
+  isCacheEntry,
   lookupEntry,
   newStagingDir,
   type CacheEntry,
@@ -17,13 +18,7 @@ import { fileHandle } from "./file-handle.ts";
 import { graphNodes, type Graph, type GraphNode } from "./graph/graph.ts";
 import { canonical, resolveValue } from "./graph/inputs.ts";
 import { FILE_INPUT, isFileInput, isOutputs, type Outputs } from "./graph/types.ts";
-import {
-  requiredDeps,
-  type Clock,
-  type ExecListener,
-  type FailedError,
-  type Result,
-} from "./types.ts";
+import { isResult, requiredDeps, type Clock, type FailureError, type Result } from "./types.ts";
 import { errorOf } from "./utils.ts";
 
 /**
@@ -39,18 +34,109 @@ export type ExecutionContext<Ports = unknown> = {
   forcedKeys?: ReadonlySet<string> | "all";
 } & (unknown extends Ports ? { ports?: Ports } : { ports: Ports });
 
+/** What a hit carries: the node's key and the entry its lookup found. */
+export type HitDetails = { actionKey: string; entry: CacheEntry; actionRan: false };
+
+/**
+ * What a node that succeeded made: a hit, or the entry its action committed and how long the
+ * action ran. `entry` is the `CacheEntry` as the cache returned it.
+ */
+export type SucceededNodeDetails =
+  | HitDetails
+  | { actionKey: string; entry: CacheEntry; actionRan: true; elapsed: number };
+
+/**
+ * What a failure reports: its key and, once the action ran, how long. `timedOut`, with
+ * `error.name` "TimeoutError", after the node's own timeout. A node whose key could not be
+ * computed fails with no details.
+ */
+export type FailedNodeDetails =
+  | { actionKey: string }
+  | { actionKey: string; elapsed: number; timedOut?: true };
+
+/** What a cancel reports: its key and, once the action ran, how long. */
+export type CancelledNodeDetails = { actionKey: string; elapsed?: number };
+
+/** How a node that lookup-or-run processed settled. */
+export type NodeResult = Result<SucceededNodeDetails, FailedNodeDetails, CancelledNodeDetails>;
+
+const hasElapsedIfAny = (value: object) =>
+  !("elapsed" in value) || typeof value.elapsed === "number";
+
+const isSucceededNodeDetails = (value: unknown): value is SucceededNodeDetails =>
+  typeof value === "object" &&
+  value !== null &&
+  "actionKey" in value &&
+  typeof value.actionKey === "string" &&
+  "entry" in value &&
+  isCacheEntry(value.entry) &&
+  "actionRan" in value &&
+  (value.actionRan === false ||
+    (value.actionRan === true && "elapsed" in value && typeof value.elapsed === "number"));
+
+const isFailedNodeDetails = (value: unknown): value is FailedNodeDetails =>
+  typeof value === "object" &&
+  value !== null &&
+  "actionKey" in value &&
+  typeof value.actionKey === "string" &&
+  hasElapsedIfAny(value) &&
+  (!("timedOut" in value) || (value.timedOut === true && "elapsed" in value));
+
+const isCancelledNodeDetails = (value: unknown): value is CancelledNodeDetails =>
+  typeof value === "object" &&
+  value !== null &&
+  "actionKey" in value &&
+  typeof value.actionKey === "string" &&
+  hasElapsedIfAny(value);
+
+/** Whether `value` is a `NodeResult` in its current shape: the guard for one read back. */
+export const isNodeResult = (value: unknown): value is NodeResult =>
+  isResult(value, isSucceededNodeDetails, isFailedNodeDetails, isCancelledNodeDetails);
+
+/** The action key a result carries, on any status; `undefined` when the node never got one. */
+export function resultActionKey(result: NodeResult): string | undefined {
+  switch (result.status) {
+    case "succeeded":
+      return result.details.actionKey;
+    case "failed":
+    case "cancelled":
+      return result.details?.actionKey;
+    case "dep-failed":
+      return undefined;
+  }
+}
+
+/**
+ * Lookup-or-run's own events: `start`, as the action of a node that missed begins, and `output`,
+ * for what the action prints.
+ */
+export type ActionEvent<Meta = unknown> = { node: string; meta?: Meta; occurredAt: number } & (
+  | { type: "start" }
+  | { type: "output"; chunk: string }
+);
+
+/**
+ * Receives each `ActionEvent`. For `start` it may return a promise, and the action runs only once
+ * it resolves, so a journal records the start before any effect: `onEvent: (event) =>
+ * journal.record(event)`. A rejection fails the node without running it. The promise of an
+ * `output` is not awaited, and its rejection is dropped.
+ */
+export type ActionListener<Meta = unknown> = (event: ActionEvent<Meta>) => unknown;
+
 export interface RunActionOptions<Meta> {
   /** The execution's cancel. A node it stops settles `cancelled`, whatever its action returns. */
   signal?: AbortSignal;
   /** Receives the node's `start` and `output`, before its result returns. */
-  onEvent?: ExecListener<Meta>;
+  onEvent?: ActionListener<Meta>;
 }
 
 /** A node whose key has no verified entry: what `runAction` runs. */
 export type Miss = { name: string; actionKey: string; status: "missed" };
 
-/** How a node's lookup ended: settled without running, or a miss to run. */
-export type Lookup = Extract<Result, { status: "cached" | "failed" | "dep-failed" }> | Miss;
+/** How a node's lookup ended: a hit, settled without running, or a miss to run. */
+export type Lookup =
+  | Exclude<Result<HitDetails, FailedNodeDetails, CancelledNodeDetails>, { status: "cancelled" }>
+  | Miss;
 
 /** A listener's promise that nothing awaits: its rejection is dropped, not left unhandled. */
 const ignoreRejection = (returned: unknown) => {
@@ -102,7 +188,7 @@ function nodeNamed<Ports, Meta>(graph: Graph<Ports, Meta>, name: string): GraphN
 
 /**
  * Look the node `name` of `graph` up: compute its key, then read and verify its entry. It settles
- * `cached`, `dep-failed` or `failed` without running, or is a miss. `depEntries`, by dep node
+ * `succeeded` on a hit, `dep-failed` or `failed` without running, or is a miss. `depEntries`, by dep node
  * name, holds the entry of each dep that succeeded.
  */
 export async function lookupNode<Ports, Meta>(
@@ -116,20 +202,18 @@ export async function lookupNode<Ports, Meta>(
   const { node } = found;
   const entryOf = (dep: string) => (Object.hasOwn(depEntries, dep) ? depEntries[dep] : undefined);
   const missing = requiredDeps(node).find((dep) => !entryOf(dep));
-  if (missing !== undefined) return { name, actionKey: "", status: "dep-failed", dep: missing };
+  if (missing !== undefined) return { name, status: "dep-failed", dep: missing };
 
   let actionKey: string;
   try {
     actionKey = await actionKeyOf(found, entryOf, fs.hashFile);
   } catch (e) {
-    return { name, actionKey: "", status: "failed", error: errorOf(e) };
+    return { name, status: "failed", error: errorOf(e) };
   }
   if (node.cacheable !== false && forcedKeys !== "all" && !forcedKeys?.has(actionKey)) {
-    const cached = await lookupEntry(fs, cacheDir, actionKey, clock);
-    if (cached) {
-      const { outputs, contentHash, outputHashes } = cached;
-      return { name, actionKey, status: "cached", outputs, contentHash, outputHashes };
-    }
+    const entry = await lookupEntry(fs, cacheDir, actionKey, clock);
+    if (entry)
+      return { name, status: "succeeded", details: { actionKey, entry, actionRan: false } };
   }
   return { name, actionKey, status: "missed" };
 }
@@ -144,20 +228,25 @@ export async function runAction<Ports, Meta>(
   depEntries: Record<string, CacheEntry>,
   executionContext: ExecutionContext<NoInfer<Ports>>,
   options: RunActionOptions<Meta> = {},
-): Promise<Result> {
+): Promise<NodeResult> {
   const found = nodeNamed(graph, name);
   const { fs, cacheDir, ports, clock }: ExecutionContext = executionContext;
   const { node, spec, roles } = found;
   const meta = node.meta === undefined ? {} : { meta: node.meta };
   const entryOf = (dep: string) => (Object.hasOwn(depEntries, dep) ? depEntries[dep] : undefined);
   const handle = (path: string) => fileHandle(fs, path);
-  const notRun = (e: unknown): Result => ({ name, actionKey, status: "failed", error: errorOf(e) });
+  const notRun = (e: unknown): NodeResult => ({
+    name,
+    status: "failed",
+    error: errorOf(e),
+    details: { actionKey },
+  });
 
   const cancel = options.signal;
-  const cancelled: Result = { name, actionKey, status: "cancelled" };
+  const cancelled: NodeResult = { name, status: "cancelled", details: { actionKey } };
   if (cancel?.aborted) return cancelled;
   const outputDir = newStagingDir(fs, cacheDir);
-  const dropped = async (result: Result) => {
+  const dropped = async (result: NodeResult) => {
     await discard(fs, outputDir);
     return result;
   };
@@ -210,12 +299,11 @@ export async function runAction<Ports, Meta>(
   const { signal, dispose } = actionSignal(node.timeoutMs, cancel);
   const startTime = clock.now();
   const elapsed = () => clock.now() - startTime;
-  const failed = (error: FailedError) => ({
+  const failed = (error: FailureError, timedOut?: true): NodeResult => ({
     name,
-    actionKey,
-    status: "failed" as const,
+    status: "failed",
     error,
-    elapsed: elapsed(),
+    details: { actionKey, elapsed: elapsed(), ...(timedOut && { timedOut }) },
   });
   let settled: { outputs: Outputs } | { error: unknown };
   try {
@@ -231,13 +319,17 @@ export async function runAction<Ports, Meta>(
     // As GitHub's runner does: once the signal fired, the exit status no longer decides. A cancel
     // wins over the node's own timeout; neither result is ever cached.
     if (cancel?.aborted)
-      return await dropped({ name, actionKey, status: "cancelled", elapsed: elapsed() });
+      return await dropped({
+        name,
+        status: "cancelled",
+        details: { actionKey, elapsed: elapsed() },
+      });
     // A timeout keeps what the action threw as it stopped: its cause says what it was running.
     const thrown = "error" in settled ? settled.error : undefined;
     if (signal.aborted) {
       const message = `timed out after ${node.timeoutMs} ms`;
       const error = { ...errorOf(thrown, message), name: "TimeoutError" };
-      return await dropped({ ...failed(error), timedOut: true });
+      return await dropped(failed(error, true));
     }
     if ("error" in settled) return await dropped(failed(errorOf(thrown)));
     if (!isOutputs(settled.outputs))
@@ -248,7 +340,11 @@ export async function runAction<Ports, Meta>(
     const cacheable = node.cacheable !== false;
     const { outputs } = settled;
     const entry = await commitEntry(fs, cacheDir, actionKey, outputDir, outputs, cacheable, clock);
-    return { name, actionKey, status: "done", ...entry, elapsed: elapsed() };
+    return {
+      name,
+      status: "succeeded",
+      details: { actionKey, entry, actionRan: true, elapsed: elapsed() },
+    };
   } catch (e) {
     return await dropped(failed(errorOf(e)));
   } finally {
@@ -267,7 +363,7 @@ export async function processNode<Ports, Meta>(
   depEntries: Record<string, CacheEntry>,
   executionContext: ExecutionContext<NoInfer<Ports>>,
   options: RunActionOptions<Meta> = {},
-): Promise<Result> {
+): Promise<NodeResult> {
   const found = await lookupNode(graph, name, depEntries, executionContext);
   if (found.status !== "missed") return found;
   return runAction(graph, found, depEntries, executionContext, options);

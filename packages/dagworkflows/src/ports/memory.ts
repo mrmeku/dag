@@ -1,4 +1,4 @@
-import { createMemoryDagFs, type ExecEvent, type MemoryDagFs } from "@mrmeku/dagraph";
+import { createMemoryDagFs, type ExecutionEvent, type MemoryDagFs } from "@mrmeku/dagraph";
 import { dirname } from "node:path";
 import type {
   AnnotationLevel,
@@ -69,7 +69,7 @@ export function createOutputRecorder() {
   const printed = new Map<string, string>();
   return {
     printed,
-    onEvent: (event: ExecEvent) => {
+    onEvent: (event: ExecutionEvent) => {
       if (event.type === "output")
         printed.set(event.node, (printed.get(event.node) ?? "") + event.chunk);
     },

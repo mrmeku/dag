@@ -16,6 +16,9 @@ import {
 import type { Result, ScheduledNode } from "./types.ts";
 import { errorMessage } from "./utils.ts";
 
+/** What a node of the harness made: whether it ran or was a hit. */
+type Made = "ran" | "hit";
+
 // A miss awaits its gate and then runs until the test finishes it by hand; a hit settles at once.
 // `idle` waits for a macrotask, which comes only after every queued microtask has run, so the
 // scheduler has done all it would do on its own.
@@ -27,19 +30,19 @@ function harness(
   const log: string[] = [];
   const finishers = new Map<string, () => void>();
   const lookups = new Map<string, () => void>();
-  const run: RunNode = async (node, _depEntries, waitForScheduler) => {
-    const entry = { actionKey: "k", outputs: {}, contentHash: "h", outputHashes: {} };
-    if (hits.includes(node.name)) return { name: node.name, status: "cached", ...entry };
+  const run: RunNode<ScheduledNode, Made, never, never> = async (node, _, waitForScheduler) => {
+    if (hits.includes(node.name)) return { name: node.name, status: "succeeded", details: "hit" };
     if (slowLookups.includes(node.name))
       await new Promise<void>((resolve) => lookups.set(node.name, resolve));
     await waitForScheduler();
     log.push(`granted ${node.name}`);
     await new Promise<void>((resolve) => finishers.set(node.name, resolve));
-    return { name: node.name, status: "done", ...entry, elapsed: 0 };
+    return { name: node.name, status: "succeeded", details: "ran" };
   };
   const done = orchestrate(nodes, run, throttledScheduler(opts), Date, (e) => {
     if (e.type === "dispatch") log.push(`dispatch ${e.node}`);
-    if (e.type === "result") log.push(`${e.result.status} ${e.node}`);
+    if (e.type === "result")
+      log.push(`${e.result.status === "succeeded" ? e.result.details : e.result.status} ${e.node}`);
   });
   const idle = () => new Promise((r) => setImmediate(r));
   const finish = async (...names: string[]) => {
@@ -90,7 +93,7 @@ describe("throttledScheduler", () => {
         "dispatch a",
         "granted long",
         "granted a",
-        "done a",
+        "ran a",
         "dispatch b",
         "granted b",
       ],
@@ -100,7 +103,7 @@ describe("throttledScheduler", () => {
         "dispatch b",
         "granted long",
         "granted a",
-        "done a",
+        "ran a",
         "granted b",
       ],
     });
@@ -124,11 +127,11 @@ describe("throttledScheduler", () => {
         "dispatch waiter",
         "granted holder",
         "dispatch hit",
-        "cached hit",
+        "hit hit",
         "dispatch free",
         "granted free",
       ],
-      afterHolder: ["done holder", "granted waiter"],
+      afterHolder: ["ran holder", "granted waiter"],
     });
   });
 
@@ -148,7 +151,7 @@ describe("throttledScheduler", () => {
       "dispatch u",
       "dispatch s",
       "granted u",
-      "done u",
+      "ran u",
       "dispatch t",
       "granted t",
       "granted s",
@@ -201,14 +204,10 @@ describe("throttledScheduler", () => {
 });
 
 describe("orchestrate", () => {
-  const done = async (n: ScheduledNode): Promise<Result> => ({
+  const done = async (n: ScheduledNode): Promise<Result<Made, never, never>> => ({
     name: n.name,
-    actionKey: "k",
-    status: "done",
-    outputs: {},
-    contentHash: "h",
-    outputHashes: {},
-    elapsed: 0,
+    status: "succeeded",
+    details: "ran",
   });
 
   test("refuses nodes whose deps it was not given, naming them", async () => {
@@ -248,9 +247,9 @@ describe("orchestrate", () => {
     }).toEqual({ outcome: "dispatch of a", ran: ["a", "b"], listeners: 0 });
   });
 
-  test("a RunNode that rejects settles its node failed, its cause kept as JSON and with no elapsed, since it is not known to have run, or cancelled once the execution is cancelled", async () => {
+  test("a RunNode that rejects settles its node failed, its cause kept as JSON and with no details, since nothing reported one, or cancelled once the execution is cancelled", async () => {
     const controller = new AbortController();
-    const run: RunNode = async (n) => {
+    const run: RunNode<ScheduledNode, Made, never, never> = async (n) => {
       if (n.name === "later") controller.abort();
       throw new RangeError(`${n.name} broke`, { cause: { code: 1 } });
     };
@@ -266,11 +265,10 @@ describe("orchestrate", () => {
     expect(results).toEqual([
       {
         name: "first",
-        actionKey: "",
         status: "failed",
         error: { name: "RangeError", message: "first broke", cause: { code: 1 } },
       },
-      { name: "later", actionKey: "", status: "cancelled" },
+      { name: "later", status: "cancelled" },
     ]);
   });
 
@@ -302,7 +300,7 @@ describe("orchestrate", () => {
       controller.signal,
     );
     expect(Object.fromEntries(results.map((r) => [r.name, r.status]))).toEqual({
-      holder: "done",
+      holder: "succeeded",
       waiter: "cancelled",
     });
   });

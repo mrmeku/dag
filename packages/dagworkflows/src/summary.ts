@@ -1,4 +1,4 @@
-import type { Node, Result } from "@mrmeku/dagraph";
+import type { Node, NodeResult } from "@mrmeku/dagraph";
 import { mermaidBody, mermaidQuote } from "@mrmeku/dagraph/mermaid";
 import {
   CRITICAL_PATH_FLOOR_MS,
@@ -11,7 +11,7 @@ import { countsLine, errorMessage, formatDuration, reportHeadline } from "./kern
 import { namesOf, wallTimeOf, type NodeReport } from "./kernel/report.ts";
 import * as selectors from "./kernel/selectors.ts";
 
-type Status = Result["status"];
+type Status = NodeResult["status"];
 
 /** The run's data, as every renderer gets it. In the post pass it holds the owed post steps alone. */
 export interface RunReport {
@@ -36,13 +36,17 @@ export const DEFAULT_SUMMARY_RENDERERS: readonly SummaryRenderer[] = [
   renderFailures,
 ];
 
-const MERMAID_CLASS: Record<Status, string> = {
-  done: "done",
-  cached: "cached",
-  failed: "fail",
-  "dep-failed": "skipped",
-  cancelled: "skipped",
-};
+function mermaidClassOf(result: NodeResult): string {
+  switch (result.status) {
+    case "succeeded":
+      return result.details.actionRan ? "done" : "cached";
+    case "failed":
+      return "fail";
+    case "dep-failed":
+    case "cancelled":
+      return "skipped";
+  }
+}
 const MERMAID_CLASSDEFS = [
   "classDef done fill:#dcfce7,stroke:#16a34a,color:#14532d",
   "classDef cached fill:#f1f5f9,stroke:#94a3b8,color:#475569",
@@ -66,7 +70,10 @@ const sum = (ns: number[]) => ns.reduce((s, n) => s + n, 0);
  * MAX_GRAPH_NODES it draws one node per kind with counts instead, because GitHub refuses very
  * large diagrams.
  */
-export function dagMermaid(all: Node[], statusOf: (name: string) => Status | undefined): string[] {
+export function dagMermaid(
+  all: Node[],
+  resultOf: (name: string) => NodeResult | undefined,
+): string[] {
   const names = new Set(all.map((n) => n.name));
   const nodes = all.map((n) => ({ ...n, deps: n.deps.filter((d) => names.has(d)) }));
   if (nodes.length > MAX_GRAPH_NODES) {
@@ -75,8 +82,8 @@ export function dagMermaid(all: Node[], statusOf: (name: string) => Status | und
     const out = ["```mermaid", "flowchart LR"];
     for (const kind of kinds) {
       const members = nodes.filter((n) => n.kind === kind);
-      const counts = (["done", "cached", "failed", "dep-failed", "cancelled"] satisfies Status[])
-        .map((s) => [s, members.filter((n) => statusOf(n.name) === s).length] as const)
+      const counts = (["succeeded", "failed", "dep-failed", "cancelled"] satisfies Status[])
+        .map((s) => [s, members.filter((n) => resultOf(n.name)?.status === s).length] as const)
         .filter(([, c]) => c > 0)
         .map(([s, c]) => `${STATUS_ICON[s]}${c}`)
         .join(" ");
@@ -96,12 +103,12 @@ export function dagMermaid(all: Node[], statusOf: (name: string) => Status | und
   }
   const { lines: body } = mermaidBody(nodes, {
     label: (n) => {
-      const status = statusOf(n.name);
-      return `${status ? STATUS_ICON[status] : "·"} ${n.name}`;
+      const result = resultOf(n.name);
+      return `${result ? STATUS_ICON[result.status] : "·"} ${n.name}`;
     },
     classOf: (n) => {
-      const status = statusOf(n.name);
-      return status && MERMAID_CLASS[status];
+      const result = resultOf(n.name);
+      return result && mermaidClassOf(result);
     },
   });
   return ["```mermaid", "flowchart LR", ...body, ...MERMAID_CLASSDEFS.map((c) => `  ${c}`), "```"];
@@ -147,9 +154,12 @@ export function renderStatus({ nodes }: RunReport): string[] {
   const busy = sum(
     nodes.filter((n) => selectors.ranToItsEnd(n.result)).map((n) => n.duration ?? 0),
   );
-  const saved = sum(nodes.filter((n) => n.result.status === "cached").map((n) => n.previous ?? 0));
-  const hits = namesOf(nodes, "cached").length;
-  const lookups = hits + namesOf(nodes, "done").length;
+  const cacheHits = nodes.filter(
+    ({ result }) => result.status === "succeeded" && !result.details.actionRan,
+  );
+  const saved = sum(cacheHits.map((n) => n.previous ?? 0));
+  const hits = cacheHits.length;
+  const lookups = namesOf(nodes, "succeeded").length;
   return [
     `### ${reportHeadline(nodes)}`,
     "",
@@ -197,11 +207,11 @@ export function renderCriticalPath({ nodes }: RunReport): string[] {
  * the graph: `renderDag({ ...r, nodes: r.nodes.filter(keep) })`.
  */
 export function renderDag({ nodes }: RunReport): string[] {
-  const status = new Map(nodes.map((n) => [n.node.name, n.result.status]));
+  const results = new Map(nodes.map((n) => [n.node.name, n.result]));
   return nodes.length > 0
     ? dagMermaid(
         nodes.map((n) => n.node),
-        (name) => status.get(name),
+        (name) => results.get(name),
       )
     : [];
 }
@@ -245,11 +255,11 @@ export function renderTable({ nodes }: RunReport): string[] {
     "| --- | --- | --- | --- |",
     ...byName(nodes).map((n) => {
       const d = n.duration;
-      const delta =
-        n.result.status === "done" && d !== undefined && n.previous
-          ? formatDelta(d, n.previous)
-          : "";
-      return `| ${n.node.name} | ${n.result.status} | ${d !== undefined ? formatDuration(d) : ""} | ${delta} |`;
+      const built = n.result.status === "succeeded" && n.result.details.actionRan;
+      const delta = built && d !== undefined && n.previous ? formatDelta(d, n.previous) : "";
+      const status =
+        n.result.status === "succeeded" ? (built ? "done" : "cached") : n.result.status;
+      return `| ${n.node.name} | ${status} | ${d !== undefined ? formatDuration(d) : ""} | ${delta} |`;
     }),
   ];
 }

@@ -50,8 +50,8 @@ describe("release workflow", () => {
           ?.commands[0]?.map((arg) => arg.replace(/^\/cache\/tmp\/[\w-]+$/, "<outputDir>"));
       const output = (name: string, key: string) => {
         const result = resultOf(name);
-        assert.ok(result?.status === "done", `${name} is done`);
-        return namedOutput(result.outputs, key);
+        assert.ok(result?.status === "succeeded", `${name} succeeded`);
+        return namedOutput(result.details.entry.outputs, key);
       };
       return {
         // The graph a run executes, where the save waits for every node that reads the cache dir.
@@ -89,8 +89,11 @@ describe("release workflow", () => {
         saved: [tagged.saved, branch.saved, otherTag.saved],
         packCmd: tagged.ran("pack:dagraph"),
         packOutputs:
-          pack?.status === "done" &&
-          Object.entries(pack.outputs).map(([output, path]) => [output, basename(String(path))]),
+          pack?.status === "succeeded" &&
+          Object.entries(pack.details.entry.outputs).map(([output, path]) => [
+            output,
+            basename(String(path)),
+          ]),
         packInputs: tagged.processed
           .get("pack:dagworkflows")
           ?.files.includes("packages/dagworkflows/package.json"),

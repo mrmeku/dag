@@ -3,9 +3,9 @@ import {
   file,
   Graph,
   type DepRecord,
-  type ExecListener,
+  type ExecutionListener,
   type InputRecord,
-  type Result,
+  type NodeResult,
 } from "@mrmeku/dagraph";
 import { createNodeDagFs } from "@mrmeku/dagraph/fs/node";
 import assert from "node:assert/strict";
@@ -21,7 +21,7 @@ import { runWorkflow } from "./runner.ts";
 import { addTask, type ActionTaskSpec } from "./task.ts";
 
 const CACHE_DIR = "/cache";
-const executeUnder = (graph: Graph<Ports>, ports: Ports, onEvent: ExecListener = () => {}) =>
+const executeUnder = (graph: Graph<Ports>, ports: Ports, onEvent: ExecutionListener = () => {}) =>
   execute(graph, { ports, fs: ports.fs, clock: Date, cacheDir: CACHE_DIR }, { onEvent });
 const exited = (code: number, stdout = ""): ExecResult => ({
   ended: "exited",
@@ -39,16 +39,19 @@ const refusal = (add: () => unknown) => {
     return e instanceof Error ? e.message : String(e);
   }
 };
+/** How a node settled, in the words the run's output uses: built or cached, or its status. */
+const outcomeOf = (result: NodeResult) =>
+  result.status === "succeeded" ? (result.details.actionRan ? "built" : "cached") : result.status;
 /** The result of the node `name`; it throws when the run has none. */
-const resultOf = (results: Result[], name: string) => {
+const resultOf = (results: NodeResult[], name: string) => {
   const result = results.find((r) => r.name === name);
   if (result === undefined) throw new Error(`no result for "${name}"`);
   return result;
 };
 /** The path the node `name` wrote at `role`; it throws when it wrote none. */
-const pathOf = (results: Result[], name: string, role: string) => {
+const pathOf = (results: NodeResult[], name: string, role: string) => {
   const result = resultOf(results, name);
-  const outputs = result.status === "done" ? result.outputs : undefined;
+  const outputs = result.status === "succeeded" ? result.details.entry.outputs : undefined;
   const path = typeof outputs === "object" && !Array.isArray(outputs) ? outputs[role] : undefined;
   if (typeof path !== "string") throw new Error(`"${name}" wrote no ${role}`);
   return path;
@@ -186,17 +189,19 @@ describe("a task", () => {
       });
       const copy = resultOf(results, "copy");
       const dir =
-        copy.status === "done" ? `${root}/cache/v1/${copy.actionKey}/${copy.contentHash}` : "";
+        copy.status === "succeeded"
+          ? `${root}/cache/v1/${copy.details.actionKey}/${copy.details.entry.contentHash}`
+          : "";
       assert.deepEqual(
         {
-          statuses: results.map((r) => [r.name, r.status]),
-          outputs: copy.status === "done" && copy.outputs,
+          statuses: results.map((r) => [r.name, outcomeOf(r)]),
+          outputs: copy.status === "succeeded" && copy.details.entry.outputs,
           copied: await ports.fs.readText(`${dir}/copy.txt`),
         },
         {
           statuses: [
-            ["pack", "done"],
-            ["copy", "done"],
+            ["pack", "built"],
+            ["copy", "built"],
           ],
           outputs: { copy: `${dir}/copy.txt` },
           copied: "bytes\n",
@@ -215,13 +220,13 @@ describe("a task", () => {
         addCommand(graph, { name, cmd: ["lint"], inputs: { version: "lint-v1" } });
       task(graph, { name: notes, inputs: { version: "notes-v1" }, action: ({ log }) => log("x") });
       const results = await executeUnder(graph, ports);
-      return Object.fromEntries(results.map((r) => [r.name, r.status]));
+      return Object.fromEntries(results.map((r) => [r.name, outcomeOf(r)]));
     };
     assert.deepEqual(
       [await once(["lint"], "notes"), await once(["lint", "lint:copy"], "notes:renamed")],
       [
-        { lint: "done", notes: "done" },
-        { lint: "cached", "lint:copy": "cached", "notes:renamed": "done" },
+        { lint: "built", notes: "built" },
+        { lint: "cached", "lint:copy": "cached", "notes:renamed": "built" },
       ],
     );
   });

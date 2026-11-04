@@ -8,7 +8,7 @@ import {
   processNode,
   type CacheEntry,
   type Graph,
-  type Result,
+  type NodeResult,
 } from "@mrmeku/dagraph";
 import type { Ports } from "@mrmeku/dagworkflows";
 
@@ -16,7 +16,7 @@ const CACHE_DIR = "/cache";
 
 /** What processing one node showed: its result, the files outside the cache dir its key hashed, the commands it ran and what it printed. */
 export interface Processed {
-  result: Result;
+  result: NodeResult;
   files: string[];
   commands: string[][];
   log: string;
@@ -55,12 +55,7 @@ export async function processEach(
         if (event.type === "output") log += event.chunk;
       },
     });
-    if (isSucceeded(result))
-      entries[node.name] = {
-        outputs: result.outputs,
-        contentHash: result.contentHash,
-        outputHashes: result.outputHashes,
-      };
+    if (isSucceeded(result)) entries[node.name] = result.details.entry;
     processed.set(node.name, { result, files, commands, log });
   }
   return processed;

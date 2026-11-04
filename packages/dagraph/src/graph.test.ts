@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import assert from "node:assert/strict";
 
-import type { CacheEntry, DagFs } from "./cache.ts";
+import type { DagFs } from "./cache.ts";
 import { actionsFor, defineAction, type Action } from "./define-action.ts";
 import { execute } from "./execute.ts";
 import {
@@ -20,9 +20,12 @@ import {
   type OutputRef,
 } from "./graph/index.ts";
 import { createMemoryDagFs } from "./ports/memory-fs.ts";
-import { processNode } from "./process-node.ts";
-import { isSucceeded } from "./types.ts";
+import { processNode, resultActionKey, type NodeResult } from "./process-node.ts";
 import { errorMessage } from "./utils.ts";
+
+/** How a node settled: its status, or whether its action ran when it succeeded. */
+const outcome = (r: NodeResult) =>
+  r.status === "succeeded" ? (r.details.actionRan ? "ran" : "hit") : r.status;
 
 interface Ports {
   fs: DagFs;
@@ -277,11 +280,11 @@ describe("graphs", () => {
     const results = await execute(part, ctx);
     expect({
       names: part.describe().map((n) => n.name),
-      statuses: Object.fromEntries(results.map((r) => [r.name, r.status])),
+      statuses: Object.fromEntries(results.map((r) => [r.name, outcome(r)])),
       unknown: refusal(() => closure(whole, ["v3:entry"])),
     }).toEqual({
       names: ["v2:download", "v2:captions", "v2:entry"],
-      statuses: { "v2:download": "cached", "v2:captions": "failed", "v2:entry": "done" },
+      statuses: { "v2:download": "hit", "v2:captions": "failed", "v2:entry": "ran" },
       unknown: 'closure: the graph holds no node "v3:entry"',
     });
   });
@@ -294,15 +297,15 @@ describe("graphs", () => {
     const results = await execute(v1, setup().ctx);
     expect({
       names: v1.describe().map((n) => n.name),
-      statuses: Object.fromEntries(results.map((r) => [r.name, r.status])),
+      statuses: Object.fromEntries(results.map((r) => [r.name, outcome(r)])),
       outside: refusal(() => closure(v1, ["v10:entry"])),
     }).toEqual({
       names: ["v1:download", "v1:captions", "v1:entry", "shared", "v1:extra"],
       statuses: {
-        "v1:download": "done",
+        "v1:download": "ran",
         "v1:captions": "failed",
-        "v1:entry": "done",
-        shared: "done",
+        "v1:entry": "ran",
+        shared: "ran",
         "v1:extra": "failed",
       },
       outside: 'closure: the graph holds no node "v10:entry"',
@@ -314,13 +317,7 @@ describe("graphs", () => {
     const results = await execute(channel(["v1", "v2"]), ctx);
     const entryOf = (name: string) => {
       const r = results.find((x) => x.name === name);
-      return r && isSucceeded(r)
-        ? ({
-            outputs: r.outputs,
-            contentHash: r.contentHash,
-            outputHashes: r.outputHashes,
-          } satisfies CacheEntry)
-        : undefined;
+      return r?.status === "succeeded" ? r.details.entry : undefined;
     };
     const oneVideo = new Graph<Ports, Meta>();
     addVideo(oneVideo, "v2");
@@ -341,14 +338,17 @@ describe("graphs", () => {
     const downloaded = results.find((r) => r.name === "v2:download");
     assert.ok(downloaded, "v2:download's result");
     expect({
-      viaOneVideo: [viaOneVideo.status, viaOneVideo.actionKey === downloaded.actionKey],
+      viaOneVideo: [
+        outcome(viaOneVideo),
+        resultActionKey(viaOneVideo) === resultActionKey(downloaded),
+      ],
       failedDep,
-      settledMissing: settledMissing.status,
+      settledMissing: outcome(settledMissing),
       refused,
     }).toEqual({
-      viaOneVideo: ["cached", true],
-      failedDep: { name: "v2:captions", actionKey: "", status: "dep-failed", dep: "v2:download" },
-      settledMissing: "done",
+      viaOneVideo: ["hit", true],
+      failedDep: { name: "v2:captions", status: "dep-failed", dep: "v2:download" },
+      settledMissing: "ran",
       refused:
         'the graph holds no node "v1:download". Pass a graph that holds it: the whole graph, a closure of it, or any graph that declares the node the same way. A key is local to its node, so each gives it the same key.',
     });
@@ -402,14 +402,14 @@ describe("refs", () => {
       node: conversions(dl),
       settledNode: conversions(settled(dl)),
       file: conversions(file("bun.lock")),
-      statuses: results.map((r) => r.status),
+      statuses: results.map(outcome),
     }).toEqual({
       output: [audio, audio, audio, audio],
       settledOutput: [audio, audio, audio, audio],
       node: [node, node, node, node],
       settledNode: [settledNode, settledNode, settledNode, settledNode],
       file: [lockfile, lockfile, lockfile, lockfile],
-      statuses: ["done", "done", "done"],
+      statuses: ["ran", "ran", "ran"],
     });
   });
 });

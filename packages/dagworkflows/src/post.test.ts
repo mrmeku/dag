@@ -1,4 +1,4 @@
-import { Graph, type Result } from "@mrmeku/dagraph";
+import { Graph, resultActionKey, type NodeResult } from "@mrmeku/dagraph";
 import assert from "node:assert/strict";
 import { describe, test } from "node:test";
 import type { ExecResult, Ports } from "./ports.ts";
@@ -19,7 +19,11 @@ const exited = (code: number): ExecResult => ({
   output: "",
   ok: code === 0,
 });
-const statuses = (results: Result[]) => Object.fromEntries(results.map((r) => [r.name, r.status]));
+/** How a node settled, in the words the run's output uses: built or cached, or its status. */
+const outcomeOf = (result: NodeResult) =>
+  result.status === "succeeded" ? (result.details.actionRan ? "built" : "cached") : result.status;
+const statuses = (results: NodeResult[]) =>
+  Object.fromEntries(results.map((r) => [r.name, outcomeOf(r)]));
 
 describe("a post", () => {
   test("waits for its task and every node of the run downstream of it, through other nodes too, whatever they did", async () => {
@@ -71,7 +75,7 @@ describe("a post", () => {
       },
       {
         events: ["db start", "seed", "start e2e", "end e2e", "db stop"],
-        statuses: { "up:db": "done", seed: "done", e2e: "failed", "down:db": "done" },
+        statuses: { "up:db": "built", seed: "built", e2e: "failed", "down:db": "built" },
         waits: {
           "down:db": { deps: ["up:db", "seed", "e2e"], settled: ["up:db", "seed", "e2e"] },
         },
@@ -124,14 +128,15 @@ describe("a post", () => {
       {
         statuses: statuses(results),
         envs,
-        inspectLog: inspect && (await fs.readText(`${BUILD_LOG_DIR}/${inspect.actionKey}.log`)),
+        inspectLog:
+          inspect && (await fs.readText(`${BUILD_LOG_DIR}/${resultActionKey(inspect)}.log`)),
       },
       {
         statuses: {
           "up:db": "failed",
           "up:queue": "failed",
-          "down:db": "done",
-          "inspect:queue": "done",
+          "down:db": "built",
+          "inspect:queue": "built",
         },
         envs: { compose: {}, bash: { ID: undefined, MODE: "ci" } },
         inspectLog: "no queue\n",
@@ -173,7 +178,7 @@ describe("a post", () => {
       { calls, statuses: statuses(results) },
       {
         calls: ["db start", "test", "db dump", "db stop"],
-        statuses: { "up:db": "done", test: "done", dump: "done", "down:db": "done" },
+        statuses: { "up:db": "built", test: "built", dump: "built", "down:db": "built" },
       },
     );
   });
@@ -215,12 +220,12 @@ describe("a post", () => {
       {
         calls: ["cas restore", "db start", "test", "db stop", "cas save"],
         statuses: {
-          cas: "done",
-          "up:db": "done",
-          test: "done",
-          "require-all": "done",
-          "down:db": "done",
-          save: "done",
+          cas: "built",
+          "up:db": "built",
+          test: "built",
+          "require-all": "built",
+          "down:db": "built",
+          save: "built",
         },
       },
     );
@@ -258,7 +263,7 @@ describe("a post", () => {
     });
     const logOf = async (name: string) => {
       const result = results.find((r) => r.name === name);
-      return result && (await ports.fs.readText(`${BUILD_LOG_DIR}/${result.actionKey}.log`));
+      return result && (await ports.fs.readText(`${BUILD_LOG_DIR}/${resultActionKey(result)}.log`));
     };
     assert.deepEqual(
       {

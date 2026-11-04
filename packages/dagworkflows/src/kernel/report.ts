@@ -1,9 +1,9 @@
-import type { Node, Result } from "@mrmeku/dagraph";
+import type { Node, NodeResult } from "@mrmeku/dagraph";
 
 /** One node as the run left it: the pass's node, dagraph's result, and the run store's timing. */
 export interface NodeReport {
   node: Node;
-  result: Result;
+  result: NodeResult;
   /** Epoch ms its `start` came, for a node whose action ran, or a cache hit's dispatch; absent for any other node. */
   start?: number;
   /** At least 1 ms: the engine's `elapsed` once its action ran, or a cache hit's from dispatch to result. */
@@ -12,7 +12,7 @@ export interface NodeReport {
   previous?: number;
 }
 
-export const namesOf = (nodes: NodeReport[], status: Result["status"]): string[] =>
+export const namesOf = (nodes: NodeReport[], status: NodeResult["status"]): string[] =>
   nodes.filter(({ result }) => result.status === status).map(({ node }) => node.name);
 
 export function wallTimeOf(nodes: NodeReport[]): number {

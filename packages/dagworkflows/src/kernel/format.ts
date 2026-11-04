@@ -5,6 +5,7 @@ import { STATUS_ICON } from "../config.ts";
 import type { AnnotationLevel } from "../ports.ts";
 import { namesOf, type NodeReport } from "./report.ts";
 import type { FailureNodeState, NodeState } from "./run-slice.ts";
+import { timedOut } from "./selectors.ts";
 
 const CONTROL_CHARACTERS = /[\x00-\x08\x0b-\x1f\x7f-\x9f]/g;
 
@@ -39,7 +40,7 @@ export function failureMessage({
 }: Pick<FailureNodeState, "node" | "result">): string {
   switch (result.status) {
     case "failed":
-      return result.timedOut && node.timeoutMs !== undefined
+      return timedOut(result) && node.timeoutMs !== undefined
         ? timeoutMessage(node.name, node.timeoutMs)
         : result.error.message;
     case "dep-failed":
@@ -122,12 +123,15 @@ export function reportHeadline(nodes: NodeReport[]): string {
   if (skippedCount > 0)
     return `${STATUS_ICON["dep-failed"]} ${plural(skippedCount, "node")} skipped, a dependency failed`;
   if (cancelledCount > 0) return cancelledHeadline(cancelledCount);
-  return `${STATUS_ICON.done} ${nodes.length === 1 ? "1 node" : `all ${nodes.length} nodes`} succeeded`;
+  return `${STATUS_ICON.succeeded} ${nodes.length === 1 ? "1 node" : `all ${nodes.length} nodes`} succeeded`;
 }
 
 export function countsLine(nodes: NodeReport[], formatCount: (count: number) => string): string {
   const counts = countResultsByStatus(nodes.map(({ result }) => result));
-  return `built ${formatCount(counts.done)} · cached ${formatCount(counts.cached)} · failed ${formatCount(counts.failed)} · skipped ${formatCount(counts["dep-failed"])}${counts.cancelled > 0 ? ` · cancelled ${formatCount(counts.cancelled)}` : ""}`;
+  const built = nodes.filter(
+    ({ result }) => result.status === "succeeded" && result.details.actionRan,
+  ).length;
+  return `built ${formatCount(built)} · cached ${formatCount(counts.succeeded - built)} · failed ${formatCount(counts.failed)} · skipped ${formatCount(counts["dep-failed"])}${counts.cancelled > 0 ? ` · cancelled ${formatCount(counts.cancelled)}` : ""}`;
 }
 
 /** A node's log as its group prints it: the log, then a failure's error; a skipped node's message. */

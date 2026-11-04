@@ -1,4 +1,4 @@
-import type { Node, Result } from "@mrmeku/dagraph";
+import type { Node, NodeResult } from "@mrmeku/dagraph";
 import assert from "node:assert/strict";
 import { describe, test } from "node:test";
 import { recapLines } from "./github/renderer.ts";
@@ -14,38 +14,44 @@ import {
 
 const node = (name: string, kind: string, deps: string[] = []): Node => ({ name, kind, deps });
 
+/** How a fixture's node settled: built or cached, or a status other than success. */
+type Outcome = "built" | "cached" | Exclude<NodeResult["status"], "succeeded">;
+
 /** A result as the engine gives one, `elapsed` for an action that ran. */
-function resultOf(name: string, status: Result["status"], elapsed?: number): Result {
+function resultOf(name: string, outcome: Outcome, elapsed?: number): NodeResult {
   const entry = { outputs: {}, contentHash: "h", outputHashes: {} };
-  switch (status) {
-    case "done":
-      return { name, actionKey: "k", status, ...entry, elapsed: elapsed ?? 1 };
+  switch (outcome) {
+    case "built":
+      return {
+        name,
+        status: "succeeded",
+        details: { actionKey: "k", entry, actionRan: true, elapsed: elapsed ?? 1 },
+      };
     case "cached":
-      return { name, actionKey: "k", status, ...entry };
+      return { name, status: "succeeded", details: { actionKey: "k", entry, actionRan: false } };
     case "failed":
       return {
         name,
-        actionKey: "k",
-        status,
+        status: outcome,
         error: { name: "Error", message: "failed" },
-        ...(elapsed !== undefined && { elapsed }),
+        details: { actionKey: "k", ...(elapsed !== undefined && { elapsed }) },
       };
     case "dep-failed":
-      return { name, actionKey: "", status, dep: "a" };
+      return { name, status: outcome, dep: "a" };
     case "cancelled":
-      return { name, actionKey: "", status };
+      return { name, status: outcome };
   }
 }
 
 /** A settled node; `ran` is [start, duration] for one whose action ran or that hit the cache. */
 const settled = (
   name: string,
-  status: Result["status"],
+  outcome: Outcome,
   ran?: [number, number],
   deps: string[] = [],
 ): NodeReport => ({
   node: node(name, name, deps),
-  result: resultOf(name, status, status === "cached" ? undefined : ran?.[1]),
+  result: resultOf(name, outcome, outcome === "cached" ? undefined : ran?.[1]),
   ...(ran && { start: ran[0], duration: ran[1] }),
 });
 
@@ -56,18 +62,23 @@ describe("summary", () => {
       node("gw:image", "image", ["gw:build"]),
       node("require-all", "require-all", ["gw:image"]),
     ];
-    const statuses: Record<string, Result["status"]> = {
+    const outcomes: Record<string, Outcome> = {
       "gw:build": "cached",
-      "gw:image": "done",
-      "require-all": "done",
+      "gw:image": "built",
+      "require-all": "built",
     };
     const big = Array.from({ length: 70 }, (_, i) =>
       node(`t${i}`, i % 2 ? "test" : "build", i % 2 ? [`t${i - 1}`] : []),
     );
     assert.deepEqual(
       {
-        scoped: dagMermaid(scoped, (n) => statuses[n]),
-        big: dagMermaid(big, (n) => (n === "t1" ? "failed" : "done")),
+        scoped: dagMermaid(scoped, (n) => {
+          const outcome = outcomes[n];
+          return outcome && resultOf(n, outcome);
+        }),
+        big: dagMermaid(big, (n) =>
+          resultOf(n, n === "t1" ? "failed" : n === "t0" ? "cached" : "built"),
+        ),
       },
       {
         scoped: [
@@ -131,7 +142,7 @@ describe("summary", () => {
     const nodes = [
       settled("restore:cas", "cached", [0, 5]),
       settled("test:unit", "failed", [10, 3000], ["restore:cas"]),
-      settled("lint", "done", [10, 2000], ["restore:cas"]),
+      settled("lint", "built", [10, 2000], ["restore:cas"]),
       settled("require-all", "failed", [3010, 3], ["test:unit", "lint"]),
       settled("deploy", "dep-failed", undefined, ["require-all"]),
     ];
@@ -193,15 +204,15 @@ describe("summary", () => {
         mixed: renderCriticalPath(
           report([
             settled("restore", "cached", [0, 8]),
-            settled("build", "done", [8, 2000], ["restore"]),
-            settled("check", "done", [2008, 5], ["build"]),
-            settled("test", "done", [2013, 3000], ["check"]),
+            settled("build", "built", [8, 2000], ["restore"]),
+            settled("check", "built", [2008, 5], ["build"]),
+            settled("test", "built", [2013, 3000], ["check"]),
           ]),
         ),
         allBelow: renderCriticalPath(
           report([
             settled("restore", "cached", [0, 8]),
-            settled("require-all", "done", [8, 50], ["restore"]),
+            settled("require-all", "built", [8, 50], ["restore"]),
           ]),
         ),
       },

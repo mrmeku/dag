@@ -6,7 +6,9 @@ import {
   runNode,
   throttledScheduler,
   type ExecuteOptions,
-  type Result,
+  type Node,
+  type NodeResult,
+  type SucceededNodeDetails,
 } from "@mrmeku/dagraph";
 import { relative, resolve } from "node:path";
 import { DEFAULT_DURATIONS_DIR, DEFAULT_HISTORY_DIR, RERUN_COMMAND } from "./config.ts";
@@ -65,7 +67,7 @@ type PostOptions = Omit<RunOptions, "force" | "signal">;
 export type RunDataPaths = Pick<RunOptions, "cacheDir" | "durationsDir">;
 
 export interface RunOutcome {
-  results: Result[];
+  results: NodeResult[];
   failed: number;
   markdown: string;
   cancelled: boolean;
@@ -111,7 +113,7 @@ function owedPosts(
 ): Set<string> {
   return new Set(
     [...postNodes(graph)]
-      .filter(([name, main]) => started.includes(main) && results[name]?.status !== "done")
+      .filter(([name, main]) => started.includes(main) && results[name]?.status !== "succeeded")
       .map(([name]) => name),
   );
 }
@@ -246,7 +248,7 @@ export async function runWorkflow(opts: RunOptions): Promise<RunOutcome> {
     },
   );
   const saves = savesOf(graph);
-  let results: Result[];
+  let results: NodeResult[];
   try {
     await history.begin();
     results = await execute(
@@ -283,8 +285,8 @@ export async function runWorkflow(opts: RunOptions): Promise<RunOutcome> {
 }
 
 /** A node's result as the run's history recorded it, replayed so the engine feeds its outputs to the post steps. */
-function replay(name: string, recorded: Result | undefined): Result {
-  return recorded ?? { name, actionKey: "", status: "cancelled" };
+function replay(name: string, recorded: NodeResult | undefined): NodeResult {
+  return recorded ?? { name, status: "cancelled" };
 }
 
 /**
@@ -351,9 +353,13 @@ async function postPass(
   });
   const all = await orchestrate(
     replayed.describe(),
-    (node, depEntries, waitForScheduler) =>
+    (
+      node: Node<undefined>,
+      depDetails: Record<string, SucceededNodeDetails>,
+      waitForScheduler: () => Promise<void>,
+    ) =>
       owed.has(node.name)
-        ? runOwed(node, depEntries, waitForScheduler)
+        ? runOwed(node, depDetails, waitForScheduler)
         : Promise.resolve(replay(node.name, before[node.name])),
     throttledScheduler(opts.schedulerOptions),
     ports.clock,

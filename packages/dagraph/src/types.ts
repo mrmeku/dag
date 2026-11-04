@@ -1,4 +1,3 @@
-import { isCacheEntry, type CacheEntry } from "./cache.ts";
 import { isJsonValue } from "./utils.ts";
 
 /**
@@ -29,58 +28,56 @@ export type JsonValue =
   | readonly JsonValue[]
   | { readonly [key: string]: JsonValue | undefined };
 
+/** A thrown value as a result keeps it: its name, its message and its cause as JSON. */
+export type FailureError = { name: string; message: string; cause?: JsonValue };
+
 /**
- * How one node settled. `actionKey` is "" when it never got one. `elapsed` is there only when the
- * engine ran the action. A result is plain data, to write to a file or send to another process as
- * it is. The engine copies a failure's cause when it is JSON. It changes an `Error` to its name,
+ * How one node settled. `details` is what a node that succeeded made. Details are what whatever
+ * ran the node reports after a failure or a cancel, passed on untouched; orchestration builds no
+ * details of its own. A result is plain data, to write to a file or send to another process as it
+ * is. The engine copies a failure's cause when it is JSON. It changes an `Error` to its name,
  * message and cause, converted the same way. It drops anything else.
  */
-export type Result = { name: string; actionKey: string } & (
-  | (CacheEntry & { status: "done"; elapsed: number })
-  | (CacheEntry & { status: "cached" })
-  /** `timedOut`, and `error.name` "TimeoutError", after the node's own timeout. */
-  | {
-      status: "failed";
-      error: { name: string; message: string; cause?: JsonValue };
-      elapsed?: number;
-      timedOut?: true;
-    }
+export type Result<SuccessDetails, FailureDetails, CancellationDetails> = { name: string } & (
+  | { status: "succeeded"; details: SuccessDetails }
+  | { status: "failed"; error: FailureError; details?: FailureDetails }
+  | { status: "cancelled"; details?: CancellationDetails }
   /** `dep` is a required dep that did not succeed; `rootCauses` are the failures behind it. */
   | { status: "dep-failed"; dep: string; rootCauses?: string[] }
-  | { status: "cancelled"; elapsed?: number }
 );
 
-/** The result of a node that succeeded, `done` or `cached`: it carries the node's entry. */
-export type SucceededResult = Extract<Result, { status: "done" | "cached" }>;
+const isFailureError = (value: unknown): value is FailureError =>
+  typeof value === "object" &&
+  value !== null &&
+  "name" in value &&
+  typeof value.name === "string" &&
+  "message" in value &&
+  typeof value.message === "string" &&
+  (!("cause" in value) || isJsonValue(value.cause));
 
-/** The error of a `failed` result. */
-export type FailedError = Extract<Result, { status: "failed" }>["error"];
-
-/** Whether `value` is a `Result`: the guard for one read back from a file or another process. */
-export function isResult(value: unknown): value is Result {
+/**
+ * Whether `value` is a `Result` whose details pass their guards: the guard for one
+ * read back from a file or another process.
+ */
+export function isResult<SuccessDetails, FailureDetails, CancellationDetails>(
+  value: unknown,
+  isSuccessDetails: (value: unknown) => value is SuccessDetails,
+  isFailureDetails: (value: unknown) => value is FailureDetails,
+  isCancellationDetails: (value: unknown) => value is CancellationDetails,
+): value is Result<SuccessDetails, FailureDetails, CancellationDetails> {
   if (typeof value !== "object" || value === null || !("status" in value)) return false;
   if (!("name" in value && typeof value.name === "string")) return false;
-  if (!("actionKey" in value && typeof value.actionKey === "string")) return false;
-  const hasElapsed = "elapsed" in value && typeof value.elapsed === "number";
-  const elapsedIfAny = hasElapsed || !("elapsed" in value);
   switch (value.status) {
-    case "done":
-      return isCacheEntry(value) && hasElapsed;
-    case "cached":
-      return isCacheEntry(value);
+    case "succeeded":
+      return "details" in value && isSuccessDetails(value.details);
     case "failed":
       return (
-        elapsedIfAny &&
-        (!("timedOut" in value) || value.timedOut === true) &&
         "error" in value &&
-        typeof value.error === "object" &&
-        value.error !== null &&
-        "name" in value.error &&
-        typeof value.error.name === "string" &&
-        "message" in value.error &&
-        typeof value.error.message === "string" &&
-        (!("cause" in value.error) || isJsonValue(value.error.cause))
+        isFailureError(value.error) &&
+        (!("details" in value) || isFailureDetails(value.details))
       );
+    case "cancelled":
+      return !("details" in value) || isCancellationDetails(value.details);
     case "dep-failed":
       return (
         "dep" in value &&
@@ -90,47 +87,48 @@ export function isResult(value: unknown): value is Result {
             value.rootCauses.every((cause) => typeof cause === "string")))
       );
     default:
-      return value.status === "cancelled" && elapsedIfAny;
+      return false;
   }
 }
 
-/** Whether the node succeeded: its result is `done` or `cached`. */
-export function isSucceeded(result: Result): result is SucceededResult {
-  return result.status === "done" || result.status === "cached";
+/** Whether the node succeeded: its result carries its details. */
+export function isSucceeded<Settled extends Result<unknown, unknown, unknown>>(
+  result: Settled,
+): result is Extract<Settled, { status: "succeeded" }> {
+  return result.status === "succeeded";
 }
 
-export type Tally = Record<Result["status"], number>;
+export type Tally = Record<Result<unknown, unknown, unknown>["status"], number>;
 
 /** Where the engine reads the time: `Date`, or a fake one in a test. */
 export type Clock = Pick<DateConstructor, "now">;
 
 /** Count results, or anything else with a status, by status. */
-export function countResultsByStatus(results: Iterable<Pick<Result, "status">>): Tally {
-  const t: Tally = { done: 0, cached: 0, failed: 0, "dep-failed": 0, cancelled: 0 };
+export function countResultsByStatus(results: Iterable<{ status: keyof Tally }>): Tally {
+  const t: Tally = { succeeded: 0, failed: 0, cancelled: 0, "dep-failed": 0 };
   for (const r of results) t[r.status]++;
   return t;
 }
 
 /**
- * One stream of what happens, each event naming its node, carrying its `meta` and when it
- * occurred. Orchestration
- * emits `dispatch`, as a node is handed to processing, `pending`, as a miss is held back before its
- * action runs, until the scheduler lets it run, and `result`. Processing emits `start`, on a miss as
- * the action begins, and `output`, for what the action prints.
+ * Orchestration's stream of what happens, each event naming its node, carrying its `meta` and
+ * when it occurred: `dispatch`, as a node is handed to whatever runs it, `pending`, as a node
+ * waiting for its slot is held back until the scheduler lets it run, and `result`.
  */
-export type ExecEvent<Meta = unknown> = { node: string; meta?: Meta; occurredAt: number } & (
+export type OrchestrationEvent<Meta, SuccessDetails, FailureDetails, CancellationDetails> = {
+  node: string;
+  meta?: Meta;
+  occurredAt: number;
+} & (
   | { type: "dispatch" }
   | { type: "pending" }
-  | { type: "start" }
-  | { type: "output"; chunk: string }
-  | { type: "result"; result: Result }
+  | { type: "result"; result: Result<SuccessDetails, FailureDetails, CancellationDetails> }
 );
 
 /**
- * Receives each `ExecEvent`. For `start` it may return a promise, and the action runs only once it
- * resolves, so a journal records the start before any effect: `onEvent: (event) =>
- * journal.record(event)`. A rejection fails the node without running it. The promise of an `output`
- * is not awaited, and its rejection is dropped. That of a `dispatch` or a `result` that rejects
- * before the execution ends rejects it at its end, as a throw does.
+ * Receives each `OrchestrationEvent`. A throw, or a returned promise that rejects before the
+ * execution ends, rejects the execution at its end.
  */
-export type ExecListener<Meta = unknown> = (event: ExecEvent<Meta>) => unknown;
+export type OrchestrationListener<Meta, SuccessDetails, FailureDetails, CancellationDetails> = (
+  event: OrchestrationEvent<Meta, SuccessDetails, FailureDetails, CancellationDetails>,
+) => unknown;

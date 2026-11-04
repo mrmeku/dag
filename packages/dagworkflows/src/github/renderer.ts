@@ -1,4 +1,4 @@
-import type { Result } from "@mrmeku/dagraph";
+import type { NodeResult } from "@mrmeku/dagraph";
 import { STATUS_ICON } from "../config.ts";
 import {
   countsLine,
@@ -14,9 +14,8 @@ import * as selectors from "../kernel/selectors.ts";
 import { createRunStore, type RunListener } from "../kernel/store.ts";
 import type { CheckConclusion, CheckUpdate, Host, Ports } from "../ports.ts";
 
-const CHECK_RUN_CONCLUSION_BY_STATUS: Record<Result["status"], CheckConclusion> = {
-  done: "success",
-  cached: "success",
+const CHECK_RUN_CONCLUSION_BY_STATUS: Record<NodeResult["status"], CheckConclusion> = {
+  succeeded: "success",
   failed: "failure",
   "dep-failed": "skipped",
   cancelled: "cancelled",
@@ -32,9 +31,8 @@ function durationText(nodeState: SettledNodeState): string {
 
 function checkRunSummary(nodeState: SettledNodeState): string {
   switch (nodeState.status) {
-    case "done":
-      return `done in ${durationText(nodeState)}`;
-    case "cached":
+    case "succeeded":
+      return nodeState.result.details.actionRan ? `done in ${durationText(nodeState)}` : "cached";
     case "cancelled":
       return nodeState.status;
     case "failed":
@@ -49,7 +47,7 @@ function checkRunSummary(nodeState: SettledNodeState): string {
  */
 export function recapLines(title: string, nodes: NodeReport[], rerunCommand?: string): string[] {
   const failedNames = namesOf(nodes, "failed");
-  const namesLine = (label: string, status: Result["status"]) => {
+  const namesLine = (label: string, status: NodeResult["status"]) => {
     const names = namesOf(nodes, status);
     return names.length > 0 ? [`${label}: ${names.join(", ")}`] : [];
   };
@@ -78,12 +76,11 @@ export function createGithubRenderer(host: Host): RunListener {
   const drawSettledNode = (nodeState: SettledNodeState, log: string[]) => {
     const name = nodeState.node.name;
     switch (nodeState.status) {
-      case "done":
-        host.group(`${STATUS_ICON.done} ${name} (${durationText(nodeState)})`, log);
+      case "succeeded": {
+        const detail = nodeState.result.details.actionRan ? durationText(nodeState) : "cached";
+        host.group(`${STATUS_ICON.succeeded} ${name} (${detail})`, log);
         break;
-      case "cached":
-        host.group(`${STATUS_ICON.cached} ${name} (cached)`, log);
-        break;
+      }
       case "failed":
         host.group(
           `${STATUS_ICON.failed} ${name} (${durationText(nodeState)})`,
@@ -125,10 +122,9 @@ export function createGithubRenderer(host: Host): RunListener {
       queueCheckRunUpdate({
         name: nodeState.node.name,
         status: "completed",
-        conclusion:
-          nodeState.status === "failed" && nodeState.result.timedOut
-            ? "timed_out"
-            : CHECK_RUN_CONCLUSION_BY_STATUS[nodeState.status],
+        conclusion: selectors.timedOut(nodeState.result)
+          ? "timed_out"
+          : CHECK_RUN_CONCLUSION_BY_STATUS[nodeState.status],
         ...(startedAt !== undefined && { startedAt: isoTimestamp(startedAt) }),
         completedAt: isoTimestamp(nodeState.endedAt),
         summary: checkRunSummary(nodeState),

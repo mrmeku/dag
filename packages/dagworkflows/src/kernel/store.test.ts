@@ -3,11 +3,11 @@ import {
   file,
   Graph,
   settled as settledDep,
-  type ExecEvent,
+  type ExecutionEvent,
   type JsonValue,
   type MemoryDagFs,
   type Node,
-  type Result,
+  type NodeResult,
 } from "@mrmeku/dagraph";
 import assert from "node:assert/strict";
 import { describe, test } from "node:test";
@@ -36,40 +36,41 @@ const [a, b, c, d, f, save] = [
   node("f", ["a"]),
   node("save"),
 ];
-type Settled<R = Result> = R extends unknown ? Omit<R, "name"> : never;
-const resultOf = (n: Node, result: Settled): Result => ({ name: n.name, ...result });
-const resultEvent = (result: Result): ExecEvent => ({
+type Settled<R = NodeResult> = R extends unknown ? Omit<R, "name"> : never;
+const resultOf = (n: Node, result: Settled): NodeResult => ({ name: n.name, ...result });
+const resultEvent = (result: NodeResult): ExecutionEvent => ({
   type: "result",
   node: result.name,
   result,
   occurredAt: 0,
 });
-const settled = (n: Node, result: Settled): ExecEvent => resultEvent(resultOf(n, result));
-const builtResult = (n: Node, key: string, elapsed = 1000): Result =>
+const settled = (n: Node, result: Settled): ExecutionEvent => resultEvent(resultOf(n, result));
+const entryOf = (key: string) => ({ outputs: { out: key }, contentHash: "h", outputHashes: {} });
+const builtResult = (n: Node, key: string, elapsed = 1000): NodeResult =>
   resultOf(n, {
-    actionKey: key,
-    status: "done",
-    outputs: { out: key },
-    contentHash: "h",
-    outputHashes: {},
-    elapsed,
+    status: "succeeded",
+    details: { actionKey: key, entry: entryOf(key), actionRan: true, elapsed },
   });
-const failedResult = (n: Node, key: string, message: string, cause?: JsonValue): Result =>
+const hitResult = (n: Node, key: string): NodeResult =>
   resultOf(n, {
-    actionKey: key,
+    status: "succeeded",
+    details: { actionKey: key, entry: entryOf(key), actionRan: false },
+  });
+const failedResult = (n: Node, key: string, message: string, cause?: JsonValue): NodeResult =>
+  resultOf(n, {
     status: "failed",
     error: { name: "Error", message, ...(cause !== undefined && { cause }) },
-    elapsed: 1000,
+    details: { actionKey: key, elapsed: 1000 },
   });
-const built = (n: Node, key: string, elapsed?: number): ExecEvent =>
+const built = (n: Node, key: string, elapsed?: number): ExecutionEvent =>
   resultEvent(builtResult(n, key, elapsed));
-const failed = (n: Node, key: string, message: string, cause?: JsonValue): ExecEvent =>
+const failed = (n: Node, key: string, message: string, cause?: JsonValue): ExecutionEvent =>
   resultEvent(failedResult(n, key, message, cause));
-const started = (n: Node): ExecEvent[] => [
+const started = (n: Node): ExecutionEvent[] => [
   { type: "dispatch", node: n.name, occurredAt: 0 },
   { type: "start", node: n.name, occurredAt: 0 },
 ];
-const printed = (n: Node, chunk: string): ExecEvent => ({
+const printed = (n: Node, chunk: string): ExecutionEvent => ({
   type: "output",
   node: n.name,
   chunk,
@@ -106,7 +107,7 @@ function storeOf(listeners: RunListener[]) {
   return {
     fs,
     store,
-    events: (...events: ExecEvent[]) =>
+    events: (...events: ExecutionEvent[]) =>
       events.forEach((event) =>
         store.onEvent(event.type === "output" ? event : { ...event, occurredAt: clock.now() }),
       ),
@@ -163,17 +164,11 @@ async function transcript() {
     ...started(f),
     failed(b, "kb", "make b exited 2", command),
     { type: "dispatch", node: "c", occurredAt: 0 },
-    settled(c, {
-      actionKey: "kc",
-      status: "cached",
-      outputs: { out: "kc" },
-      contentHash: "h",
-      outputHashes: {},
-    }),
-    settled(d, { actionKey: "", status: "dep-failed", dep: "b" }),
+    resultEvent(hitResult(c, "kc")),
+    settled(d, { status: "dep-failed", dep: "b" }),
     failed(f, "kf", "upload refused", { name: "Error", message: "ECONNREFUSED" }),
     ...started(save),
-    settled(save, { actionKey: "ks", status: "cancelled" }),
+    settled(save, { status: "cancelled", details: { actionKey: "ks" } }),
   );
   store.begin(post);
   events(...started(save));
@@ -185,12 +180,14 @@ async function transcript() {
 }
 
 const skippedByB = resultOf(d, {
-  actionKey: "",
   status: "dep-failed",
   dep: "b",
   rootCauses: ["b"],
 });
-const cancelledRunning = resultOf(c, { actionKey: "kc", status: "cancelled", elapsed: 1000 });
+const cancelledRunning = resultOf(c, {
+  status: "cancelled",
+  details: { actionKey: "kc", elapsed: 1000 },
+});
 
 /**
  * A run of a built node, whose action took 600 ms of the second from its start to its result, a
@@ -231,10 +228,10 @@ describe("run store", () => {
       // The last run is read as the pass begins.
       ["start", "a", "running", 500],
       ["start", "b", "running", undefined],
-      ["settle", "a", "done", ["a out", "part"], "no command"],
+      ["settle", "a", "succeeded", ["a out", "part"], "no command"],
       ["start", "f", "running", 1500],
       ["settle", "b", "failed", ["b out"], command],
-      ["settle", "c", "cached", ["c from an earlier run"], "no command"],
+      ["settle", "c", "succeeded", ["c from an earlier run"], "no command"],
       ["settle", "d", "dep-failed", [], "no command"],
       ["settle", "f", "failed", [], "no command"],
       ["start", "save", "running", undefined],
@@ -242,8 +239,8 @@ describe("run store", () => {
       ["begin", "post", false],
       ["start", "save", "running", undefined],
       ["immediate.output", "save", ["saved"]],
-      ["settle", "save", "done", ["saved"], "no command"],
-      ["finish", "post", ["save done in 1000ms"]],
+      ["settle", "save", "succeeded", ["saved"], "no command"],
+      ["finish", "post", ["save succeeded in 1000ms"]],
     ]);
   });
 
@@ -251,26 +248,11 @@ describe("run store", () => {
     const pass = { title: "main", nodes: [a] };
     const { store, events } = storeOf([]);
     store.begin(pass);
-    events(
-      { type: "dispatch", node: "a", occurredAt: 0 },
-      settled(a, {
-        actionKey: "ka",
-        status: "cached",
-        outputs: { out: "ka" },
-        contentHash: "h",
-        outputHashes: {},
-      }),
-    );
+    events({ type: "dispatch", node: "a", occurredAt: 0 }, resultEvent(hitResult(a, "ka")));
     assert.deepEqual(await store.report(pass), [
       {
         node: a,
-        result: resultOf(a, {
-          actionKey: "ka",
-          status: "cached",
-          outputs: { out: "ka" },
-          contentHash: "h",
-          outputHashes: {},
-        }),
+        result: hitResult(a, "ka"),
         start: 0,
         duration: 1000,
         previous: 500,
@@ -441,16 +423,7 @@ describe("run store", () => {
     store.begin(pass);
     events(...started(a), built(a, "ka"));
     events(...started(b), printed(b, "b out\n"), printed(b, "disk full\n"), built(b, "kb"));
-    events(
-      { type: "dispatch", node: "c", occurredAt: 0 },
-      settled(c, {
-        actionKey: "kc",
-        status: "cached",
-        outputs: { out: "kc" },
-        contentHash: "h",
-        outputHashes: {},
-      }),
-    );
+    events({ type: "dispatch", node: "c", occurredAt: 0 }, resultEvent(hitResult(c, "kc")));
     await store.report(pass);
     const warning = (name: string, error: string) =>
       `::warning title=${name}::its build log in ${BUILD_LOG_DIR} could not be written or read: ${error}`;
@@ -590,22 +563,18 @@ describe("run store", () => {
         node: "n",
         result: {
           name: "n",
-          actionKey: "k",
           status: "failed",
           error,
-          elapsed: 1,
-          ...(timedOut && { timedOut }),
+          details: { actionKey: "k", elapsed: 1, ...(timedOut && { timedOut }) },
         },
         occurredAt: 0,
       });
       assert(nodeState.status === "failed");
       return failureMessage(nodeState);
     };
-    const ended = (result: Result): NodeReport => ({ node: node(result.name), result });
+    const ended = (result: NodeResult): NodeReport => ({ node: node(result.name), result });
     const done = ended(builtResult(node("done"), "k"));
-    const skipped = ended(
-      resultOf(node("skipped"), { actionKey: "", status: "dep-failed", dep: "b" }),
-    );
+    const skipped = ended(resultOf(node("skipped"), { status: "dep-failed", dep: "b" }));
     assert.deepEqual(
       {
         durations: [450, 1500].map(formatDuration),

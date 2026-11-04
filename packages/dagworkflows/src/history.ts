@@ -1,9 +1,9 @@
-import { isResult, type DagFs, type ExecEvent, type Result } from "@mrmeku/dagraph";
+import { isNodeResult, type DagFs, type ExecutionEvent, type NodeResult } from "@mrmeku/dagraph";
 import { HISTORY_LOCK_STALE_MS } from "./config.ts";
 import type { Lockfile } from "./ports.ts";
 
 /** Each settled node's result: what a later process needs to feed its dependents. */
-export type RunHistory = Record<string, Result>;
+export type RunHistory = Record<string, NodeResult>;
 
 /**
  * A run's history file: its workflow file (resolved; empty when none was named) and `--only`, so
@@ -76,7 +76,7 @@ export async function createRunHistory(
      * Records a start or a result. For a start it returns the write, which the engine awaits before
      * the action may run, so a run killed after its command started still shows what it owes.
      */
-    onEvent: (event: ExecEvent): Promise<void> | undefined => {
+    onEvent: (event: ExecutionEvent): Promise<void> | undefined => {
       if (event.type === "start") history.started.push(event.node);
       else if (event.type === "result") history.results[event.node] = event.result;
       else return undefined;
@@ -90,7 +90,9 @@ export async function createRunHistory(
 const isNames = (value: unknown) =>
   Array.isArray(value) && value.every((name) => typeof name === "string");
 
-const isHistoryFile = (value: unknown): value is RunHistoryFile =>
+const isHistoryFile = (
+  value: unknown,
+): value is Omit<RunHistoryFile, "results"> & { results: object } =>
   typeof value === "object" &&
   value !== null &&
   "workflow" in value &&
@@ -100,9 +102,12 @@ const isHistoryFile = (value: unknown): value is RunHistoryFile =>
   isNames(value.started) &&
   "results" in value &&
   typeof value.results === "object" &&
-  value.results !== null &&
-  Object.values(value.results).every(isResult);
+  value.results !== null;
 
+/**
+ * The history at `path`. A result in an older shape is dropped, so its node replays as one that
+ * never settled; the started nodes still say what the run owes.
+ */
 export async function readRunHistory(fs: DagFs, path: string): Promise<RunHistoryFile> {
   const file: unknown = JSON.parse(await fs.readText(path));
   if (!isHistoryFile(file))
@@ -111,5 +116,8 @@ export async function readRunHistory(fs: DagFs, path: string): Promise<RunHistor
         ? "it records no started nodes, as a history from before dag recorded them"
         : "not a run's history: it lacks its workflow, started nodes or results",
     );
-  return file;
+  const results = Object.entries(file.results).flatMap(([name, result]): [string, NodeResult][] =>
+    isNodeResult(result) ? [[name, result]] : [],
+  );
+  return { ...file, results: Object.fromEntries(results) };
 }

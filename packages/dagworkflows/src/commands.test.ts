@@ -3,9 +3,10 @@ import {
   execute,
   file,
   Graph,
+  resultActionKey,
   settled,
-  type ExecListener,
-  type Result,
+  type ExecutionListener,
+  type NodeResult,
 } from "@mrmeku/dagraph";
 import { createNodeDagFs } from "@mrmeku/dagraph/fs/node";
 import assert from "node:assert/strict";
@@ -25,7 +26,7 @@ const executeUnder = (
   graph: Graph<Ports>,
   ports: Ports,
   cacheDir = CACHE_DIR,
-  onEvent: ExecListener = () => {},
+  onEvent: ExecutionListener = () => {},
 ) => execute(graph, { ports, fs: ports.fs, clock: Date, cacheDir }, { onEvent });
 const exited = (code: number, output = ""): ExecResult => ({
   ended: "exited",
@@ -35,9 +36,14 @@ const exited = (code: number, output = ""): ExecResult => ({
   output,
   ok: code === 0,
 });
-const byName = (results: Result[]) => new Map(results.map((r) => [r.name, r]));
-const statuses = (results: Result[]) => Object.fromEntries(results.map((r) => [r.name, r.status]));
-const errorOf = (result: Result | undefined) => result?.status === "failed" && result.error.message;
+/** How a node settled, in the words the run's output uses: built or cached, or its status. */
+const outcomeOf = (result: NodeResult) =>
+  result.status === "succeeded" ? (result.details.actionRan ? "built" : "cached") : result.status;
+const byName = (results: NodeResult[]) => new Map(results.map((r) => [r.name, r]));
+const statuses = (results: NodeResult[]) =>
+  Object.fromEntries(results.map((r) => [r.name, outcomeOf(r)]));
+const errorOf = (result: NodeResult | undefined) =>
+  result?.status === "failed" && result.error.message;
 const refusal = (add: () => unknown) => {
   try {
     add();
@@ -84,15 +90,15 @@ describe("a command", () => {
     const results = byName(await executeUnder(graph, ports, CACHE_DIR, output.onEvent));
     const packed = found(results.get("pack"), "pack's result");
     const tarball =
-      packed.status === "done" &&
-      `${CACHE_DIR}/v1/${packed.actionKey}/${packed.contentHash}/pkg.tgz`;
+      packed.status === "succeeded" &&
+      `${CACHE_DIR}/v1/${packed.details.actionKey}/${packed.details.entry.contentHash}/pkg.tgz`;
     const publish = found(
       seen.find((s) => s.cmd[0] === "publish"),
       "the publish command",
     );
     assert.deepEqual(
       {
-        packOutputs: packed.status === "done" && packed.outputs,
+        packOutputs: packed.status === "succeeded" && packed.details.entry.outputs,
         publish: {
           ...publish,
           env: { ...publish.env, OUT: publish.env?.OUT?.replace(/[0-9a-f-]{36}$/, "<uuid>") },
@@ -143,7 +149,7 @@ describe("a command", () => {
       const results = await executeUnder(graph, ports, cacheDir);
       return {
         ...statuses(results),
-        key: found(byName(results).get("publish"), "publish").actionKey,
+        key: resultActionKey(found(byName(results).get("publish"), "publish")),
       };
     };
     const first = await statusesOf("pack", "pack");
@@ -155,9 +161,9 @@ describe("a command", () => {
     assert.deepEqual(
       { first: firstStatuses, renamed, otherRole, keyHoldsNoPath: elsewhere === key },
       {
-        first: { pack: "done", publish: "done" },
+        first: { pack: "built", publish: "built" },
         renamed: { "pack:renamed": "cached", publish: "cached" },
-        otherRole: { pack: "cached", publish: "done" },
+        otherRole: { pack: "cached", publish: "built" },
         keyHoldsNoPath: true,
       },
     );
@@ -210,12 +216,15 @@ describe("a command", () => {
     const results = await executeUnder(graph, ports);
     // What main's workflow.run and workflow.runShell keyed for the same graph, with each node's
     // kind.
-    assert.deepEqual(Object.fromEntries(results.map((r) => [r.name, [r.status, r.actionKey]])), {
-      tests: ["failed", "9c9d43ced0349e6966f09c288a2223d060fa452d1d579f9b64071f74a325b03d"],
-      pack: ["done", "c9450dd8d43e15f5fe3febeaceffdc526c3928f1e291a2e1bd5e1c71ab17cfb3"],
-      publish: ["failed", "1b293a851dcf379455bb36dc7701d8da307f3797cb7e1ef521c8cb67057a3a4b"],
-      size: ["done", "7dfb0c52b9f7438230f0082f7527983fcb5ccc2589c1dc9a9f3ba6fe76e493a0"],
-    });
+    assert.deepEqual(
+      Object.fromEntries(results.map((r) => [r.name, [outcomeOf(r), resultActionKey(r)]])),
+      {
+        tests: ["failed", "9c9d43ced0349e6966f09c288a2223d060fa452d1d579f9b64071f74a325b03d"],
+        pack: ["built", "c9450dd8d43e15f5fe3febeaceffdc526c3928f1e291a2e1bd5e1c71ab17cfb3"],
+        publish: ["failed", "1b293a851dcf379455bb36dc7701d8da307f3797cb7e1ef521c8cb67057a3a4b"],
+        size: ["built", "7dfb0c52b9f7438230f0082f7527983fcb5ccc2589c1dc9a9f3ba6fe76e493a0"],
+      },
+    );
   });
 
   test("that declares no inputs runs every time, and one that declares inputs is cached on them; its own command does not count, and an explicit cacheable wins", async () => {
@@ -237,8 +246,8 @@ describe("a command", () => {
     assert.deepEqual(
       [await once(), await once()],
       [
-        { smoke: "done", lint: "done", empty: "done", publish: "done", e2e: "done" },
-        { smoke: "done", lint: "cached", empty: "done", publish: "cached", e2e: "done" },
+        { smoke: "built", lint: "built", empty: "built", publish: "built", e2e: "built" },
+        { smoke: "built", lint: "cached", empty: "built", publish: "cached", e2e: "built" },
       ],
     );
   });
@@ -309,7 +318,8 @@ describe("a command's paths", () => {
     const results = byName(await executeUnder(graph, ports));
     const listed = found(results.get("files"), "the files node's result");
     const dir =
-      listed.status === "done" && `${CACHE_DIR}/v1/${listed.actionKey}/${listed.contentHash}`;
+      listed.status === "succeeded" &&
+      `${CACHE_DIR}/v1/${listed.details.actionKey}/${listed.details.entry.contentHash}`;
     assert.deepEqual(seen, [["ls", `${dir}/a.txt:${dir}/b.txt`]]);
   });
 
@@ -356,20 +366,22 @@ describe("a command's paths", () => {
       const byNode = byName(results);
       const own = found(byNode.get("own"), "own's result");
       const ownDir =
-        own.status === "done" ? `${root}/cache/v1/${own.actionKey}/${own.contentHash}` : "";
-      const listKey = found(byNode.get("list"), "list's result").actionKey;
+        own.status === "succeeded"
+          ? `${root}/cache/v1/${own.details.actionKey}/${own.details.entry.contentHash}`
+          : "";
+      const listKey = resultActionKey(found(byNode.get("list"), "list's result"));
       assert.deepEqual(
         {
-          statuses: Object.fromEntries([...byNode].map(([name, r]) => [name, r.status])),
+          statuses: Object.fromEntries([...byNode].map(([name, r]) => [name, outcomeOf(r)])),
           listed: await fs.readText(`${buildLogDir}/${listKey}.log`),
           own: {
-            outputs: own.status === "done" && own.outputs,
+            outputs: own.status === "succeeded" && own.details.entry.outputs,
             content: await fs.readText(`${ownDir}/id`),
           },
           durations: await fs.exists(`${durationsDir}/run.json`),
         },
         {
-          statuses: { pack: "done", list: "done", own: "done" },
+          statuses: { pack: "built", list: "built", own: "built" },
           listed: "bytes\n",
           own: { outputs: { id: `${ownDir}/id` }, content: "1\n" },
           durations: true,
@@ -402,7 +414,7 @@ describe("a shell task", () => {
     addCommand(graph, { name: "missing", cmd: ["dag-test-no-such-program"] });
     process.env["DAG_TEST_REPORT"] = "inherited";
     const output = createOutputRecorder();
-    let results: Map<string, Result>;
+    let results: Map<string, NodeResult>;
     try {
       results = byName(await executeUnder(graph, ports, CACHE_DIR, output.onEvent));
     } finally {
@@ -410,7 +422,7 @@ describe("a shell task", () => {
     }
     assert.deepEqual(
       {
-        statuses: Object.fromEntries([...results].map(([name, r]) => [name, r.status])),
+        statuses: Object.fromEntries([...results].map(([name, r]) => [name, outcomeOf(r)])),
         tests: errorOf(results.get("tests")),
         pipe: [errorOf(results.get("pipe")), output.printed.get("pipe") ?? ""],
         report: output.printed.get("report"),
@@ -421,7 +433,7 @@ describe("a shell task", () => {
         statuses: {
           tests: "failed",
           pipe: "failed",
-          report: "done",
+          report: "built",
           "no-bash": "failed",
           missing: "failed",
         },

@@ -10,12 +10,12 @@ Some actions are slow or cost money: a download, a long computation, a model cal
 - every successful run stores a **cache entry** under that key: the output paths and a hash of their contents;
 - the output files live in the **cache**, a directory tree named by those hashes.
 
-Core idea: a node's key is built from its action's kind, its inputs and the content hashes of its deps. If a stored entry exists for that key and its files are unchanged, by the size and mtime they were committed with or else by their hash, the node is a **hit** (`cached`) and its action does not run. Otherwise it is a **miss**: the action runs in a fresh private directory, its files are made read-only, the directory is committed into the cache, and the entry is written. Dependents key on content, not on keys, so a node that reruns and produces the same bytes stops the change from spreading further. This is **early cutoff**.
+Core idea: a node's key is built from its action's kind, its inputs and the content hashes of its deps. If a stored entry exists for that key and its files are unchanged, by the size and mtime they were committed with or else by their hash, the node is a **hit** (it succeeds with `details.actionRan: false`) and its action does not run. Otherwise it is a **miss**: the action runs in a fresh private directory, its files are made read-only, the directory is committed into the cache, and the entry is written. Dependents key on content, not on keys, so a node that reruns and produces the same bytes stops the change from spreading further. This is **early cutoff**.
 
 ## Terms
 
-- **Action key** (`actionKey` on a result): a 64-character lowercase SHA-256 hex string. It names the node's work and its directory in the cache. It is `""` on a result when the node never got one: a required dep did not succeed, the key could not be computed, or the execution was cancelled before the node was processed.
-- **Cache entry** (type `CacheEntry`): `{ outputs, contentHash, outputHashes }`. `outputs` holds the files the action returned, in the record it returned: each value a path or a list of paths. `contentHash` is the hash of those files, and `outputHashes` holds each output's own hash, by name (see below). Results with status `done` or `cached` carry these same three fields.
+- **Action key** (`actionKey` on a `NodeResult`'s details, which `resultActionKey` finds on any status): a 64-character lowercase SHA-256 hex string. It names the node's work and its directory in the cache. A result has none when the node never got one: a required dep did not succeed, the key could not be computed, or the execution was cancelled before the node was processed.
+- **Cache entry** (type `CacheEntry`): `{ outputs, contentHash, outputHashes }`. `outputs` holds the files the action returned, in the record it returned: each value a path or a list of paths. `contentHash` is the hash of those files, and `outputHashes` holds each output's own hash, by name (see below). A result that succeeded carries its entry as `details.entry`.
 - **Content hash**: a SHA-256 hex string over each output's name, each file's path relative to its output directory, and each file's bytes.
 - **Cache directory** (`cacheDir` in the execution context): the root of the cache. Its `v1/` holds a directory per key, with the key's entry as `manifest.json` and each entry's files in a **content directory** named by its content hash; its `tmp/` holds what is not committed yet. The engine reads and writes all of it through the context's `DagFs`: usually the local disk (`createNodeDagFs`, `createBunDagFs`), but possibly memory (`createMemoryDagFs`).
 - **Last use**: the mtime a prune judges by ("Pruning"). A hit sets its manifest's, and a commit its content directory's, to the context's `clock` time, best effort: a stamp that fails changes no result.
@@ -23,15 +23,15 @@ Core idea: a node's key is built from its action's kind, its inputs and the cont
 
 ## Where caching sits in processing a node
 
-When the engine processes a node, these steps happen in this order. `execute` calls it only for the nodes that `orchestrate` dispatches: a node whose required dep failed is settled `dep-failed` by `orchestrate` before dispatch, and a node still waiting when the execution is cancelled is settled `cancelled` the same way. Both get `actionKey: ""` and never reach the steps below.
+When the engine processes a node, these steps happen in this order. `execute` calls it only for the nodes that `orchestrate` dispatches: a node whose required dep failed is settled `dep-failed` by `orchestrate` before dispatch, and a node still waiting when the execution is cancelled is settled `cancelled` the same way. Neither gets a key, and neither reaches the steps below.
 
 `lookupNode` takes the first three steps and `runAction` the last two. `processNode` runs both, and `runNode`, the `RunNode` that `execute` uses, waits for the scheduler between them ([dagraph-execution](dagraph-execution.md)).
 
-1. **Required deps.** `lookupNode` repeats the check for executors that call it directly. If a required dep (any dep not marked `settled`) has no entry in the `depEntries` it was given, the node settles `dep-failed` with `dep` set to that dep's name and `actionKey: ""`. Nothing is hashed.
-2. **Key.** The engine hashes every file input, then builds the key. If a file cannot be read, the node settles `failed` with `actionKey: ""` and no `elapsed`. The message is the file system's, such as `ENOENT: /missing.ts`.
-3. **Lookup.** This step is skipped when the node is `cacheable: false` or its key is forced. The engine reads the key's `manifest.json`. One that is missing, cannot be read, is not JSON, or is not `{ outputs, contentHash, outputHashes }` with outputs that are a record and hashes that are strings, or has no `fileStats` of sizes and mtimes, counts as a miss and is not an error. If an entry exists, the engine checks the files it names in its content directory (this is **verification**, see "Output verification"). If they are unchanged, the engine stamps the manifest's last use and the node settles `cached` with the entry, its paths absolute. A cached node has no `elapsed` and emits no `start` event. Otherwise the lookup is a miss, `{ name, actionKey, status: "missed" }`, which is not a result: it is what `runAction` runs.
-4. **Run.** The engine creates a staging directory, `<cacheDir>/tmp/<uuid>`, emits `start`, and calls the action with `outputDir` set to its absolute form. If the directory cannot be created, or a `start` listener's promise rejects, the node fails with that error and no `elapsed`, and the action never runs.
-5. **Commit.** The engine checks that the returned paths are under `outputDir` and name regular files, records each file's size and mtime and makes it read-only, hashes them relative to it, renames the directory to the content directory `<cacheDir>/v1/<actionKey>/<contentHash>`, stamps that directory's last use, and writes the entry with those sizes and mtimes. This last write is skipped for `cacheable: false`. The node settles `done` with the entry, its paths absolute, and `elapsed`.
+1. **Required deps.** `lookupNode` repeats the check for executors that call it directly. If a required dep (any dep not marked `settled`) has no entry in the `depEntries` it was given, the node settles `dep-failed` with `dep` set to that dep's name and no key. Nothing is hashed.
+2. **Key.** The engine hashes every file input, then builds the key. If a file cannot be read, the node settles `failed` with no details, so no key. The message is the file system's, such as `ENOENT: /missing.ts`.
+3. **Lookup.** This step is skipped when the node is `cacheable: false` or its key is forced. The engine reads the key's `manifest.json`. One that is missing, cannot be read, is not JSON, or is not `{ outputs, contentHash, outputHashes }` with outputs that are a record and hashes that are strings, or has no `fileStats` of sizes and mtimes, counts as a miss and is not an error. If an entry exists, the engine checks the files it names in its content directory (this is **verification**, see "Output verification"). If they are unchanged, the engine stamps the manifest's last use and the node settles `succeeded` with a hit's details, `{ actionKey, entry, actionRan: false }`, the entry its paths absolute, as `lookupEntry` returned it. A hit has no `elapsed` and emits no `start` event. Otherwise the lookup is a miss, `{ name, actionKey, status: "missed" }`, which is not a result: it is what `runAction` runs.
+4. **Run.** The engine creates a staging directory, `<cacheDir>/tmp/<uuid>`, emits `start`, and calls the action with `outputDir` set to its absolute form. If the directory cannot be created, or a `start` listener's promise rejects, the node fails with that error and details with its key and no `elapsed`, and the action never runs.
+5. **Commit.** The engine checks that the returned paths are under `outputDir` and name regular files, records each file's size and mtime and makes it read-only, hashes them relative to it, renames the directory to the content directory `<cacheDir>/v1/<actionKey>/<contentHash>`, stamps that directory's last use, and writes the entry with those sizes and mtimes. This last write is skipped for `cacheable: false`. The node settles `succeeded` with `{ actionKey, entry, actionRan: true, elapsed }`, the entry its paths absolute, as `commitEntry` returned it.
 
 When the action throws, times out, is cancelled, misses an output, returns a path outside `outputDir` or one that is not a regular file, or the staging directory cannot be renamed into place (see "A damaged content directory"), the staging directory is removed and no entry is written. When the entry write fails, the node fails too, but its outputs are already committed to their content directory and are not removed.
 
@@ -95,19 +95,19 @@ The content hash is the SHA-256 hex of a JSON shape built from the returned outp
 
 `rel` is the file's path relative to the attempt's directory. A test pins the consequences: the same files under another key's directory or another attempt's directory give the same content hash. Swapping which file each output names, renaming the file, renaming the output, or editing the bytes does change it. Check, verified by running: one output `{ greeting: "hello.txt" }` holding `hi` has content hash `sha256(JSON.stringify([["greeting", [["hello.txt", sha256("hi")]]]]))`.
 
-Dependents key on the hashes of the outputs they read (each output's hash is built the same way from its own part of the shape, `sha256(JSON.stringify([[rel, hash], ...]))`), never on the dep's action key. Early cutoff follows from that. Suppose node `a` gets a new key (say a version bump) and reruns, but writes the same bytes to the same file names. Its content hash is unchanged, so `b`, which depends on `a`, keeps its key and is `cached`, and so does everything below it. Here is the pinned example for a chain `a -> b -> c`:
+Dependents key on the hashes of the outputs they read (each output's hash is built the same way from its own part of the shape, `sha256(JSON.stringify([[rel, hash], ...]))`), never on the dep's action key. Early cutoff follows from that. Suppose node `a` gets a new key (say a version bump) and reruns, but writes the same bytes to the same file names. Its content hash is unchanged, so `b`, which depends on `a`, keeps its key and is a hit, and so does everything below it. Here is the pinned example for a chain `a -> b -> c` (ran: the action ran; hit: found in the cache):
 
-| Run | Change                    | a    | b      | c        |
-| --- | ------------------------- | ---- | ------ | -------- |
-| 1   | first run                 | done | done   | done     |
-| 2   | `a` version 2, same bytes | done | cached | cached   |
-| 3   | `a` version 3, new bytes  | done | done   | cached\* |
+| Run | Change                    | a   | b   | c     |
+| --- | ------------------------- | --- | --- | ----- |
+| 1   | first run                 | ran | ran | ran   |
+| 2   | `a` version 2, same bytes | ran | hit | hit   |
+| 3   | `a` version 3, new bytes  | ran | ran | hit\* |
 
 \* In the test, `b`'s output does not depend on what `a` wrote, so `b` reruns to the same bytes and `c` is cut off one level down.
 
 Since each dependent keys on its dep's content hash, and that dep keyed on its own deps' content hashes, the keys form a chain from the roots down, like a Merkle tree: a change anywhere reaches exactly the nodes below it whose inputs really changed, and stops at the first node that reproduces its bytes.
 
-**A node with no outputs always cuts off.** An action may return `{}` (a node run for its effect, such as a notification). Its content hash is then `sha256("[]")` on every run, so a rerun of it never re-keys its dependents. Verified: a `notify` node returning `{}` with input `n: 1`, then `n: 2`, runs both times with content hash `4f53cda1…`, and its dependent is `done` then `cached`. A dependent that must rerun whenever such a node reruns needs the node to write a file that changes, such as a receipt holding what it did.
+**A node with no outputs always cuts off.** An action may return `{}` (a node run for its effect, such as a notification). Its content hash is then `sha256("[]")` on every run, so a rerun of it never re-keys its dependents. Verified: a `notify` node returning `{}` with input `n: 1`, then `n: 2`, runs both times with content hash `4f53cda1…`, and its dependent runs, then hits. A dependent that must rerun whenever such a node reruns needs the node to write a file that changes, such as a receipt holding what it did.
 
 ### Quick start: three runs (verified under Bun 1.4.4 and Node 22.18, 23.6, 24.0, 24.22 and 25)
 
@@ -146,7 +146,11 @@ const context = { fs, cacheDir, clock: Date };
 async function run(text: string) {
   const graph = new Graph();
   report.addNode(graph, { deps: { count: count.addNode(graph, { inputs: { text } }) } });
-  for (const r of await execute(graph, context)) console.log(r.name, r.status);
+  for (const r of await execute(graph, context))
+    console.log(
+      r.name,
+      r.status === "succeeded" ? (r.details.actionRan ? "ran" : "hit") : r.status,
+    );
 }
 await run("hello big world");
 await run("hello big world");
@@ -156,21 +160,21 @@ await run("goodbye small world");
 Save it as `quick.ts` and run `bun quick.ts`, or `node quick.ts`. It was run against the package as `scripts/pack.ts` packs it for a release, under Bun 1.4.4 and Node 22.18.0, 23.6.0, 24.0.0, 24.22.1 and 25.8.1. Plain `node` runs a `.ts` file only on a Node that strips types by default. Node's TypeScript documentation (`https://nodejs.org/api/typescript.html`, whose history was read on 2026-10-26) turns stripping on by default in 22.18.0 and 23.6.0, and every release from 24.0 on has it. So `node quick.ts` runs on 22.18 and the later 22 releases, on 23.6 and the later 23 releases, and on every 24, 25 and 26 release. No single "or later" bound says this, because 23.0 to 23.5 are newer than 22.18 by number and refuse the file. Node 22.6 to 22.17 and 23.0 to 23.5 refuse `quick.ts` with `ERR_UNKNOWN_FILE_EXTENSION` (`Unknown file extension ".ts"`), before dagraph is loaded, and run it with `--experimental-strip-types` (both verified on 22.17.0 and 23.5.0). Node before 22.6, every 20 and older release included, has no type stripping: the same documentation gives 22.6.0 as the version that introduced it. Before the output, `ExperimentalWarning: Type Stripping is an experimental feature and might change at any time` is printed by every 23 release from 23.6 and by 24.0 to 24.2, since the documentation drops that warning in 22.18.0 and 24.3.0. Verified: 23.6.0 and 24.0.0 print it, and 22.18.0, 24.22.1 and 25.8.1 do not. With no `package.json`, Node 25 runs it silently. With a `package.json` that has no `type` field, which is what `npm install` writes, each of those Node versions first prints a `MODULE_TYPELESS_PACKAGE_JSON` warning; `npm pkg set type=module` stops it. Apart from that, it prints exactly:
 
 ```
-count done
-report done
-count cached
-report cached
-count done
-report cached
+count ran
+report ran
+count hit
+report hit
+count ran
+report hit
 ```
 
-The first run runs both. The second finds both keys in the cache. The third changes `count`'s input, so `count` gets a new key and runs; it writes `3` again, its content hash is unchanged, so `report` keeps its key and is `cached`: early cutoff.
+The first run runs both. The second finds both keys in the cache. The third changes `count`'s input, so `count` gets a new key and runs; it writes `3` again, its content hash is unchanged, so `report` keeps its key and is a hit: early cutoff.
 
 Where it lives: `packages/dagraph/src/content-addressing.ts`.
 
 ## Output verification
 
-A hit is a stat check. The engine `lstat`s each file the entry names and compares its `size` and `mtimeMs` with what the manifest's `fileStats` records for it. When every file matches, no output is hashed. When one differs or is gone, the engine re-hashes every file the entry names and compares the result to `contentHash`: a match is a hit, and anything else (a file deleted or changed, or one that fails to read) is a miss and the node reruns. So a file changed in place that kept its size and mtime is served `cached`; forcing its key is the way to distrust it.
+A hit is a stat check. The engine `lstat`s each file the entry names and compares its `size` and `mtimeMs` with what the manifest's `fileStats` records for it. When every file matches, no output is hashed. When one differs or is gone, the engine re-hashes every file the entry names and compares the result to `contentHash`: a match is a hit, and anything else (a file deleted or changed, or one that fails to read) is a miss and the node reruns. So a file changed in place that kept its size and mtime is served as a hit; forcing its key is the way to distrust it.
 
 Two mtimes less than a millisecond apart match: a copy that keeps timestamps, such as dagworkflows' worktree cache store, keeps them only to the millisecond, since `fs.cp` with `preserveTimestamps` truncates them under Bun and rounds them under Node.
 
@@ -231,7 +235,7 @@ Where it lives: `packages/dagraph/src/cache.ts`.
 
 ## Nodes that share a key
 
-The key depends only on kind, inputs and dep content. So two nodes declared the same way share one key, one directory in the cache and one entry, even under different names, in different graphs, or with different `meta`, timeouts or groups. A test pins this: node `a` in one graph runs, then a node named `v:b` in another graph, with the same kind and inputs but a different group and timeout, is `cached` with `a`'s output.
+The key depends only on kind, inputs and dep content. So two nodes declared the same way share one key, one directory in the cache and one entry, even under different names, in different graphs, or with different `meta`, timeouts or groups. A test pins this: node `a` in one graph runs, then a node named `v:b` in another graph, with the same kind and inputs but a different group and timeout, is a hit with `a`'s output.
 
 For the same reason `lookupNode`, `runAction` and `processNode` can be given any graph that declares the node the same way; [dagraph-execution](dagraph-execution.md) covers its graph argument and the error when the node is missing.
 
@@ -244,9 +248,9 @@ Tests that need nodes to stay apart give each node a distinguishing input, such 
 
 ## Reading part of a dependency
 
-A role keys on the outputs it reads, as Bazel keys an action on the files it takes from a target. By default it reads all of its dep's outputs. `pick` narrows it: `deps: { download: pick(download, "thumb") }` keys the node on `thumb`'s hash alone, so a new `audio` from the same dep reruns nothing, and the action's `depOutputs.download` holds `thumb` only, in its type and at run time. `settled(pick(…))` and `maybe(pick(…))` keep the pick, and `pick(dep<T>(), …)` narrows a role that more than one action fills. A test pins it: a dep rebuilt with a new `extra` and the same `main` leaves a required, a settled and a maybe role that pick `main` all `cached`, and a new `main` reruns them.
+A role keys on the outputs it reads, as Bazel keys an action on the files it takes from a target. By default it reads all of its dep's outputs. `pick` narrows it: `deps: { download: pick(download, "thumb") }` keys the node on `thumb`'s hash alone, so a new `audio` from the same dep reruns nothing, and the action's `depOutputs.download` holds `thumb` only, in its type and at run time. `settled(pick(…))` and `maybe(pick(…))` keep the pick, and `pick(dep<T>(), …)` narrows a role that more than one action fills. A test pins it: a dep rebuilt with a new `extra` and the same `main` leaves a required, a settled and a maybe role that pick `main` all hits, and a new `main` reruns them.
 
-A node that reads only part of one file, such as a few fields of a JSON file, still keys on the whole file. Two things bound that. Early cutoff: a node that writes the same bytes when its part is unchanged keeps its hashes, so its own dependents stay `cached`. And a projection: a cheap node that reads the file and writes the part as outputs of its own, which consumers pick. It reruns on any change to the file, and writes the same bytes when the part is unchanged, so its consumers stay `cached`.
+A node that reads only part of one file, such as a few fields of a JSON file, still keys on the whole file. Two things bound that. Early cutoff: a node that writes the same bytes when its part is unchanged keeps its hashes, so its own dependents stay hits. And a projection: a cheap node that reads the file and writes the part as outputs of its own, which consumers pick. It reruns on any change to the file, and writes the same bytes when the part is unchanged, so its consumers stay hits.
 
 An action whose work is too costly to repeat can also skip it itself: it keeps its results in a store of its own, outside the cache, named by what it reads, and links a stored result back on a run whose part is unchanged.
 
@@ -261,18 +265,18 @@ An action defined with `cacheable: false` has an entry that is never read or wri
 - commits to its content directory, `<contentHash>/`;
 - reports a content hash.
 
-Its dependents key on that content hash, so they cache normally. For example, a probe that always writes the same bytes runs every time while the report built from it stays `cached`. Its lookup is always a miss. `cacheable` is not in the key. Changing an action from `false` to `true` finds an entry only if one was written before the flag was set to `false`.
+Its dependents key on that content hash, so they cache normally. For example, a probe that always writes the same bytes runs every time while the report built from it stays a hit. Its lookup is always a miss. `cacheable` is not in the key. Changing an action from `false` to `true` finds an entry only if one was written before the flag was set to `false`.
 
 ## Running again and forcing
 
-- **Plain rerun.** Every node whose key and files are unchanged is `cached`. Failures are never cached. A rerun after a partial failure therefore resumes: succeeded nodes hit, and the failed node and the nodes it held back run. A test pins `a cached, b done, c done, d done`, with `start` events only for b, c and d.
+- **Plain rerun.** Every node whose key and files are unchanged is a hit. Failures are never cached. A rerun after a partial failure therefore resumes: succeeded nodes hit, and the failed node and the nodes it held back run. A test pins `a` a hit and `b`, `c`, `d` run, with `start` events only for b, c and d.
 - **Forcing.** The execution context's `forcedKeys` is `"all"` or a `ReadonlySet<string>` of action keys. The lookup of every key, or of each key in the set, misses, so those nodes run though their entries are good, and each writes its new entry, which the next plain run hits:
 
       await execute(graph, { ...ctx, forcedKeys: "all" });
 
-  With a set, only the nodes of those keys run, for example the keys of results you saved (a result is plain JSON with its `actionKey`). The dependents of a forced node are not forced. They key on its new content, so they rerun only if that changed.
+  With a set, only the nodes of those keys run, for example the keys of results you saved (a result is plain JSON; `resultActionKey` reads its key). The dependents of a forced node are not forced. They key on its new content, so they rerun only if that changed.
 
-- **Looking up without running.** `lookupNode` computes the key and checks the entry, and runs nothing: with a verified entry the node is `cached`, otherwise its lookup is a miss.
+- **Looking up without running.** `lookupNode` computes the key and checks the entry, and runs nothing: with a verified entry the node is a hit, otherwise its lookup is a miss.
 
 ## What is never cached
 
@@ -294,9 +298,9 @@ Tests pin that a failed node fails again on the next run, rather than being serv
 
 ## Finding out why a node reran
 
-dagraph keeps only the key, never what went into it. A result carries `actionKey`. The `start` event carries no key. The entry holds only `outputs` and `contentHash`. `describe()` lists neither a node's inputs nor its roles. The code that builds the key is not exported, and the package's `exports` map refuses a deep import of it: `ERR_PACKAGE_PATH_NOT_EXPORTED` under Node, `ERR_MODULE_NOT_FOUND` under Bun. No option prints the key's parts. What a reader can do:
+dagraph keeps only the key, never what went into it. A result carries `actionKey` in its details. The `start` event carries no key. The entry holds only `outputs` and `contentHash`. `describe()` lists neither a node's inputs nor its roles. The code that builds the key is not exported, and the package's `exports` map refuses a deep import of it: `ERR_PACKAGE_PATH_NOT_EXPORTED` under Node, `ERR_MODULE_NOT_FOUND` under Bun. No option prints the key's parts. What a reader can do:
 
-1. **Compare the node's `actionKey` across the two executions.** A result is plain JSON, so save each execution's results to compare later. If the key is the same and the node is `done` the second time, the key did not cause the rerun. The node was forced, is `cacheable: false`, had no entry (an earlier run failed, or the cache directory is a different one), or its entry failed verification (a file was deleted or edited). `<cacheDir>/v1/<actionKey>/manifest.json` shows whether the entry exists and which files it names. If the key differs, one of its parts changed, or the dagraph version did (see "Keys across dagraph versions").
+1. **Compare the node's `actionKey` across the two executions.** A result is plain JSON, so save each execution's results to compare later. If the key is the same and the node's action ran the second time, the key did not cause the rerun. The node was forced, is `cacheable: false`, had no entry (an earlier run failed, or the cache directory is a different one), or its entry failed verification (a file was deleted or edited). `<cacheDir>/v1/<actionKey>/manifest.json` shows whether the entry exists and which files it names. If the key differs, one of its parts changed, or the dagraph version did (see "Keys across dagraph versions").
 2. **Compare the parts the reader can see.** The kind and the inputs come from the reader's own code. A role is the `outputHashes` of the outputs it reads, on that dep's result. A file input is its path as given plus the SHA-256 of its bytes.
 3. **Rebuild the whole preimage and diff it.** Built by hand from "The action key: exactly what is hashed", the preimage reproduces the engine's key exactly. `canonical` is `JSON.stringify` of the value with object keys sorted at every level, so a string `"v1"` keys as `"\"v1\""` and `1` as `"1"`. Inputs and roles are sorted with the default `sort()`. The hash is the SHA-256 hex of `JSON.stringify(preimage)`, the same from `node:crypto` (`createHash("sha256").update(text).digest("hex")`) as from `js-sha256`. Print one preimage per execution and diff the two to name the part that changed.
 
@@ -384,10 +388,10 @@ Where it lives: `packages/dagraph/src/cache.ts` (`DagFs`), `packages/dagraph/src
     };
     const fs = createNodeDagFs();
     const ctx = { ports: { fs }, fs, cacheDir: "cache", clock: Date };
-    await execute(build(), ctx); // fetch: done, title: done
-    await execute(build(), ctx); // fetch: cached, title: cached
+    await execute(build(), ctx); // fetch: ran, title: ran
+    await execute(build(), ctx); // fetch: hit, title: hit
 
-After this, `cache/v1/` holds one directory per key, and `cache/tmp/` nothing. Each key's directory holds `manifest.json` and one `<contentHash>/` with `page.json` or `title.txt` in it. The result of `fetch` looks like `{ name: "fetch", actionKey: "<64 hex>", status: "done", outputs: { page: "<working directory>/cache/v1/<key>/<hash>/page.json" }, contentHash: "<64 hex>", elapsed: 2 }`.
+After this, `cache/v1/` holds one directory per key, and `cache/tmp/` nothing. Each key's directory holds `manifest.json` and one `<contentHash>/` with `page.json` or `title.txt` in it. The result of `fetch` looks like `{ name: "fetch", status: "succeeded", details: { actionKey: "<64 hex>", entry: { outputs: { page: "<working directory>/cache/v1/<key>/<hash>/page.json" }, contentHash: "<64 hex>", outputHashes: { page: "<64 hex>" } }, actionRan: true, elapsed: 2 } }`.
 
 ## Open questions
 

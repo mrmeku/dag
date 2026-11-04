@@ -192,7 +192,9 @@ describe("the local cache store, what each checkout holds on disk", () => {
     await from(checkout("main"), () => run(disk));
     const statuses = await from(checkout("worktree"), async () => {
       await worktreeStore().restore(["cache/v1"], "k-1", []);
-      return (await run(counting)).map((result) => result.status);
+      return (await run(counting)).map((result) =>
+        result.status === "succeeded" && !result.details.actionRan ? "cached" : result.status,
+      );
     });
     assert.deepEqual({ statuses, hashed }, { statuses: ["cached"], hashed: [] });
   });

@@ -1,7 +1,6 @@
-import type { CacheEntry } from "./cache.ts";
 import { isSucceeded, requiredDeps, type Result, type ScheduledNode } from "./types.ts";
 
-/** A node the scheduler may take: ready to be processed, or a miss pending before its action runs. */
+/** A node the scheduler may take: ready to be dispatched, or pending until it may take its slot. */
 export interface Ready<NodeData extends ScheduledNode = ScheduledNode> {
   node: NodeData;
   pending: boolean;
@@ -44,14 +43,17 @@ function rootPriorities(nodes: ScheduledNode[]): Map<string, number> {
 /**
  * Which nodes are ready, which settled and how. A node is ready once every dep has settled.
  * Ready nodes are ordered by root priority, the most recently ready first among equals, so one
- * branch finishes before the next starts. A pending miss is ready again, in
- * the same order.
+ * branch finishes before the next starts. A pending node is ready again, in the same order.
  */
-export class ExecState<NodeData extends ScheduledNode = ScheduledNode> {
+export class ExecState<
+  NodeData extends ScheduledNode,
+  SuccessDetails,
+  FailureDetails,
+  CancellationDetails,
+> {
   private dependents: Map<string, NodeData[]>;
   private priority: Map<string, number>;
-  private entries = new Map<string, CacheEntry>();
-  readonly results = new Map<string, Result>();
+  readonly results = new Map<string, Result<SuccessDetails, FailureDetails, CancellationDetails>>();
   private ready: Ready<NodeData>[];
 
   constructor(nodes: Iterable<NodeData>) {
@@ -82,21 +84,18 @@ export class ExecState<NodeData extends ScheduledNode = ScheduledNode> {
     return taken ?? null;
   }
 
-  /** A miss waits for the scheduler: it is ready again, pending, until the scheduler lets it run. */
+  /** A node waiting for its slot is ready again, pending, until the scheduler lets it run. */
   waitForScheduler(node: NodeData): void {
     this.enqueue([{ node, pending: true }]);
   }
 
   /** Record a node's result, and make ready each dependent whose deps have all settled. */
-  settle(node: NodeData, result: Result): void {
+  settle(
+    node: NodeData,
+    result: Result<SuccessDetails, FailureDetails, CancellationDetails>,
+  ): void {
     this.results.set(node.name, result);
     this.ready = this.ready.filter((r) => r.node.name !== node.name);
-    if (isSucceeded(result))
-      this.entries.set(node.name, {
-        outputs: result.outputs,
-        contentHash: result.contentHash,
-        outputHashes: result.outputHashes,
-      });
     const children = (this.dependents.get(node.name) ?? []).filter(
       (child) => !this.results.has(child.name) && child.deps.every((d) => this.results.has(d)),
     );
@@ -107,19 +106,19 @@ export class ExecState<NodeData extends ScheduledNode = ScheduledNode> {
     return this.ready.length > 0;
   }
 
-  /** The entry of each dep that succeeded, by dep name. */
-  depEntries(node: ScheduledNode): Record<string, CacheEntry> {
+  /** The details of each dep that succeeded, by dep name. */
+  depDetails(node: ScheduledNode): Record<string, SuccessDetails> {
     return Object.fromEntries(
-      node.deps.flatMap((d): [string, CacheEntry][] => {
-        const entry = this.entries.get(d);
-        return entry ? [[d, entry]] : [];
+      node.deps.flatMap((d): [string, SuccessDetails][] => {
+        const result = this.results.get(d);
+        return result?.status === "succeeded" ? [[d, result.details]] : [];
       }),
     );
   }
 
   /** The first required dep that did not succeed. */
   failedDep(node: ScheduledNode): string | undefined {
-    return requiredDeps(node).find((d) => !this.entries.has(d));
+    return requiredDeps(node).find((d) => this.results.get(d)?.status !== "succeeded");
   }
 
   /** The failures behind a held back node, along its required deps, each once. */

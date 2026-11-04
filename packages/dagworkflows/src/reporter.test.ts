@@ -1,4 +1,4 @@
-import type { ExecEvent, Node, Result } from "@mrmeku/dagraph";
+import type { ExecutionEvent, Node, NodeResult } from "@mrmeku/dagraph";
 import assert from "node:assert/strict";
 import { describe, test } from "node:test";
 import { STATUS_ICON } from "./config.ts";
@@ -29,48 +29,49 @@ const NODES = [
   node("d", "require-all", ["c"], ["c"]),
 ];
 
-const RESULTS: [Result, Result, Result, Result] = [
+const RESULTS: [NodeResult, NodeResult, NodeResult, NodeResult] = [
   {
     name: "a",
-    actionKey: "k1",
-    status: "done",
-    outputs: { out: "x" },
-    contentHash: "h",
-    outputHashes: {},
-    elapsed: 1000,
+    status: "succeeded",
+    details: {
+      actionKey: "k1",
+      entry: { outputs: { out: "x" }, contentHash: "h", outputHashes: {} },
+      actionRan: true,
+      elapsed: 1000,
+    },
   },
   {
     name: "b",
-    actionKey: "k2",
-    status: "cached",
-    outputs: { out: "y" },
-    contentHash: "h",
-    outputHashes: {},
+    status: "succeeded",
+    details: {
+      actionKey: "k2",
+      entry: { outputs: { out: "y" }, contentHash: "h", outputHashes: {} },
+      actionRan: false,
+    },
   },
   {
     name: "c",
-    actionKey: "k3",
     status: "failed",
     error: { name: "Error", message: "exit 1\nlast line" },
-    elapsed: 1000,
+    details: { actionKey: "k3", elapsed: 1000 },
   },
-  { name: "d", actionKey: "", status: "dep-failed", dep: "c" },
+  { name: "d", status: "dep-failed", dep: "c" },
 ];
 const [A, B, C, D] = RESULTS;
-const settled = (result: Result, occurredAt = 0): ExecEvent => ({
+const settled = (result: NodeResult, occurredAt = 0): ExecutionEvent => ({
   type: "result",
   node: result.name,
   result,
   occurredAt,
 });
-const printed = (name: string, chunk: string, occurredAt = 0): ExecEvent => ({
+const printed = (name: string, chunk: string, occurredAt = 0): ExecutionEvent => ({
   type: "output",
   node: name,
   chunk,
   occurredAt,
 });
 /** A second apart, from 1,000,000 ms. */
-const EVENTS: ExecEvent[] = [
+const EVENTS: ExecutionEvent[] = [
   { type: "dispatch", node: "a", occurredAt: 1_000_000 },
   { type: "start", node: "a", occurredAt: 1_001_000 },
   printed("a", "ok line 1\nwarned\n", 1_001_000),
@@ -117,13 +118,18 @@ describe("reporter", () => {
     const slow = { ...node("slow", "test"), timeoutMs: 900_000 };
     const half = { ...node("half", "test"), timeoutMs: 90_000 };
     const reporter = createReporter(ports, { durationsFile: DURATIONS_FILE, nodes: [slow, half] });
-    const timedOut = (name: string, actionKey: string): Result => {
+    const timedOut = (name: string, actionKey: string): NodeResult => {
       const error = { name: "TimeoutError", message: "timed out" };
-      return { name, actionKey, status: "failed", error, elapsed: 1000, timedOut: true };
+      return {
+        name,
+        status: "failed",
+        error,
+        details: { actionKey, elapsed: 1000, timedOut: true },
+      };
     };
     const results = [timedOut("slow", "k2"), timedOut("half", "")];
     // A node times out only once its action started.
-    const events: ExecEvent[] = results.flatMap((result) => [
+    const events: ExecutionEvent[] = results.flatMap((result) => [
       { type: "dispatch", node: result.name, occurredAt: 0 },
       { type: "start", node: result.name, occurredAt: 0 },
       ...(result.name === "slow" ? [printed("slow", "partial\n")] : []),

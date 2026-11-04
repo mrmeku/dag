@@ -1,4 +1,4 @@
-import { isSucceeded, type Node, type Result } from "@mrmeku/dagraph";
+import { isSucceeded, type Node, type NodeResult } from "@mrmeku/dagraph";
 import { createGithubStore } from "./github/renderer.ts";
 import { titleOf } from "./kernel/format.ts";
 import type { Pass } from "./kernel/run-slice.ts";
@@ -14,7 +14,7 @@ export async function finishPass(
   ports: Pick<Ports, "host">,
   store: RunStore,
   pass: Pass,
-  results: Result[],
+  results: NodeResult[],
   renderers: readonly SummaryRenderer[] = DEFAULT_SUMMARY_RENDERERS,
 ): Promise<{ failed: number; markdown: string }> {
   const nodes = await store.report(pass);
@@ -55,7 +55,7 @@ export function createReporter(
   store.begin(pass);
   return {
     onEvent: store.onEvent,
-    finish: async (results: Result[]) => {
+    finish: async (results: NodeResult[]) => {
       await store.writeDurations();
       return finishPass(ports, store, pass, results, opts.summary);
     },

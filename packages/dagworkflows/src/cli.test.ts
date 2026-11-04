@@ -343,12 +343,13 @@ describe("dag post", () => {
         results: {
           up: {
             name: "up",
-            actionKey: "k",
-            status: "done",
-            outputs: {},
-            contentHash: "",
-            outputHashes: {},
-            elapsed: 0,
+            status: "succeeded",
+            details: {
+              actionKey: "k",
+              entry: { outputs: {}, contentHash: "", outputHashes: {} },
+              actionRan: true,
+              elapsed: 0,
+            },
           },
         },
       });

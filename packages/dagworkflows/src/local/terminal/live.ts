@@ -58,7 +58,7 @@ export function truncate(text: string, maxColumns: number): string {
 }
 
 const STATUS_COLOR = {
-  done: "green",
+  succeeded: "green",
   failed: "red",
   "dep-failed": "yellow",
   cancelled: "gray",
@@ -76,12 +76,10 @@ function settledNodeLines(
     `${paint(STATUS_COLOR[status], STATUS_ICON[status])} ${paddedName} ${paint("dim", detail)}`,
   ];
   switch (nodeState.status) {
-    case "cached":
-      return [];
+    case "succeeded":
+      return nodeState.result.details.actionRan ? line("succeeded", detailOf(nodeState)) : [];
     case "failed":
       return failureBlockLines(nodeState, run, localContext);
-    case "done":
-      return line("done", detailOf(nodeState));
     case "dep-failed": {
       const causes = selectors.causesOf(nodeState);
       return line(
@@ -222,7 +220,7 @@ export function createLiveRenderer(
   let redrawTimer: ReturnType<typeof setInterval> | undefined;
   const printLines = (lines: string[]) => {
     const cacheHitNames = cachedNames.splice(0);
-    const cacheHitLine = `${localContext.paint("green", STATUS_ICON.cached)} ${localContext.paint("dim", "cached:")} ${cacheHitNames.join(", ")}`;
+    const cacheHitLine = `${localContext.paint("green", STATUS_ICON.succeeded)} ${localContext.paint("dim", "cached:")} ${cacheHitNames.join(", ")}`;
     currentFrame().print(cacheHitNames.length > 0 ? [cacheHitLine, ...lines] : lines);
   };
   const drawFooter = () => {
@@ -256,7 +254,7 @@ export function createLiveRenderer(
     },
     settle: (nodeState, run, log) => {
       const warnings = warningLines(nodeState.node.name, warningsOf(log));
-      if (nodeState.status !== "cached")
+      if (nodeState.status !== "succeeded" || nodeState.result.details.actionRan)
         return printLines([...settledNodeLines(nodeState, run, localContext), ...warnings]);
       cachedNames.push(nodeState.node.name);
       if (warnings.length > 0) printLines(warnings);

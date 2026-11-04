@@ -1,10 +1,10 @@
 import {
   file,
   settled,
-  type ExecEvent,
+  type ExecutionEvent,
   type JsonValue,
   type Node,
-  type Result,
+  type NodeResult,
 } from "@mrmeku/dagraph";
 import xterm from "@xterm/headless";
 import assert from "node:assert/strict";
@@ -130,21 +130,25 @@ const scriptedExec = (output: Record<string, { chunks: string[]; code: number }>
 const RUN_TIMEOUT = { timeout: 10_000 };
 
 /** The engine's events for `node`, as a store hears them from a run. */
-const dispatchOf = (node: Node): ExecEvent => ({
+const dispatchOf = (node: Node): ExecutionEvent => ({
   type: "dispatch",
   node: node.name,
   occurredAt: 0,
 });
-const pendingOf = (node: Node): ExecEvent => ({ type: "pending", node: node.name, occurredAt: 0 });
-const startOf = (node: Node): ExecEvent => ({ type: "start", node: node.name, occurredAt: 0 });
-const outputOf = (node: Node, chunk: string): ExecEvent => ({
+const pendingOf = (node: Node): ExecutionEvent => ({
+  type: "pending",
+  node: node.name,
+  occurredAt: 0,
+});
+const startOf = (node: Node): ExecutionEvent => ({ type: "start", node: node.name, occurredAt: 0 });
+const outputOf = (node: Node, chunk: string): ExecutionEvent => ({
   type: "output",
   node: node.name,
   chunk,
   occurredAt: 0,
 });
-type Settled<R = Result> = R extends unknown ? Omit<R, "name"> : never;
-const resultOf = (node: Node, result: Settled): ExecEvent => ({
+type Settled<R = NodeResult> = R extends unknown ? Omit<R, "name"> : never;
+const resultOf = (node: Node, result: Settled): ExecutionEvent => ({
   type: "result",
   node: node.name,
   result: { name: node.name, ...result },
@@ -158,10 +162,19 @@ const failureOf = (
   elapsed = 1,
 ) =>
   resultOf(node, {
-    actionKey,
     status: "failed",
     error: { name: "Error", message, ...(cause !== undefined && { cause }) },
-    elapsed,
+    details: { actionKey, elapsed },
+  });
+/** A cache hit of `node`'s entry under `actionKey`. */
+const hitOf = (node: Node, actionKey: string) =>
+  resultOf(node, {
+    status: "succeeded",
+    details: {
+      actionKey,
+      entry: { outputs: {}, contentHash: "h", outputHashes: {} },
+      actionRan: false,
+    },
   });
 
 /** Lets the run go on a turn at a time until `done`, or until the test has timed out. */
@@ -725,18 +738,10 @@ describe("local session, failures style, at the edges", () => {
     store.onEvent(startOf(save));
     store.onEvent(outputOf(save, "saving\n"));
     store.cancel();
-    store.onEvent(resultOf(save, { actionKey: "", status: "cancelled" }));
+    store.onEvent(resultOf(save, { status: "cancelled" }));
     store.begin(post);
     store.onEvent(dispatchOf(save));
-    store.onEvent(
-      resultOf(save, {
-        actionKey: "ks",
-        status: "cached",
-        outputs: {},
-        contentHash: "h",
-        outputHashes: {},
-      }),
-    );
+    store.onEvent(hitOf(save, "ks"));
     await store.report(post);
     assert.deepEqual(session.logs(), { ".dag/logs/save.log": "saved from the cache\n" });
   });
@@ -1304,7 +1309,7 @@ describe("local session, live style", () => {
       });
       const { store } = session.runOptions;
       // As the engine stamps its events, from the clock.
-      const onEvent = (event: ExecEvent) => store.onEvent({ ...event, occurredAt: now });
+      const onEvent = (event: ExecutionEvent) => store.onEvent({ ...event, occurredAt: now });
       const nodeNamed = (name: string, more: Partial<Node> = {}): Node => {
         return { name, kind: name, deps: [], ...more };
       };
@@ -1322,20 +1327,21 @@ describe("local session, live style", () => {
         title: "ci.ts",
         nodes: [lint, e2e, testA, testB, build, docs, requireAll, deploy, fmt],
       };
-      const emitAt = async (occurredAt: number, execEvents: ExecEvent[]) => {
+      const emitAt = async (occurredAt: number, execEvents: ExecutionEvent[]) => {
         now = occurredAt;
         execEvents.forEach(onEvent);
         await store.report(pass);
         session.tick();
       };
-      const done = (node: Node, elapsed: number): ExecEvent =>
+      const done = (node: Node, elapsed: number): ExecutionEvent =>
         resultOf(node, {
-          actionKey: `k-${node.name}`,
-          status: "done",
-          outputs: {},
-          contentHash: "h",
-          outputHashes: {},
-          elapsed,
+          status: "succeeded",
+          details: {
+            actionKey: `k-${node.name}`,
+            entry: { outputs: {}, contentHash: "h", outputHashes: {} },
+            actionRan: true,
+            elapsed,
+          },
         });
 
       // The implementation prints as it builds the graph, before the run begins.
@@ -1357,18 +1363,7 @@ describe("local session, live style", () => {
       );
       session.streams.stdout.write("::debug::walking src\n");
       // Only a cache hit has settled, and the footer already has each node's last run.
-      await emitAt(600, [
-        dispatchOf(fmt),
-        resultOf(fmt, {
-          actionKey: "kf",
-          status: "cached",
-          outputs: {},
-          contentHash: "h",
-          outputHashes: {},
-        }),
-        dispatchOf(testB),
-        pendingOf(testB),
-      ]);
+      await emitAt(600, [dispatchOf(fmt), hitOf(fmt, "kf"), dispatchOf(testB), pendingOf(testB)]);
       const midRun = await session.screen();
       // The terminal echoes a ^C at the cursor, the end of the status row.
       session.writes.push("^C");
@@ -1383,9 +1378,8 @@ describe("local session, live style", () => {
         ),
         dispatchOf(requireAll),
         startOf(requireAll),
-        failureOf(requireAll, "", "failed: lint"),
+        failureOf(requireAll, "kr", "failed: lint"),
         resultOf(deploy, {
-          actionKey: "",
           status: "dep-failed",
           dep: "require-all",
           rootCauses: ["require-all"],
@@ -1396,21 +1390,9 @@ describe("local session, live style", () => {
         startOf(testB),
         done(testB, 1),
         done(e2e, 1500),
-        resultOf(build, {
-          actionKey: "kb",
-          status: "cached",
-          outputs: {},
-          contentHash: "h",
-          outputHashes: {},
-        }),
+        hitOf(build, "kb"),
         dispatchOf(docs),
-        resultOf(docs, {
-          actionKey: "kd",
-          status: "cached",
-          outputs: {},
-          contentHash: "h",
-          outputHashes: {},
-        }),
+        hitOf(docs, "kd"),
       ]);
       await session.runOptions.store.close();
       assert.deepEqual(
@@ -1627,7 +1609,7 @@ describe("local session, live style", () => {
     delete process.env.FORCE_HYPERLINK;
     const { store } = session.runOptions;
     // As the engine stamps its events, from the clock.
-    const onEvent = (event: ExecEvent) => store.onEvent({ ...event, occurredAt: now });
+    const onEvent = (event: ExecutionEvent) => store.onEvent({ ...event, occurredAt: now });
     const nodeNamed = (name: string, more: Partial<Node> = {}): Node => {
       return { name, kind: name, deps: [], ...more };
     };
@@ -1652,20 +1634,21 @@ describe("local session, live style", () => {
       title: "ci.ts",
       nodes: [a1, a2, a3, a4, a5, a6, w, b, c, g, x, y, ...skipped],
     };
-    const emitAt = async (occurredAt: number, execEvents: ExecEvent[]) => {
+    const emitAt = async (occurredAt: number, execEvents: ExecutionEvent[]) => {
       now = occurredAt;
       execEvents.forEach(onEvent);
       await store.report(pass);
     };
-    const started = (node: Node): ExecEvent[] => [dispatchOf(node), startOf(node)];
-    const done = (node: Node, elapsed: number): ExecEvent =>
+    const started = (node: Node): ExecutionEvent[] => [dispatchOf(node), startOf(node)];
+    const done = (node: Node, elapsed: number): ExecutionEvent =>
       resultOf(node, {
-        actionKey: `k-${node.name}`,
-        status: "done",
-        outputs: {},
-        contentHash: "h",
-        outputHashes: {},
-        elapsed,
+        status: "succeeded",
+        details: {
+          actionKey: `k-${node.name}`,
+          entry: { outputs: {}, contentHash: "h", outputHashes: {} },
+          actionRan: true,
+          elapsed,
+        },
       });
     const screenAt = async (occurredAt: number) => {
       now = occurredAt;
@@ -1702,11 +1685,11 @@ describe("local session, live style", () => {
         850,
       ),
       ...started(g),
-      failureOf(g, "", "failed: a1"),
+      failureOf(g, "kg", "failed: a1"),
       ...skipped.map((node) => {
         const [dep] = node.deps;
         assert.ok(dep, "dep");
-        return resultOf(node, { actionKey: "", status: "dep-failed", dep, rootCauses: ["a1"] });
+        return resultOf(node, { status: "dep-failed", dep, rootCauses: ["a1"] });
       }),
       ...[a2, a3, a4, a5].map((node) => done(node, 860)),
       ...started(b),
@@ -1723,17 +1706,11 @@ describe("local session, live style", () => {
     await emitAt(2500, [
       done(b, 600),
       dispatchOf(c),
-      resultOf(c, {
-        actionKey: "kc",
-        status: "cached",
-        outputs: {},
-        contentHash: "h",
-        outputHashes: {},
-      }),
-      resultOf(x, { actionKey: "kx", status: "cancelled", elapsed: 200 }),
+      hitOf(c, "kc"),
+      resultOf(x, { status: "cancelled", details: { actionKey: "kx", elapsed: 200 } }),
       // y looked its key up before the scheduler held it back, yet never ran: no line.
-      resultOf(y, { actionKey: "ky", status: "cancelled" }),
-      resultOf(w, { actionKey: "", status: "cancelled" }),
+      resultOf(y, { status: "cancelled", details: { actionKey: "ky" } }),
+      resultOf(w, { status: "cancelled" }),
     ]);
     // As the runner begins a post pass that owes nothing.
     store.begin({ title: "ci.ts · post", nodes: [] });
@@ -1859,7 +1836,7 @@ describe("local session, live style", () => {
       const session = localRun("live", ports);
       const { store } = session.runOptions;
       // As the engine stamps its events, from the clock.
-      const onEvent = (event: ExecEvent) => store.onEvent({ ...event, occurredAt: now });
+      const onEvent = (event: ExecutionEvent) => store.onEvent({ ...event, occurredAt: now });
       const save: Node = { name: "save", kind: "save", deps: [] };
       const main = { title: "ci.ts", nodes: [save] };
       const post = { title: "ci.ts · post", nodes: [save] };
@@ -1876,7 +1853,7 @@ describe("local session, live style", () => {
       now = 600;
       session.tick();
       const stopping = session.writes.at(-1);
-      onEvent(resultOf(save, { actionKey: "ks", status: "cancelled", elapsed: 600 }));
+      onEvent(resultOf(save, { status: "cancelled", details: { actionKey: "ks", elapsed: 600 } }));
       await store.report(main);
       store.begin(post);
       await new Promise(setImmediate);

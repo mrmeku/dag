@@ -150,7 +150,7 @@ Where it lives: `packages/dagworkflows/src/cache.ts`.
 - **It is ordinary work, not a post step.** Nothing owes it. A cancel stops it like any other node, and the post pass after a cancel never runs it.
 - **Nothing depends on it.** It has one output, `saved`, the file `save.json`, which holds `true` or `false`: whether the store saved.
 
-**What it saves under.** The save looks at each node it waits for. A node that did not succeed (`failed`, `dep-failed` or `cancelled`) gave no outputs. A `cached` node counts as a success.
+**What it saves under.** The save looks at each node it waits for. A node that did not succeed (`failed`, `dep-failed` or `cancelled`) gave no outputs. A cache hit is `succeeded` too, and counts as a success.
 
 - Every node succeeded: it saves `path` under `key`.
 - Some node did not, with `partial: "save"` (the default): it saves under `<key>-partial-<run id>`. The run id is `workflow.ctx.runId`, GitHub's run id, and `0` locally. A flaky test then still leaves the work that succeeded in the cache. The next run's restore finds the partial entry, because the key is a prefix of it. A partial save never takes the key itself, so a later green run still saves under the key. A re-run of a failed GitHub job keeps its run id (no attempt number is in the key): if the first attempt stored `<key>-partial-<run id>`, a re-run that fails again builds the same key and saves nothing (`Cache not saved with key: …`). Only a green re-run stores something new, under `key`.
@@ -196,7 +196,7 @@ workflow.task({
 });
 ```
 
-Verified with `createTestPorts` and a memory cache store: a run where `test` fails leaves `save:green` `dep-failed` and the store empty; a green run makes it `done` and the store holds `cache-1`.
+Verified with `createTestPorts` and a memory cache store: a run where `test` fails leaves `save:green` `dep-failed` and the store empty; a green run makes it `succeeded` and the store holds `cache-1`.
 
 A save written this way is an ordinary task, so it differs from `save()` in each of these ways:
 

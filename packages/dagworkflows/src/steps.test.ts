@@ -1,4 +1,4 @@
-import { execute, Graph, namedOutput, settled, type ExecListener } from "@mrmeku/dagraph";
+import { execute, Graph, namedOutput, settled, type ExecutionListener } from "@mrmeku/dagraph";
 import assert from "node:assert/strict";
 import { describe, test } from "node:test";
 import { addCommand } from "./commands.ts";
@@ -13,7 +13,7 @@ const newGraph = () => new Graph<Ports>();
 
 const parsed = async (fs: Ports["fs"], path: string): Promise<unknown> =>
   JSON.parse(await fs.readText(path));
-const executeUnder = (graph: Graph<Ports>, ports: Ports, onEvent: ExecListener = () => {}) =>
+const executeUnder = (graph: Graph<Ports>, ports: Ports, onEvent: ExecutionListener = () => {}) =>
   execute(graph, { ports, fs: ports.fs, clock: Date, cacheDir: CACHE_DIR }, { onEvent });
 
 describe("uploadArtifact", () => {
@@ -112,13 +112,16 @@ describe("uploadArtifact", () => {
     const out = (name: string) => {
       const r = byName.get(name);
       assert.ok(r, name);
-      return r.status === "done" && `${CACHE_DIR}/v1/${r.actionKey}/${r.contentHash}`;
+      return (
+        r.status === "succeeded" &&
+        `${CACHE_DIR}/v1/${r.details.actionKey}/${r.details.entry.contentHash}`
+      );
     };
     const json = async (name: string): Promise<unknown> => {
       const r = byName.get(name);
       assert.ok(r, name);
-      return r.status === "done"
-        ? parsed(fs, namedOutput(r.outputs, "response"))
+      return r.status === "succeeded"
+        ? parsed(fs, namedOutput(r.details.entry.outputs, "response"))
         : r.status === "failed" && r.error.message;
     };
     const names = [

@@ -1,4 +1,4 @@
-import { settled, type MemoryDagFs } from "@mrmeku/dagraph";
+import { settled, type MemoryDagFs, type NodeResult } from "@mrmeku/dagraph";
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
 import { describe, test } from "node:test";
@@ -16,6 +16,10 @@ import {
 import { durationsFileOf, runJob, runPost, runWorkflow } from "./runner.ts";
 import { renderStatus, renderTimeline } from "./summary.ts";
 import { defineWorkflow } from "./workflow.ts";
+
+/** How a node settled, in the words the run's output uses: built or cached, or its status. */
+const outcomeOf = (result: NodeResult) =>
+  result.status === "succeeded" ? (result.details.actionRan ? "built" : "cached") : result.status;
 
 const CACHE_DIR = "/cache";
 
@@ -77,7 +81,7 @@ describe("cancel, then post", () => {
     };
     ports.exec = exec;
     const def = defineWorkflow({
-      summary: [(r) => r.nodes.map(({ node, result }) => `${node.name} ${result.status}`)],
+      summary: [(r) => r.nodes.map(({ node, result }) => `${node.name} ${outcomeOf(result)}`)],
       implementation: (workflow) => {
         const bun = workflow.cache({
           name: "bun",
@@ -129,8 +133,7 @@ describe("cancel, then post", () => {
     const recorded = (await histories(fs)).map((j) => j.results);
     const post = await runPost(common);
     const again = await runPost(common);
-    const status = (rs: { name: string; status: string }[]) =>
-      Object.fromEntries(rs.map((r) => [r.name, r.status]));
+    const status = (rs: NodeResult[]) => Object.fromEntries(rs.map((r) => [r.name, outcomeOf(r)]));
     assert.deepEqual(
       {
         run: { cancelled: run.cancelled, failed: run.failed, statuses: status(run.results) },
@@ -151,9 +154,9 @@ describe("cancel, then post", () => {
           cancelled: true,
           failed: 4,
           statuses: {
-            "restore:bun": "done",
-            "up:db": "done",
-            fast: "done",
+            "restore:bun": "built",
+            "up:db": "built",
+            fast: "built",
             slow: "cancelled",
             after: "cancelled",
             "save:bun": "cancelled",
@@ -163,7 +166,7 @@ describe("cancel, then post", () => {
         // Each node's whole result, as the run settled it.
         recorded: [Object.fromEntries(run.results.map((r) => [r.name, r]))],
         // A save is ordinary work: the cancel stopped it, and nothing owes it.
-        post: { "down:db": "done" },
+        post: { "down:db": "built" },
         again: {},
         calls: [["db", "start"], ["fast"], ["slow"], ["db", "stop"]],
         stoppedPid: "7",
@@ -184,16 +187,16 @@ describe("cancel, then post", () => {
           [
             "## run",
             "",
-            "restore:bun done",
-            "up:db done",
-            "fast done",
+            "restore:bun built",
+            "up:db built",
+            "fast built",
             "slow cancelled",
             "after cancelled",
             "down:db cancelled",
             "save:bun cancelled",
             "",
           ].join("\n"),
-          ["## run · post", "", "down:db done", ""].join("\n"),
+          ["## run · post", "", "down:db built", ""].join("\n"),
         ],
         slowLog: ["killed by SIGINT"],
       },
@@ -231,7 +234,7 @@ describe("runJob", () => {
       },
     };
     const def = defineWorkflow({
-      summary: [(r) => r.nodes.map(({ node, result }) => `${node.name} ${result.status}`)],
+      summary: [(r) => r.nodes.map(({ node, result }) => `${node.name} ${outcomeOf(result)}`)],
       implementation: (workflow) => {
         const fast = workflow.task({
           name: "fast",
@@ -281,8 +284,8 @@ describe("runJob", () => {
           "✔\uFE0E 1 node succeeded · ci.ts · post · built 1 · cached 0 · failed 0 · skipped 0 · wall 2.0s",
         ],
         summaries: [
-          ["## ci.ts", "", "fast done", "slow cancelled", "notify cancelled", ""].join("\n"),
-          ["## ci.ts · post", "", "notify done", ""].join("\n"),
+          ["## ci.ts", "", "fast built", "slow cancelled", "notify cancelled", ""].join("\n"),
+          ["## ci.ts · post", "", "notify built", ""].join("\n"),
         ],
       },
     );
@@ -419,14 +422,14 @@ describe("a damaged history", () => {
     assert.deepEqual(
       {
         midWrite,
-        after: after.results.map((r) => [r.name, r.status]),
+        after: after.results.map((r) => [r.name, outcomeOf(r)]),
         // The parser's own words differ between Node and Bun.
         annotations: rec.annotations.map((a) => ({ ...a, message: a.message.split(": ")[0] })),
         left: [...fs.files.keys()].filter((k) => k.startsWith(HISTORY_DIR)),
       },
       {
         midWrite: [{ workflow: "", started: [], results: {} }],
-        after: [["lint", "done"]],
+        after: [["lint", "built"]],
         annotations: [
           {
             level: "warning",
@@ -475,7 +478,7 @@ describe("--only", () => {
       });
       return {
         events: [...events],
-        statuses: Object.fromEntries(run.results.map((r) => [r.name, r.status])),
+        statuses: Object.fromEntries(run.results.map((r) => [r.name, outcomeOf(r)])),
       };
     };
     assert.deepEqual(
@@ -490,11 +493,11 @@ describe("--only", () => {
             "start db stop",
             "end db stop",
           ],
-          statuses: { "up:db": "done", test: "failed", "down:db": "done" },
+          statuses: { "up:db": "built", test: "failed", "down:db": "built" },
         },
         db: {
           events: ["start db start", "end db start", "start db stop", "end db stop"],
-          statuses: { "up:db": "done", "down:db": "done" },
+          statuses: { "up:db": "built", "down:db": "built" },
         },
       },
     );
@@ -530,10 +533,10 @@ describe("--only", () => {
       only: ["lint"],
     });
     assert.deepEqual(
-      { events, statuses: Object.fromEntries(run.results.map((r) => [r.name, r.status])) },
+      { events, statuses: Object.fromEntries(run.results.map((r) => [r.name, outcomeOf(r)])) },
       {
         events: ["start lint", "end lint", "save cas-1"],
-        statuses: { "restore:cas": "done", lint: "done", "save:cas": "done" },
+        statuses: { "restore:cas": "built", lint: "built", "save:cas": "built" },
       },
     );
   });
@@ -577,8 +580,7 @@ describe("--only", () => {
     cancelAtE2e = true;
     const cancelled = await runWorkflow({ ...common, signal: controller.signal });
     const post = await runPost(common);
-    const status = (rs: { name: string; status: string }[]) =>
-      Object.fromEntries(rs.map((r) => [r.name, r.status]));
+    const status = (rs: NodeResult[]) => Object.fromEntries(rs.map((r) => [r.name, outcomeOf(r)]));
     assert.deepEqual(
       {
         ran,
@@ -589,9 +591,9 @@ describe("--only", () => {
       },
       {
         ran: ["db start", "e2e", "db stop"],
-        statuses: { "up:db": "done", e2e: "done", "down:db": "done" },
-        cancelled: { "up:db": "done", e2e: "cancelled", "down:db": "cancelled" },
-        post: { "down:db": "done" },
+        statuses: { "up:db": "built", e2e: "built", "down:db": "built" },
+        cancelled: { "up:db": "built", e2e: "cancelled", "down:db": "cancelled" },
+        post: { "down:db": "built" },
         calls: ["db start", "e2e", "db stop"],
       },
     );
@@ -958,8 +960,7 @@ describe("cancel during a save", () => {
     const common = { implementation, ports, cacheDir: CACHE_DIR, historyDir: HISTORY_DIR };
     const run = await runWorkflow({ ...common, signal: controller.signal });
     const post = await runPost(common);
-    const status = (rs: { name: string; status: string }[]) =>
-      Object.fromEntries(rs.map((r) => [r.name, r.status]));
+    const status = (rs: NodeResult[]) => Object.fromEntries(rs.map((r) => [r.name, outcomeOf(r)]));
     assert.deepEqual(
       {
         run: status(run.results),
@@ -968,7 +969,7 @@ describe("cancel during a save", () => {
         saved: [...service.entries.keys()],
       },
       {
-        run: { "restore:cas": "done", "save:cas": "cancelled" },
+        run: { "restore:cas": "built", "save:cas": "cancelled" },
         post: {},
         saves: 1,
         saved: ["cas-1"],
@@ -1012,8 +1013,7 @@ describe("timeoutMs", () => {
     const common = { ports, cacheDir: CACHE_DIR, historyDir: HISTORY_DIR };
     const first = await runWorkflow({ ...common, implementation: implementationFor(600_000) });
     const second = await runWorkflow({ ...common, implementation: implementationFor(1_200_000) });
-    const status = (rs: { name: string; status: string }[]) =>
-      Object.fromEntries(rs.map((r) => [r.name, r.status]));
+    const status = (rs: NodeResult[]) => Object.fromEntries(rs.map((r) => [r.name, outcomeOf(r)]));
     const message = "The action 'test' has timed out after 30ms.";
     assert.deepEqual(
       {
@@ -1026,7 +1026,7 @@ describe("timeoutMs", () => {
         log: groupLines(rec.log, `${STATUS_ICON.failed} test`),
       },
       {
-        first: { test: "failed", lint: "done", report: "done" },
+        first: { test: "failed", lint: "built", report: "built" },
         second: { test: "failed", lint: "cached", report: "cached" },
         annotations: [
           { level: "error", title: "test", message },

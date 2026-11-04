@@ -1,4 +1,4 @@
-import type { ExecEvent, Node, Result } from "@mrmeku/dagraph";
+import type { ExecutionEvent, Node, NodeResult } from "@mrmeku/dagraph";
 import { isDebugCommand, isWarningCommand, plainLine, textAfterLastReturn } from "./format.ts";
 import { isSettled, startedAtOf } from "./selectors.ts";
 
@@ -29,30 +29,37 @@ export type InFlightNodeState = NodeLines & {
 };
 
 /** Settled as dagraph's `result` says, whose event came at `endedAt`. */
-type SettledAs<Status extends Result["status"]> = NodeLines &
+type SettledAs<Status extends NodeResult["status"]> = NodeLines &
   LogRead & {
     readonly status: Status;
-    readonly result: Extract<Result, { status: Status }>;
+    readonly result: Extract<NodeResult, { status: Status }>;
     readonly endedAt: number;
   };
 
 /**
- * Its action ran, as its result's `elapsed` says, from `startedAt`, when its `start` came; or it
- * settled before its action ran, with no `elapsed` and no `startedAt`.
+ * Its action ran, as its result's details' `elapsed` says, from `startedAt`, when its `start`
+ * came; or it settled before its action ran, with no `elapsed` and no `startedAt`.
  */
 type ActionRanOrNot =
-  | { readonly startedAt: number; readonly result: { readonly elapsed: number } }
-  | { readonly startedAt?: undefined; readonly result: { readonly elapsed?: never } };
+  | {
+      readonly startedAt: number;
+      readonly result: { readonly details: { readonly elapsed: number } };
+    }
+  | {
+      readonly startedAt?: undefined;
+      readonly result: { readonly details?: { readonly elapsed?: never } };
+    };
 
-/** Built since its `start` came at `startedAt`, or a cache hit since its dispatch then. */
-export type SucceededNodeState = (SettledAs<"done"> | SettledAs<"cached">) & {
-  readonly startedAt: number;
-};
+/**
+ * Built since its `start` came at `startedAt`, or a cache hit since its dispatch then, as its
+ * details' `actionRan` says.
+ */
+export type SucceededNodeState = SettledAs<"succeeded"> & { readonly startedAt: number };
 
 /**
  * Failed once its action ran, or before it could: its key not computed or its `RunNode` rejected
- * (its result's `actionKey` is ""), its attempt not set up, its start not recorded, or its inputs
- * not resolved.
+ * (its result has no details), its attempt not set up, its start not recorded, or its inputs not
+ * resolved.
  */
 export type FailedNodeState = SettledAs<"failed"> & ActionRanOrNot;
 
@@ -61,7 +68,7 @@ export type DepFailedNodeState = SettledAs<"dep-failed">;
 
 /**
  * Cancelled once its action ran, or while it waited, though it may have looked its key up: its
- * result's `actionKey` is "" for one cancelled before it had one.
+ * result has no details for one cancelled before it had one.
  */
 export type CancelledNodeState = SettledAs<"cancelled"> & ActionRanOrNot;
 
@@ -104,7 +111,9 @@ export interface Pass {
 }
 
 /** An engine event as dagraph emits it, or a settled node's log once the store has read it. */
-export type NodeAction = ExecEvent | { type: "logRead"; settled: SettledNodeState; log: string[] };
+export type NodeAction =
+  | ExecutionEvent
+  | { type: "logRead"; settled: SettledNodeState; log: string[] };
 
 export type RunAction =
   | NodeAction
@@ -196,23 +205,31 @@ export function nodeReducer(state: NodeState, action: NodeAction): NodeState {
   // From its start, or a cache hit's dispatch; a node settled unheard of is timed from its settle.
   const startedAt = startedAtOf(state) ?? occurredAt;
   switch (result.status) {
-    case "done":
-      return { ...ended, status: "done", result, startedAt };
-    case "cached":
-      return { ...ended, status: "cached", result, startedAt };
+    case "succeeded":
+      return { ...ended, status: "succeeded", result, startedAt };
     case "failed": {
-      const { elapsed, ...notRun } = result;
-      return elapsed === undefined
-        ? { ...ended, status: "failed", result: notRun }
-        : { ...ended, status: "failed", result: { ...notRun, elapsed }, startedAt };
+      const { details, ...rest } = result;
+      if (details && "elapsed" in details)
+        return { ...ended, status: "failed", result: { ...rest, details }, startedAt };
+      return { ...ended, status: "failed", result: { ...rest, ...(details && { details }) } };
     }
     case "dep-failed":
       return { ...ended, status: "dep-failed", result };
     case "cancelled": {
-      const { elapsed, ...notRun } = result;
-      return elapsed === undefined
-        ? { ...ended, status: "cancelled", result: notRun }
-        : { ...ended, status: "cancelled", result: { ...notRun, elapsed }, startedAt };
+      const { details, ...rest } = result;
+      if (details?.elapsed === undefined)
+        return {
+          ...ended,
+          status: "cancelled",
+          result: { ...rest, ...(details && { details: { actionKey: details.actionKey } }) },
+        };
+      const { elapsed, actionKey } = details;
+      return {
+        ...ended,
+        status: "cancelled",
+        result: { ...rest, details: { actionKey, elapsed } },
+        startedAt,
+      };
     }
   }
 }

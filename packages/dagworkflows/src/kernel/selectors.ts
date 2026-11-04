@@ -1,4 +1,4 @@
-import type { Node, Result } from "@mrmeku/dagraph";
+import type { Node, NodeResult } from "@mrmeku/dagraph";
 import type { NodeReport } from "./report.ts";
 import type {
   FailedNodeState,
@@ -23,19 +23,35 @@ export const startedAtOf = (nodeState: NodeState): number | undefined =>
   "startedAt" in nodeState ? nodeState.startedAt : undefined;
 
 /**
- * Whether the engine ran a node's action: its result has `elapsed`, as a build's always does, and
- * one that failed or was cancelled once its action ran. Never a cache hit or a skipped node.
+ * How long the engine ran a node's action: a build's `elapsed`, or the details' for one that failed
+ * or was cancelled once its action ran. None for a cache hit, a skipped node, or one stopped
+ * before its action ran.
  */
-export const actionRan = <R extends Result>(
-  result: R,
-): result is R & { readonly elapsed: number } => "elapsed" in result;
+export function elapsedOf(result: NodeResult): number | undefined {
+  switch (result.status) {
+    case "succeeded":
+      return result.details.actionRan ? result.details.elapsed : undefined;
+    case "failed":
+    case "cancelled":
+      return result.details && "elapsed" in result.details ? result.details.elapsed : undefined;
+    case "dep-failed":
+      return undefined;
+  }
+}
+
+/** Whether the engine ran a node's action: never a cache hit or a skipped node. */
+export const actionRan = (result: NodeResult): boolean => elapsedOf(result) !== undefined;
+
+/** Whether a node failed on its own timeout. */
+export const timedOut = (result: NodeResult): boolean =>
+  result.status === "failed" && result.details !== undefined && "timedOut" in result.details;
 
 /**
  * Whether a node's action ran to its end: built, or failed once its action ran; never a cache hit,
  * nor a node a cancel stopped while its action ran. Its duration is what the durations file keeps,
  * and what the summary counts as busy and draws on its timeline.
  */
-export const ranToItsEnd = (result: Result): boolean =>
+export const ranToItsEnd = (result: NodeResult): boolean =>
   result.status !== "cancelled" && actionRan(result);
 
 /**
@@ -43,16 +59,10 @@ export const ranToItsEnd = (result: Result): boolean =>
  * cache hit's from its dispatch to its result. None for any other.
  */
 export function durationOf(nodeState: SettledNodeState): number | undefined {
-  switch (nodeState.status) {
-    case "cached":
-      return Math.max(1, nodeState.endedAt - nodeState.startedAt);
-    case "dep-failed":
-      return undefined;
-    case "done":
-    case "failed":
-    case "cancelled":
-      return actionRan(nodeState.result) ? Math.max(1, nodeState.result.elapsed) : undefined;
-  }
+  if (nodeState.status === "succeeded" && !nodeState.result.details.actionRan)
+    return Math.max(1, nodeState.endedAt - nodeState.startedAt);
+  const elapsed = elapsedOf(nodeState.result);
+  return elapsed === undefined ? undefined : Math.max(1, elapsed);
 }
 
 /** The nodes dispatched and not settled, the earliest first. */

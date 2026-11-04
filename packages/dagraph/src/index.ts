@@ -9,7 +9,13 @@ export {
   type NodeRefOf,
   type OutputOf,
 } from "./define-action.ts";
-export { execute, runNode, type ExecuteOptions } from "./execute.ts";
+export {
+  execute,
+  runNode,
+  type ExecuteOptions,
+  type ExecutionEvent,
+  type ExecutionListener,
+} from "./execute.ts";
 export {
   Graph,
   closure,
@@ -59,13 +65,22 @@ export {
 } from "./orchestrate.ts";
 export { createMemoryDagFs, type MemoryDagFs } from "./ports/memory-fs.ts";
 export {
+  isNodeResult,
   lookupNode,
   processNode,
+  resultActionKey,
   runAction,
+  type ActionEvent,
+  type ActionListener,
+  type CancelledNodeDetails,
   type ExecutionContext,
+  type FailedNodeDetails,
+  type HitDetails,
   type Lookup,
   type Miss,
+  type NodeResult,
   type RunActionOptions,
+  type SucceededNodeDetails,
 } from "./process-node.ts";
 export {
   throttledScheduler,
@@ -78,12 +93,11 @@ export {
   isSucceeded,
   requiredDeps,
   type Clock,
-  type ExecEvent,
-  type ExecListener,
-  type FailedError,
+  type FailureError,
   type JsonValue,
+  type OrchestrationEvent,
+  type OrchestrationListener,
   type Result,
   type ScheduledNode,
-  type SucceededResult,
   type Tally,
 } from "./types.ts";

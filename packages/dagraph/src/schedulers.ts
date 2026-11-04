@@ -40,14 +40,14 @@ export function unboundedScheduler(): Scheduler {
 export interface ThrottledSchedulerOptions {
   /** The most nodes processed at once, as Ninja's `-j`. */
   maxParallelism?: number;
-  /** For each concurrency group, the most of its actions that run at once; a hit takes no slot. */
+  /** For each concurrency group, the most of its nodes that hold a slot at once. */
   concurrencyLimits?: Record<string, number>;
 }
 
 /**
  * Scheduler with a global limit and one per concurrency group, as Ninja's pools. A node holds its
- * place from being handed to processing until it settles. A miss in a group gives its place back
- * while it waits for the group's slot, and takes both once both are free.
+ * place from its dispatch until it settles. A node in a group that waits for its slot gives its
+ * place back while it waits, and takes both once both are free.
  */
 export function throttledScheduler(opts?: ThrottledSchedulerOptions): Scheduler {
   const { maxParallelism = Infinity, concurrencyLimits = {} } = opts ?? {};

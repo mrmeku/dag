@@ -1,4 +1,4 @@
-import type { ExecEvent } from "@mrmeku/dagraph";
+import type { ExecutionEvent } from "@mrmeku/dagraph";
 import { DEFAULT_BUILD_LOG_DIR } from "../config.ts";
 import type { Ports } from "../ports.ts";
 import { warningLine } from "../step-records.ts";
@@ -97,7 +97,7 @@ export function createRunStore(
     );
   /** The log of the build that made a node's entry; a missing one reads as empty. */
   const buildLogLines = async ({ node, result }: SucceededNodeState): Promise<string[]> => {
-    const path = buildLogPath(result.actionKey);
+    const path = buildLogPath(result.details.actionKey);
     try {
       return shownLines((await fs.exists(path)) ? await fs.readText(path) : "");
     } catch (e) {
@@ -122,11 +122,10 @@ export function createRunStore(
   /** What a settled node printed, or a hit's build log; a built node's is kept under its key. */
   const settleLog = async (nodeState: SettledNodeState, output: string): Promise<string[]> => {
     switch (nodeState.status) {
-      case "cached":
-        return buildLogLines(nodeState);
-      case "done":
+      case "succeeded":
+        if (!nodeState.result.details.actionRan) return buildLogLines(nodeState);
         try {
-          await keepBuildLog(nodeState.result.actionKey, output);
+          await keepBuildLog(nodeState.result.details.actionKey, output);
           return shownLines(output);
         } catch (e) {
           return [...shownLines(output), buildLogWarning(nodeState.node.name, e)];
@@ -228,7 +227,7 @@ export function createRunStore(
     getState: (): RunState => state,
     begin: (pass: Pass) => dispatch({ type: "passBegun", pass }),
     cancel: () => dispatch({ type: "runCancelled" }),
-    onEvent: (event: ExecEvent) => dispatch(event),
+    onEvent: (event: ExecutionEvent) => dispatch(event),
     /** Writes this run's durations over its last run's; a failed write fails the next report. */
     writeDurations: (): Promise<void> => {
       queueInOrder(writeDurationsFile);

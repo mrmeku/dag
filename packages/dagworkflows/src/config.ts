@@ -1,4 +1,4 @@
-import type { Result } from "@mrmeku/dagraph";
+import type { NodeResult } from "@mrmeku/dagraph";
 
 /** dagraph's cache dir, relative to the repo root. Carried between runs by actions/cache nodes in the workflow. */
 export const DEFAULT_CACHE_DIR = ".dag/cache";
@@ -119,9 +119,8 @@ export const CRITICAL_PATH_FLOOR_MS = 1000;
  * terminal set (figures' tick and cross; its TUI's skipped and stopped), where a cache hit is a
  * success and the word "cached" says the rest. U+FE0E keeps a browser from drawing an emoji.
  */
-export const STATUS_ICON: Record<Result["status"], string> = {
-  done: "✔\uFE0E",
-  cached: "✔\uFE0E",
+export const STATUS_ICON: Record<NodeResult["status"], string> = {
+  succeeded: "✔\uFE0E",
   failed: "✖\uFE0E",
   "dep-failed": "⏭\uFE0E",
   cancelled: "◼\uFE0E",

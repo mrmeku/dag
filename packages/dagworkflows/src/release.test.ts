@@ -1,8 +1,9 @@
-import { Graph, type Result } from "@mrmeku/dagraph";
+import { Graph, type NodeResult } from "@mrmeku/dagraph";
 import assert from "node:assert/strict";
 import { describe, test } from "node:test";
 import type { SaveSpec } from "./cache.ts";
 import { STATUS_ICON } from "./config.ts";
+import { readRunHistory } from "./history.ts";
 import type { ExecResult, Ports } from "./ports.ts";
 import { createMemoryCacheStore } from "./ports/cache-store.ts";
 import { createTestPorts, type RecordedHost } from "./ports/memory.ts";
@@ -20,7 +21,11 @@ const exited = (code: number): ExecResult => ({
   output: "",
   ok: code === 0,
 });
-const statuses = (results: Result[]) => Object.fromEntries(results.map((r) => [r.name, r.status]));
+/** How a node settled, in the words the run's output uses: built or cached, or its status. */
+const outcomeOf = (result: NodeResult) =>
+  result.status === "succeeded" ? (result.details.actionRan ? "built" : "cached") : result.status;
+const statuses = (results: NodeResult[]) =>
+  Object.fromEntries(results.map((r) => [r.name, outcomeOf(r)]));
 const optionsOf = (def: WorkflowDef, ports: Ports) => ({
   implementation: def.implementation,
   ...(def.schedulerOptions && { schedulerOptions: def.schedulerOptions }),
@@ -116,14 +121,14 @@ describe("a release", () => {
       {
         // It started, so whatever it did, its release runs, with the id it never wrote unset.
         failsAfterStart: {
-          run: { "up:db": "failed", test: "dep-failed", "down:db": "done" },
+          run: { "up:db": "failed", test: "dep-failed", "down:db": "built" },
           post: {},
           calls: ["fail up", "compose down"],
           releaseEnv: { ID: undefined },
         },
         interrupted: {
           run: { "up:db": "cancelled", test: "cancelled", "down:db": "cancelled" },
-          post: { "down:db": "done" },
+          post: { "down:db": "built" },
           calls: ["compose up", "compose down"],
           releaseEnv: { ID: undefined },
         },
@@ -389,11 +394,91 @@ describe("a release that fails", () => {
         { tries, statuses: statuses(run.results) },
         {
           tries: 1,
-          statuses: { "up:db": "done", "down:db": "failed" },
+          statuses: { "up:db": "built", "down:db": "failed" },
         },
       );
     },
   );
+
+  test("stays owed by a history whose results are in an older shape: its workflow, selection and starts are kept, only the results it cannot read are dropped, and those replay as cancelled", async () => {
+    const { ports, fs } = createTestPorts();
+    const calls: string[] = [];
+    let releaseEnv: Record<string, string | undefined> | undefined;
+    ports.exec = {
+      run: async (cmd, opts) => {
+        const call = cmd.slice(0, 2).join(" ");
+        calls.push(call);
+        if (call === "compose down") releaseEnv = opts?.env;
+        return exited(0);
+      },
+    };
+    const def = defineWorkflow({
+      implementation: (workflow) => {
+        const install = workflow.task({ name: "install", cmd: ["install"] });
+        workflow.task({
+          name: "up:db",
+          cmd: ({ out }) => ["compose", "up", out.id],
+          deps: { install },
+          outputs: { id: "id" },
+          post: { name: "down:db", cmd: ["compose", "down"], env: ({ main }) => ({ ID: main.id }) },
+        });
+      },
+    });
+    const installed: NodeResult = {
+      name: "install",
+      status: "succeeded",
+      details: {
+        actionKey: "ki",
+        entry: { outputs: {}, contentHash: "h", outputHashes: {} },
+        actionRan: true,
+        elapsed: 1,
+      },
+    };
+    // up:db's result as an earlier version of dag wrote it.
+    const upInAnOlderShape = {
+      name: "up:db",
+      actionKey: "ku",
+      status: "done",
+      outputs: { id: "/cache/v1/ku/h/id" },
+      contentHash: "h",
+      outputHashes: { id: "h" },
+      elapsed: 1,
+    };
+    const path = `${HISTORY_DIR}/stopped.json`;
+    await fs.writeText(
+      path,
+      JSON.stringify({
+        workflow: "",
+        only: ["up:db"],
+        started: ["install", "up:db"],
+        results: { install: installed, "up:db": upInAnOlderShape },
+      }),
+    );
+    const read = await readRunHistory(fs, path);
+    const post = await runPost(optionsOf(def, ports));
+    assert.deepEqual(
+      {
+        read,
+        post: statuses(post.results),
+        calls,
+        releaseEnv,
+        left: [...fs.files.keys()].filter((k) => k.startsWith(HISTORY_DIR)),
+      },
+      {
+        read: {
+          workflow: "",
+          only: ["up:db"],
+          started: ["install", "up:db"],
+          results: { install: installed },
+        },
+        post: { "down:db": "built" },
+        calls: ["compose down"],
+        // Replayed as cancelled, up:db hands its release no id.
+        releaseEnv: { ID: undefined },
+        left: [],
+      },
+    );
+  });
 
   test("is paid by the next run though the workflow file has since given its task another dep", async () => {
     const { ports } = createTestPorts();
@@ -484,7 +569,7 @@ describe("a cache's save", () => {
       });
       await runWorkflow(optionsOf(def, ports));
       return {
-        restored: groupLines(rec.log, `${STATUS_ICON.done} restore:cas`),
+        restored: groupLines(rec.log, `${STATUS_ICON.succeeded} restore:cas`),
         saved: [...on.entries.keys()],
       };
     };
@@ -540,7 +625,7 @@ describe("a cache's save", () => {
     const post = await runPost(options);
     assert.deepEqual(
       { post: statuses(post.results), saved: [...service.entries.keys()], calls },
-      { post: { "down:db": "done" }, saved: [], calls: ["compose up", "slow", "compose down"] },
+      { post: { "down:db": "built" }, saved: [], calls: ["compose up", "slow", "compose down"] },
     );
   });
 });

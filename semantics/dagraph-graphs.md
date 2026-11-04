@@ -436,7 +436,7 @@ The argument has an entry only for the roles the node actually gives: a maybe ro
 
 - `page.html` is an `OutputRef<string>`, or `OutputRef<string[]>` for a list output. It is a `SettledOutputRef` when the role was given as `settled(ref)`. A settled ref never fits where an `OutputRef` is declared, because it may resolve to `undefined`.
 - The action reads the ref as a handle on that output's committed file, or a list of handles. A settled ref reads as `undefined` when its dep did not succeed.
-- In the key, a ref is the role(s) it points through (all of them, sorted, when two roles name one node) plus the output's name. It is never the dep node's name and never a path, so a dep rebuilt to the same content at another path keeps the node `cached`.
+- In the key, a ref is the role(s) it points through (all of them, sorted, when two roles name one node) plus the output's name. It is never the dep node's name and never a path, so a dep rebuilt to the same content at another path keeps the node a hit.
 - Refs exist only for outputs every return of the dep includes. An optional output (`srt?: string`), or one named by an index signature, has no ref. Read it from `depOutputs`, where it is `| undefined`.
 - The refs of a dep cannot be listed: a spread `{ ...page }`, or putting the whole `page` object in a value, throws `node "<name>": the refs of page cannot be listed: name each output, as page.<output>`. Their names exist only in the types.
 - Refs are scoped to the call that received them: a ref kept from another node's `inputs` function does not compile in a different node's inputs.

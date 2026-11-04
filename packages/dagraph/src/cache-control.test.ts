@@ -5,8 +5,7 @@ import { actionsFor } from "./define-action.ts";
 import { execute } from "./execute.ts";
 import { dep, Graph, nodeInputs, type ActionContext } from "./graph/index.ts";
 import { createMemoryDagFs, type MemoryDagFs } from "./ports/memory-fs.ts";
-import { lookupNode } from "./process-node.ts";
-import { isSucceeded, type Result } from "./types.ts";
+import { lookupNode, type NodeResult } from "./process-node.ts";
 
 interface Ports {
   fs: MemoryDagFs;
@@ -92,34 +91,33 @@ function setup() {
 async function lookups(
   graph: Graph<Ports>,
   ctx: ReturnType<typeof setup>["ctx"],
-  results: Result[],
+  results: NodeResult[],
 ) {
   const entries = Object.fromEntries(
-    results.flatMap((r) =>
-      isSucceeded(r)
-        ? [
-            [
-              r.name,
-              { outputs: r.outputs, contentHash: r.contentHash, outputHashes: r.outputHashes },
-            ],
-          ]
-        : [],
-    ),
+    results.flatMap((r) => (r.status === "succeeded" ? [[r.name, r.details.entry]] : [])),
   );
   const looked = graph.describe().map(async ({ name }) => {
     const found = await lookupNode(graph, name, entries, ctx);
-    return [name, found.status] as const;
+    return [name, found.status === "succeeded" ? "hit" : found.status] as const;
   });
   return Object.fromEntries(await Promise.all(looked));
 }
 
-const statuses = (results: Result[]) => Object.fromEntries(results.map((r) => [r.name, r.status]));
+/** How a node settled: its status, or whether its action ran when it succeeded. */
+const outcome = (r: NodeResult) =>
+  r.status === "succeeded" ? (r.details.actionRan ? "ran" : "hit") : r.status;
+const statuses = (results: NodeResult[]) =>
+  Object.fromEntries(results.map((r) => [r.name, outcome(r)]));
 
 describe("cache control", () => {
   test("a node whose key misses runs again, and so does each dependent; one that writes the same bytes keeps its content hash", async () => {
     const { ports, ctx } = setup();
     const first = await execute(buildGraph(), ctx);
-    const sourceKey = new Set(first.filter((r) => r.name === "source").map((r) => r.actionKey));
+    const sourceKey = new Set(
+      first.flatMap((r) =>
+        r.name === "source" && r.status === "succeeded" ? [r.details.actionKey] : [],
+      ),
+    );
 
     // A re-download at a higher bitrate: same speech, different bytes.
     ports.ran = [];
@@ -139,8 +137,10 @@ describe("cache control", () => {
     ports.source = { id: "xyz", bitrate: 320 };
     await execute(buildGraph(), { ...ctx, forcedKeys: "all" });
 
-    const transcriptHash = (results: Result[]) =>
-      results.flatMap((r) => (r.name === "transcript" && isSucceeded(r) ? [r.contentHash] : []));
+    const transcriptHash = (results: NodeResult[]) =>
+      results.flatMap((r) =>
+        r.name === "transcript" && r.status === "succeeded" ? [r.details.entry.contentHash] : [],
+      );
     expect({
       healRan,
       healStatuses: statuses(healed),
@@ -151,20 +151,20 @@ describe("cache control", () => {
     }).toEqual({
       healRan: ["entry", "packaged", "source", "transcript", "uploaded"],
       healStatuses: {
-        source: "done",
-        transcript: "done",
-        packaged: "done",
-        entry: "done",
-        uploaded: "done",
+        source: "ran",
+        transcript: "ran",
+        packaged: "ran",
+        entry: "ran",
+        uploaded: "ran",
       },
       sameWords: true,
       syncRan: ["uploaded"],
       syncStatuses: {
-        source: "cached",
-        transcript: "cached",
-        packaged: "cached",
-        entry: "cached",
-        uploaded: "done",
+        source: "hit",
+        transcript: "hit",
+        packaged: "hit",
+        entry: "hit",
+        uploaded: "ran",
       },
       changedRan: ["entry", "packaged", "source", "transcript", "uploaded"],
     });
@@ -181,17 +181,17 @@ describe("cache control", () => {
       ran: ports.ran,
     }).toEqual({
       changed: {
-        source: "cached",
+        source: "hit",
         transcript: "missed",
-        packaged: "cached",
-        entry: "cached",
+        packaged: "hit",
+        entry: "hit",
         uploaded: "missed",
       },
       unchanged: {
-        source: "cached",
-        transcript: "cached",
-        packaged: "cached",
-        entry: "cached",
+        source: "hit",
+        transcript: "hit",
+        packaged: "hit",
+        entry: "hit",
         uploaded: "missed",
       },
       ran: [],

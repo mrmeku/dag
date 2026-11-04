@@ -1,4 +1,4 @@
-import { execute, Graph, namedOutput, type Result } from "@mrmeku/dagraph";
+import { execute, Graph, namedOutput, type NodeResult } from "@mrmeku/dagraph";
 import assert from "node:assert/strict";
 import { describe, test } from "node:test";
 import { cache } from "./cache.ts";
@@ -36,16 +36,22 @@ function serviceOf(keys: string[]) {
   };
 }
 
+/** How a node settled, in the words the run's output uses: built or cached, or its status. */
+const outcomeOf = (result: NodeResult) =>
+  result.status === "succeeded" ? (result.details.actionRan ? "built" : "cached") : result.status;
+
 /** A save's `saved` and log once it ran, or the message it failed with. */
 async function saveOutcome(
   fs: Ports["fs"],
-  save: Result | undefined,
+  save: NodeResult | undefined,
   log: string | undefined,
 ): Promise<unknown> {
   assert.ok(save, "a save");
   if (save.status === "failed") return save.error.message;
-  assert.ok(save.status === "done", save.status);
-  const saved: unknown = JSON.parse(await fs.readText(namedOutput(save.outputs, "saved")));
+  assert.ok(save.status === "succeeded" && save.details.actionRan, save.status);
+  const saved: unknown = JSON.parse(
+    await fs.readText(namedOutput(save.details.entry.outputs, "saved")),
+  );
   return { saved, log };
 }
 
@@ -69,14 +75,15 @@ describe("cache", () => {
       const cacheStore = createMemoryCacheStore(held);
       const { results, printed } = await executeUnder(graph, { ...p, cacheStore });
       const restore = results.find((r) => r.name === "restore:cas");
-      assert.ok(restore?.status === "done", "restore:cas");
+      assert.ok(restore?.status === "succeeded" && restore.details.actionRan, "restore:cas");
+      const lint = results.find((r) => r.name === "lint");
       runs.push({
-        restore: { outputs: restore.outputs, log: printed.get("restore:cas") },
-        lint: results.find((r) => r.name === "lint")?.status,
+        restore: { outputs: restore.details.entry.outputs, log: printed.get("restore:cas") },
+        lint: lint && outcomeOf(lint),
       });
     }
     assert.deepEqual(runs, [
-      { restore: { outputs: {}, log: "Cache restored from: cas-2\n" }, lint: "done" },
+      { restore: { outputs: {}, log: "Cache restored from: cas-2\n" }, lint: "built" },
       { restore: { outputs: {}, log: "Cache restored from: cas-1\n" }, lint: "cached" },
       {
         restore: { outputs: {}, log: "Cache not found for input keys: cas-2, cas-\n" },
@@ -188,26 +195,26 @@ describe("cache", () => {
     cache(graph, { name: "invalid", path: ["x"], key: "in,valid" }, ctx);
     addCommand(graph, { name: "lint", cmd: ["lint"], deps: { cas: cas.restore } });
     const { results, printed } = await executeUnder(graph, p);
-    const outcomeOf = (name: string) => {
+    const settledOf = (name: string) => {
       const result = results.find((r) => r.name === name);
       assert.ok(result, name);
       if (result.status === "failed") return result.error.message;
-      return { status: result.status, log: printed.get(name) ?? "" };
+      return { status: outcomeOf(result), log: printed.get(name) ?? "" };
     };
     assert.deepEqual(
       {
-        restore: outcomeOf("restore:cas"),
-        lint: outcomeOf("lint"),
-        invalid: outcomeOf("restore:invalid"),
+        restore: settledOf("restore:cas"),
+        lint: settledOf("lint"),
+        invalid: settledOf("restore:invalid"),
       },
       {
         restore: {
-          status: "done",
+          status: "built",
           log:
             "::warning title=restore%3Acas::Failed to restore: EACCES: permission denied, copyfile\n" +
             "Cache not found for input keys: cas-1, cas-\n",
         },
-        lint: { status: "done", log: "" },
+        lint: { status: "built", log: "" },
         invalid: "Key Validation Error: in,valid cannot contain commas.",
       },
     );

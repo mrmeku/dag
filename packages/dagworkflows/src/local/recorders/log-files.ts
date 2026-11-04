@@ -31,7 +31,7 @@ export function createLogFiles(logDir: string, fs: SyncFs, warn: (message: strin
       output: (nodeState, lines) => writeLog(nodeState.node.name, textOf(lines), true),
     },
     settle: (nodeState, _run, log) => {
-      if (nodeState.status === "cached")
+      if (nodeState.status === "succeeded" && !nodeState.result.details.actionRan)
         writeLog(nodeState.node.name, textOf(log.map((line) => plainLine(line))));
     },
     interrupt: (run) => {

@@ -341,7 +341,7 @@ Where it lives: `task.ts`, `commands.ts`, dagraph `graph/inputs.ts`.
 
 ## When a task runs
 
-A node ends in one of these states: `done` (ran and succeeded), `cached` (its entry was found and verified; it did not run), `failed`, `dep-failed` (skipped because a required dep did not succeed) and `cancelled` (stopped by a cancel, or never started because of one). [dagraph-execution](dagraph-execution.md) owns the details.
+A node ends in one of these states: `succeeded`, `failed`, `dep-failed` (skipped because a required dep did not succeed) and `cancelled` (stopped by a cancel, or never started because of one). A `succeeded` node was built (it ran) or is **cached** (its entry was found and verified; it did not run), as its result's `details.actionRan` says; the outputs and this document call the two "built" and "cached". [dagraph-execution](dagraph-execution.md) owns the details.
 
 For each node, in the order its deps settle, once it has taken a place in `maxParallelism`:
 
@@ -519,7 +519,7 @@ It takes no `deps`, `inputs`, `cacheable` or `outputs`, and a task with a `post`
 
 The post reads its task's outputs under the role `main`, which a task that failed or was stopped may not have written: in `env` a missing one is unset (`env: ({ main }) => ({ ID: main.id })`, then `if [ -n "${ID:-}" ]; then docker rm -f "$(cat "$ID")"; fi`); in an action, `depOutputs.main` may be `undefined`; it may not be an argument of `cmd`.
 
-In the graph a post depends, settled, on its task, and requires each dep its task requires (under the role `main.<role>`), so it is skipped when its task never started. When a run is assembled, it also waits, settled, for every node downstream of its task, posts of downstream tasks included, so posts run in the reverse order of their tasks, as GitHub's do. Example (verified): `up:db` with post `down:db`, `test` depending on `up:db` and failing: calls are `docker compose up -d`, `npm test`, `docker compose down`; statuses `up:db: done, test: failed, require-all: failed, down:db: done`.
+In the graph a post depends, settled, on its task, and requires each dep its task requires (under the role `main.<role>`), so it is skipped when its task never started. When a run is assembled, it also waits, settled, for every node downstream of its task, posts of downstream tasks included, so posts run in the reverse order of their tasks, as GitHub's do. Example (verified): `up:db` with post `down:db`, `test` depending on `up:db` and failing: calls are `docker compose up -d`, `npm test`, `docker compose down`; statuses `up:db: succeeded, test: failed, require-all: failed, down:db: succeeded`.
 
 Its work must be safe to do twice. When a post is owed, how a failed or skipped one is paid by the next run, and what a cancel does are [dagworkflows-lifecycle](dagworkflows-lifecycle.md)'s domain.
 
