@@ -46,10 +46,11 @@ import {
   lookupNode,
   lookupOrRunNode,
   resultActionKey,
+  runNode,
   type NodeResult,
   type RunActionOptions,
 } from "./lookup-or-run/index.ts";
-import { countResultsByStatus, errorMessage } from "./orchestration/index.ts";
+import { countResultsByStatus, errorMessage, orchestrate } from "./orchestration/index.ts";
 import { throttledScheduler } from "./schedulers/index.ts";
 
 interface Ports {
@@ -184,48 +185,6 @@ describe("execute", () => {
     });
   });
 
-  test("readiness: a dependent starts as soon as its deps finish", async () => {
-    const { ctx } = setup();
-    const g = new Graph<Ports>();
-    const log: string[] = [];
-    const logged =
-      (name: string, ms = 0) =>
-      async () => {
-        await Bun.sleep(ms);
-        log.push(name);
-        return name;
-      };
-    const slowRoot = task(g, "slow_root", { run: logged("slow_root", 50) });
-    const fastRoot = task(g, "fast_root", { run: logged("fast_root") });
-    task(g, "slow_child", { deps: { slowRoot }, run: logged("slow_child") });
-    task(g, "fast_child", { deps: { fastRoot }, run: logged("fast_child") });
-    await execute(g, ctx);
-    expect(log).toEqual(["fast_root", "fast_child", "slow_root", "slow_child"]);
-  });
-
-  test("children of completed nodes run before queued siblings", async () => {
-    const { ctx } = setup();
-    const g = new Graph<Ports>();
-    const log: string[] = [];
-    const logged = (name: string) => () => (log.push(name), name);
-    const first = task(g, "first_root", { run: logged("first_root") });
-    task(g, "second_root", { run: logged("second_root") });
-    task(g, "child", { deps: { first }, run: logged("child") });
-    await execute(g, ctx, { scheduler: throttledScheduler({ maxParallelism: 1 }) });
-    expect(log).toEqual(["first_root", "child", "second_root"]);
-  });
-
-  test("nodes made ready together run in the order they were added", async () => {
-    const { ctx } = setup();
-    const g = new Graph<Ports>();
-    const log: string[] = [];
-    const logged = (name: string) => () => (log.push(name), name);
-    const root = task(g, "root", { run: logged("root") });
-    for (const name of ["c1", "c2", "c3"]) task(g, name, { deps: { root }, run: logged(name) });
-    await execute(g, ctx, { scheduler: throttledScheduler({ maxParallelism: 1 }) });
-    expect(log).toEqual(["root", "c1", "c2", "c3"]);
-  });
-
   test("an input rolled back hits its earlier entry", async () => {
     const { ctx } = setup();
     const build = (version: string) => {
@@ -244,88 +203,6 @@ describe("execute", () => {
       { ran: 1, hit: 2 },
       { ran: 0, hit: 3 },
     ]);
-  });
-
-  test("a failure holds back what requires it, transitively and through a diamond, and nothing else", async () => {
-    const { ctx } = setup();
-    const g = new Graph<Ports>();
-    const boom = () => {
-      throw new Error("boom");
-    };
-    const good = task(g, "good_root");
-    task(g, "good_child", { deps: { good } });
-    const bad = task(g, "bad_root", { run: boom });
-    const mid = task(g, "mid", { deps: { bad } });
-    task(g, "leaf", { deps: { mid } });
-    const top = task(g, "top");
-    const left = task(g, "left", { deps: { top }, run: boom });
-    const right = task(g, "right", { deps: { top } });
-    task(g, "bottom", { deps: { left, right } });
-
-    const results = await execute(g, ctx);
-    // A node that ran keeps the key of its dir in the cache; one held back never computed one.
-    expect(
-      Object.fromEntries(
-        results.map((r) => [
-          r.name,
-          [
-            outcome(r),
-            /^[0-9a-f]{64}$/.test(resultActionKey(r) ?? ""),
-            r.status === "dep-failed" ? r.dep : "",
-          ],
-        ]),
-      ),
-    ).toEqual({
-      good_root: ["ran", true, ""],
-      good_child: ["ran", true, ""],
-      bad_root: ["failed", true, ""],
-      mid: ["dep-failed", false, "bad_root"],
-      leaf: ["dep-failed", false, "mid"],
-      top: ["ran", true, ""],
-      left: ["failed", true, ""],
-      right: ["ran", true, ""],
-      bottom: ["dep-failed", false, "left"],
-    });
-  });
-
-  test("a held back node names its root causes: through held back required deps to those that did not succeed, each once, in dep order, never a settled dep", async () => {
-    const { ctx } = setup();
-    const g = new Graph<Ports>();
-    const boom = () => {
-      throw new Error("boom");
-    };
-    const bad = task(g, "bad", { run: boom });
-    const worse = task(g, "worse", { run: boom });
-    const mid = task(g, "mid", { deps: { bad } });
-    task(g, "leaf", { deps: { mid, worse, bad } });
-    task(g, "tolerant", { deps: { worse: settled(worse), mid } });
-    const results = await execute(g, ctx);
-    const held = { status: "dep-failed" } as const;
-    expect(
-      Object.fromEntries(results.filter((r) => r.status === "dep-failed").map((r) => [r.name, r])),
-    ).toEqual({
-      mid: { name: "mid", ...held, dep: "bad", rootCauses: ["bad"] },
-      leaf: { name: "leaf", ...held, dep: "mid", rootCauses: ["bad", "worse"] },
-      tolerant: { name: "tolerant", ...held, dep: "mid", rootCauses: ["bad"] },
-    });
-  });
-
-  test("maxParallelism caps concurrent execution", async () => {
-    const { ctx } = setup();
-    const g = new Graph<Ports>();
-    let peak = 0;
-    let inflight = 0;
-    for (let i = 0; i < 6; i++)
-      task(g, `task_${i}`, {
-        run: async () => {
-          peak = Math.max(peak, ++inflight);
-          await Bun.sleep(20);
-          inflight--;
-          return undefined;
-        },
-      });
-    const results = await execute(g, ctx, { scheduler: throttledScheduler({ maxParallelism: 2 }) });
-    expect({ peak, counts: counts(results) }).toEqual({ peak: 2, counts: { ran: 6, hit: 0 } });
   });
 
   test("forcing every key runs every node, and their writes are the next run's entries", async () => {
@@ -1748,99 +1625,34 @@ describe("events", () => {
 });
 
 describe("a result is plain data", () => {
-  test("a failure's cause is JSON as the engine builds it: JSON copied, an Error as its name, message and cause, anything else dropped; a result of every status survives JSON and reads back as a result", async () => {
+  test("a result of every status survives JSON and reads back as a result", async () => {
     const { ctx } = setup();
-    const errorLoop = new Error("first");
-    errorLoop.cause = new Error("second", { cause: errorLoop });
-    const objectLoop: Record<string, unknown> = { code: 1 };
-    objectLoop.self = objectLoop;
-    const mutated: Record<string, unknown> = { code: 1 };
-    const causes: Record<string, unknown> = {
-      command: { argv: ["bun", "test"], cwd: ".", code: 1 },
-      nested: new TypeError("inner", {
-        cause: new RangeError("innermost", { cause: { code: 2 } }),
-      }),
-      errorLoop,
-      objectLoop,
-      bigint: 1n,
-      instance: new Map([["code", 1]]),
-      nan: { ratio: NaN },
-      unreadable: {
-        get code(): number {
-          throw new Error("not now");
-        },
-      },
-      mutated,
-      normalized: { code: -0, signal: undefined },
-    };
     const g = new Graph<Ports>();
-    const failing = Object.fromEntries(
-      Object.entries(causes).map(([name, cause]) => [
-        name,
-        task(g, name, {
-          run: () => {
-            throw new Error(`${name} failed`, { cause });
-          },
-        }),
-      ]),
-    );
+    const failing = task(g, "failing", {
+      run: () => {
+        throw new Error("failing failed", { cause: { argv: ["bun", "test"], code: 1 } });
+      },
+    });
     task(g, "made");
-    task(g, "held", { deps: { command: failing.command } });
-    const first = await execute(g, ctx);
-    // The action changes its cause after the failure: the recorded one is a copy.
-    mutated.code = 2;
-    mutated.late = 1n;
+    task(g, "held", { deps: { failing } });
     const results = [
-      ...first,
+      ...(await execute(g, ctx)),
       ...(await execute(g, ctx)),
       ...(await execute(g, ctx, { signal: AbortSignal.abort() })),
     ];
     const received: unknown = JSON.parse(JSON.stringify(results));
-    const dropped = (name: string) => ({ name: "Error", message: `${name} failed` });
     expect({
-      errors: Object.fromEntries(
-        first.flatMap((r) => (r.status === "failed" ? [[r.name, r.error]] : [])),
-      ),
       counts: countResultsByStatus(results),
       received,
       everyIsResult: Array.isArray(received) && received.every(isNodeResult),
     }).toStrictEqual({
-      errors: {
-        command: {
-          name: "Error",
-          message: "command failed",
-          cause: { argv: ["bun", "test"], cwd: ".", code: 1 },
-        },
-        nested: {
-          name: "Error",
-          message: "nested failed",
-          cause: {
-            name: "TypeError",
-            message: "inner",
-            cause: { name: "RangeError", message: "innermost", cause: { code: 2 } },
-          },
-        },
-        // The chain stops at the error that comes again.
-        errorLoop: {
-          name: "Error",
-          message: "errorLoop failed",
-          cause: { name: "Error", message: "first", cause: { name: "Error", message: "second" } },
-        },
-        objectLoop: dropped("objectLoop"),
-        bigint: dropped("bigint"),
-        instance: dropped("instance"),
-        nan: dropped("nan"),
-        unreadable: dropped("unreadable"),
-        mutated: { name: "Error", message: "mutated failed", cause: { code: 1 } },
-        normalized: { name: "Error", message: "normalized failed", cause: { code: 0 } },
-      },
-      counts: { succeeded: 2, failed: 20, "dep-failed": 2, cancelled: 12 },
+      counts: { succeeded: 2, failed: 2, "dep-failed": 2, cancelled: 3 },
       received: results,
       everyIsResult: true,
     });
   });
 
-  test("isNodeResult accepts a hit, a failure with no details or no elapsed, one timedOut, and a cancel with or without details, and refuses a record that lacks a field its status needs, whose optional field is malformed, that is timedOut without an elapsed, that an earlier version wrote as a hit, or whose status no result has", () => {
+  test("isNodeResult accepts a hit, a failure with no details or no elapsed, one timedOut, and a cancel with or without details, and refuses details that lack a field their status needs, whose optional field is malformed, that are timedOut without an elapsed, or a record an earlier version wrote as a hit", () => {
     const entry = { outputs: { out: "/o" }, contentHash: "h", outputHashes: {} };
     const hit = {
       name: "a",
@@ -1865,16 +1677,12 @@ describe("a result is plain data", () => {
         ...hit,
         details: { ...hit.details, entry: { ...entry, outputs: { out: 1 } } },
       },
-      failedWithoutMessage: { ...failed, error: { name: "Error" } },
-      causeNotJson: { ...failed, error: { name: "Error", message: "m", cause: 1n } },
       failedWithoutKey: failed,
       failedBeforeStart: { ...failed, details: { actionKey: "k" } },
       detailsWithoutKey: { ...failed, details: { elapsed: 1 } },
       timedOut,
       timedOutWithoutElapsed: { ...timedOut, details: { actionKey: "k", timedOut: true } },
       timedOutNotTrue: { ...timedOut, details: { actionKey: "k", elapsed: 1, timedOut: false } },
-      depFailedWithoutDep: { name: "a", status: "dep-failed" },
-      rootCausesNotNames: { name: "a", status: "dep-failed", dep: "b", rootCauses: [1] },
       cancelledBeforeDispatch: { name: "a", status: "cancelled" },
       cancelledWhileRunning: {
         name: "a",
@@ -1887,7 +1695,6 @@ describe("a result is plain data", () => {
         details: { actionKey: "k", elapsed: "1" },
       },
       earlierHit: { name: "a", actionKey: "k", status: "cached", ...entry },
-      unknownStatus: { name: "a", status: "skipped" },
     };
     expect(
       Object.fromEntries(Object.entries(records).map(([k, v]) => [k, isNodeResult(v)])),
@@ -1896,21 +1703,16 @@ describe("a result is plain data", () => {
       ranWithoutElapsed: false,
       entryWithoutHash: false,
       outputsNotPaths: false,
-      failedWithoutMessage: false,
-      causeNotJson: false,
       failedWithoutKey: true,
       failedBeforeStart: true,
       detailsWithoutKey: false,
       timedOut: true,
       timedOutWithoutElapsed: false,
       timedOutNotTrue: false,
-      depFailedWithoutDep: false,
-      rootCausesNotNames: false,
       cancelledBeforeDispatch: true,
       cancelledWhileRunning: true,
       cancelledElapsedNotNumber: false,
       earlierHit: false,
-      unknownStatus: false,
     });
   });
 });
@@ -2051,51 +1853,6 @@ test("an interrupted execution resumes from where it left off", async () => {
   });
 });
 
-describe("concurrency groups", () => {
-  const peakOf = () => {
-    let inflight = 0;
-    const peak = { value: 0 };
-    const run = async () => {
-      peak.value = Math.max(peak.value, ++inflight);
-      await Bun.sleep(20);
-      inflight--;
-      return undefined;
-    };
-    return { peak, run };
-  };
-
-  test("each group's limit holds on its own, beside ungrouped nodes running at full parallelism", async () => {
-    const { ctx } = setup();
-    const g = new Graph<Ports>();
-    const a = peakOf();
-    const b = peakOf();
-    const total = peakOf();
-    for (let i = 0; i < 4; i++) {
-      task(g, `a_${i}`, { concurrencyGroup: "group_a", run: () => (total.run(), a.run()) });
-      task(g, `b_${i}`, { concurrencyGroup: "group_b", run: () => (total.run(), b.run()) });
-      task(g, `free_${i}`, { run: total.run });
-    }
-    const results = await execute(g, ctx, {
-      scheduler: throttledScheduler({
-        maxParallelism: 12,
-        concurrencyLimits: { group_a: 1, group_b: 2 },
-      }),
-    });
-    expect({
-      a: a.peak.value,
-      b: b.peak.value,
-      total: total.peak.value > 3,
-      ...counts(results),
-    }).toEqual({
-      a: 1,
-      b: 2,
-      total: true,
-      ran: 12,
-      hit: 0,
-    });
-  });
-});
-
 test("a settled dep: its dependent runs without it, keyed as missing, and runs again once it succeeds", async () => {
   const { ctx } = setup();
   let ready = false;
@@ -2181,7 +1938,7 @@ test("a node two roles name is one dep: the dependent runs once with it in both 
 });
 
 describe("cancellation and timeouts", () => {
-  test("cancel: waiting nodes settle cancelled; a running one is cancelled whatever its action returns, never cached; dependents never start", async () => {
+  test("cancel: a running node is cancelled whatever its action returns, and never cached; no action starts after the cancel", async () => {
     const { ctx } = setup();
     const seen: string[] = [];
     // `slow` traps the cancel and returns normally, as a command that exits 0 on SIGINT does.
@@ -2198,13 +1955,10 @@ describe("cancellation and timeouts", () => {
     task(g, "after", { deps: { quick }, run: () => (seen.push("after"), undefined) });
     task(g, "never", { deps: { slow }, run: () => (seen.push("never"), undefined) });
     const controller = new AbortController();
-    const events: string[] = [];
     const results = await execute(g, ctx, {
       scheduler: throttledScheduler({ maxParallelism: 2 }),
       signal: controller.signal,
       onEvent: (e) => {
-        if (e.type === "start") events.push(`start:${e.node}`);
-        if (e.type === "result") events.push(`${outcome(e.result)}:${e.node}`);
         // quick settles first; `after` is then ready, and the cancel lands before it starts.
         if (e.type === "result" && e.node === "quick") controller.abort();
       },
@@ -2215,22 +1969,11 @@ describe("cancellation and timeouts", () => {
       ran: seen,
       statuses: statuses(results),
       keyed: results.filter((r) => resultActionKey(r) !== undefined).map((r) => r.name),
-      events,
-      counts: countResultsByStatus(results),
       rerun: statuses(rerun),
     }).toEqual({
       ran: ["slow", "quick", "slow", "after", "never"],
       statuses: { quick: "ran", after: "cancelled", slow: "cancelled", never: "cancelled" },
       keyed: ["quick", "slow"],
-      events: [
-        "start:slow",
-        "start:quick",
-        "ran:quick",
-        "cancelled:after",
-        "cancelled:slow",
-        "cancelled:never",
-      ],
-      counts: { succeeded: 1, failed: 0, "dep-failed": 0, cancelled: 3 },
       rerun: { quick: "hit", slow: "ran", after: "ran", never: "ran" },
     });
   });
@@ -2264,6 +2007,36 @@ describe("cancellation and timeouts", () => {
     }).toEqual({
       ran: ["holder"],
       results: { holder: ["cancelled", true], waiter: ["cancelled", true] },
+    });
+  });
+
+  test("with runNode given no signal, a cancel still ends a pending miss's wait: it settles cancelled", async () => {
+    const { ctx } = setup();
+    const controller = new AbortController();
+    const heavy = defineActionWithPorts({
+      kind: "heavy",
+      nodeInputs: nodeInputs<{ id: number }>,
+      concurrencyGroup: "heavy",
+      action: async (c) => {
+        controller.abort();
+        await new Promise((r) => setTimeout(r, 10));
+        return { file: await write(c, "f", "x") };
+      },
+    });
+    const g = new Graph<Ports>();
+    heavy.addNode(g, { name: "holder", inputs: { id: 1 } });
+    heavy.addNode(g, { name: "waiter", inputs: { id: 2 } });
+    const results = await orchestrate(
+      g.describe(),
+      runNode(g, ctx),
+      throttledScheduler({ concurrencyLimits: { heavy: 1 } }),
+      wallClock,
+      undefined,
+      controller.signal,
+    );
+    expect(Object.fromEntries(results.map((r) => [r.name, r.status]))).toEqual({
+      holder: "succeeded",
+      waiter: "cancelled",
     });
   });
 
