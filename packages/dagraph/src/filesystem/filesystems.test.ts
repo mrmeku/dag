@@ -2,7 +2,7 @@ import { afterAll, expect, test } from "bun:test";
 import { mkdtemp, realpath, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 
-import type { FileSystem } from "../cache/index.ts";
+import { hashBytes, type FileSystem } from "../cache/index.ts";
 import { createBunFileSystem } from "./bun.ts";
 import { createMemoryFileSystem } from "./index.ts";
 import { createNodeFileSystem } from "./node.ts";
@@ -28,6 +28,87 @@ const outcome = <T>(call: Promise<T>) =>
     (value) => ({ value }),
     (e: unknown) => ({ code: e instanceof Error && "code" in e ? e.code : String(e) }),
   );
+
+test("the memory, bun and node adapters do the same with every member on a file: write and read, hash, stat, mode, times, rename, remove, list, flush and resolve", async () => {
+  const seen = await Promise.all(
+    filesystems.map(async ([label, create]) => {
+      const { fs, root } = await create();
+      const at = (path: string) => `${root}/${path}`;
+      await fs.writeText(at("deep/er/text"), "café");
+      await fs.writeText(at("replaced"), "first");
+      await fs.writeText(at("replaced"), "second");
+      await fs.writeText(at("locked"), "x");
+      await fs.chmod(at("locked"), 0o444);
+      const set = new Date(2_000_000);
+      await fs.writeText(at("timed"), "x");
+      await fs.utimes(at("timed"), set, set);
+      await fs.writeText(at("from"), "moved");
+      await fs.writeText(at("onto"), "overwritten");
+      await fs.rename(at("from"), at("onto"));
+      await fs.writeText(at("gone/a"), "x");
+      await fs.writeText(at("gone/b/c"), "x");
+      await fs.remove(at("gone"));
+      await fs.writeText(at("listed/file"), "x");
+      await fs.ensureDir(at("listed/dir"));
+      return [
+        label,
+        {
+          readMadeItsDirectories: await outcome(fs.readText(at("deep/er/text"))),
+          readAfterOverwrite: await outcome(fs.readText(at("replaced"))),
+          hash: await outcome(fs.hashFile(at("deep/er/text"))),
+          stats: await outcome(
+            fs.lstat(at("deep/er/text")).then((s) => [s.isFile(), s.size, s.mode & 0o777]),
+          ),
+          writeReadOnly: await outcome(fs.writeText(at("locked"), "y")),
+          modeOfReadOnly: await outcome(fs.lstat(at("locked")).then((s) => s.mode & 0o777)),
+          utimes: await outcome(fs.lstat(at("timed")).then((s) => s.mtimeMs)),
+          renamedOver: await outcome(fs.readText(at("onto"))),
+          renamedFrom: await outcome(fs.lstat(at("from"))),
+          renameMissing: await outcome(fs.rename(at("absent"), at("anywhere"))),
+          removedDirectory: await outcome(fs.lstat(at("gone"))),
+          removeMissing: await outcome(fs.remove(at("absent"))),
+          list: await outcome(fs.readdir(at("listed")).then((names) => names.sort())),
+          listMissing: await outcome(fs.readdir(at("absent"))),
+          readMissing: await outcome(fs.readText(at("absent"))),
+          hashMissing: await outcome(fs.hashFile(at("absent"))),
+          statMissing: await outcome(fs.lstat(at("absent"))),
+          statUnderFile: await outcome(fs.lstat(at("replaced/inner"))),
+          fsync: await outcome(fs.fsync(at("replaced"))),
+          fsyncMissing: await outcome(fs.fsync(at("absent"))),
+          resolveAbsolute: fs.resolve(at("deep/er/text")) === at("deep/er/text"),
+        },
+      ] as const;
+    }),
+  );
+  const expected = {
+    readMadeItsDirectories: { value: "café" },
+    readAfterOverwrite: { value: "second" },
+    hash: { value: hashBytes("café") },
+    stats: { value: [true, 5, 0o644] },
+    writeReadOnly: { code: "EACCES" },
+    modeOfReadOnly: { value: 0o444 },
+    utimes: { value: 2_000_000 },
+    renamedOver: { value: "moved" },
+    renamedFrom: { code: "ENOENT" },
+    renameMissing: { code: "ENOENT" },
+    removedDirectory: { code: "ENOENT" },
+    removeMissing: { value: undefined },
+    list: { value: ["dir", "file"] },
+    listMissing: { value: [] },
+    readMissing: { code: "ENOENT" },
+    hashMissing: { code: "ENOENT" },
+    statMissing: { code: "ENOENT" },
+    statUnderFile: { code: "ENOTDIR" },
+    fsync: { value: undefined },
+    fsyncMissing: { code: "ENOENT" },
+    resolveAbsolute: true,
+  };
+  expect(Object.fromEntries(seen)).toEqual({
+    memory: expected,
+    bun: expected,
+    node: expected,
+  });
+});
 
 test("the memory, bun and node adapters do the same on a directory: an empty one exists, takes a mode and times, and changes its mtime as an entry comes; a file is not renamed onto one, nor read, nor listed as one", async () => {
   const seen = await Promise.all(

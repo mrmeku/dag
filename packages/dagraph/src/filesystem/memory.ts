@@ -73,14 +73,20 @@ export function createMemoryFileSystem(
     directories.set(path, { mode: 0o755, mtimeMs: nextMtimeMs() });
     entryChanged(parent);
   };
+  /** Nothing is at `path`: `ENOTDIR` when a file stands where a directory above it would. */
+  const missing = (path: string) => {
+    let above = parentOf(path);
+    while (above !== undefined && !files.has(above)) above = parentOf(above);
+    return failure(above === undefined ? "ENOENT" : "ENOTDIR", path);
+  };
   const fileAt = (path: string) => {
     const file = files.get(path);
     if (file !== undefined) return file;
-    throw failure(directoryAt(path) ? "EISDIR" : "ENOENT", path);
+    throw directoryAt(path) ? failure("EISDIR", path) : missing(path);
   };
   const entryAt = (path: string) => {
     const entry = files.get(path) ?? directoryAt(trimmed(path));
-    if (entry === undefined) throw failure("ENOENT", path);
+    if (entry === undefined) throw missing(path);
     return entry;
   };
   const write = (path: string, data: string | Uint8Array) => {

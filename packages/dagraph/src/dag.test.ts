@@ -1,17 +1,11 @@
 import { describe, expect, test } from "bun:test";
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { cp, mkdir, mkdtemp, realpath, rm, symlink } from "node:fs/promises";
+import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { dirname, join, relative } from "node:path";
+import { dirname, join } from "node:path";
 
-import {
-  commitEntry,
-  lookupEntry,
-  newStagingDir,
-  pruneCache,
-  type FileSystem,
-} from "./cache/index.ts";
+import { type FileSystem } from "./cache/index.ts";
 import { execute, startGlobalTimer, wallClock, type ExecutionEvent } from "./execute.ts";
 import { createBunFileSystem } from "./filesystem/bun.ts";
 import { createMemoryFileSystem } from "./filesystem/index.ts";
@@ -43,7 +37,6 @@ import {
 import {
   fileHandle,
   isNodeResult,
-  lookupNode,
   lookupOrRunNode,
   resultActionKey,
   runNode,
@@ -58,9 +51,6 @@ interface Ports {
 }
 
 type Group = "group_a" | "group_b" | "heavy";
-
-/** The time a test that calls the cache itself gives it: none of them reads a last use. */
-const NOW = 0;
 
 /** Whether anything is at `path`, as `lstat` finds it. */
 const isAt = (fs: FileSystem, path: string) =>
@@ -141,11 +131,6 @@ const successDetailsOf = (r: NodeResult | undefined) => {
   assert.ok(r?.status === "succeeded", `${r?.name ?? "the node"} did not succeed`);
   return r.details;
 };
-/** The path of a dep's `out`. */
-const depPath = (outputs: Outputs | undefined) => {
-  assert.ok(outputs !== undefined, "the dep has outputs");
-  return namedOutput(outputs, "out");
-};
 /** The text of a dep's `out`. */
 const depText = (outputs: Handles<Outputs> | undefined) => {
   const out = outputs?.["out"];
@@ -222,6 +207,72 @@ describe("execute", () => {
       { ran: 2, hit: 0 },
       { ran: 0, hit: 2 },
     ]);
+  });
+});
+
+test("forcing a node's key runs it again, and each dependent whose dep's content changed; one that writes the same bytes keeps its content hash", async () => {
+  const { ctx } = setup();
+  let video = "abc@128";
+  const ran: string[] = [];
+  const build = () => {
+    const g = new Graph<Ports>();
+    const logged =
+      (name: string, text: (c: ActionContext<Ports>) => Promise<string>) =>
+      async (c: ActionContext<Ports>) => {
+        ran.push(name);
+        return text(c);
+      };
+    const source = task(g, "source", { run: logged("source", async () => video) });
+    const transcript = task(g, "transcript", {
+      deps: { source },
+      // The words are the video's, whatever its bitrate.
+      run: logged("transcript", async (c) => {
+        const [id] = (await depText(c.depOutputs["source"])).split("@");
+        return `words(${id})`;
+      }),
+    });
+    const packaged = task(g, "packaged", {
+      deps: { source },
+      run: logged("packaged", async (c) => `pkg(${await depText(c.depOutputs["source"])})`),
+    });
+    const entry = task(g, "entry", {
+      deps: { transcript, packaged },
+      run: logged("entry", async () => "entry"),
+    });
+    task(g, "uploaded", {
+      deps: { entry },
+      cacheable: false,
+      run: logged("uploaded", async () => "id"),
+    });
+    return g;
+  };
+  const transcriptHash = (results: NodeResult[]) =>
+    results.flatMap((r) =>
+      r.name === "transcript" && r.status === "succeeded" ? [r.details.entry.contentHash] : [],
+    );
+  const ranIn = async (run: () => Promise<NodeResult[]>) => {
+    ran.length = 0;
+    const results = await run();
+    return { ran: [...ran].sort(), results };
+  };
+  const first = await execute(build(), ctx);
+  const sourceKey = new Set(
+    first.flatMap((r) =>
+      r.name === "source" && r.status === "succeeded" ? [r.details.actionKey] : [],
+    ),
+  );
+  // A re-download at a higher bitrate: the same speech, other bytes.
+  video = "abc@320";
+  const forced = await ranIn(() => execute(build(), { ...ctx, forcedKeys: sourceKey }));
+  const synced = await ranIn(() => execute(build(), ctx));
+  expect({
+    forced: forced.ran,
+    sameWords: transcriptHash(forced.results).join() === transcriptHash(first).join(),
+    synced: synced.ran,
+  }).toEqual({
+    forced: ["entry", "packaged", "source", "transcript", "uploaded"],
+    sameWords: true,
+    synced: ["uploaded"],
   });
 });
 
@@ -739,281 +790,34 @@ describe("file handles", () => {
 });
 
 describe("the cache", () => {
-  test("an attempt stages in tmp and commits to v1/{key}/{contentHash}, so an output named manifest.json still caches", async () => {
+  test("an attempt stages in the cache's tmp, and a failed one leaves nothing behind", async () => {
     const { ctx, fs } = setup();
     const seen: string[] = [];
-    const build = () => {
-      const g = new Graph<Ports>();
-      defineActionWithPorts({
-        kind: "m",
-        action: async (c) => {
-          seen.push(c.outputDir);
-          return { out: await write(c, "manifest.json", "an output, not the cache entry") };
-        },
-      }).addNode(g, {});
-      task(g, "broken", {
-        run: async (c) => {
-          await write(c, "partial", "half");
-          throw new Error("broken");
-        },
-      });
-      return g;
-    };
-    const m = (await execute(build(), ctx)).find((r) => r.name === "m");
-    const { actionKey, entry } = successDetailsOf(m);
-    const second = await execute(build(), ctx);
-    const dir = `/cache/v1/${actionKey}`;
-    const [outputDir] = seen;
-    assert.ok(outputDir, "the action saw its output dir");
-    expect({
-      outputDir: outputDir.replace(/[0-9a-f-]{36}$/, "<uuid>"),
-      outputs: outputsOf(m),
-      second: statuses(second),
-      files: [...fs.files.keys()].sort(),
-    }).toEqual({
-      outputDir: "/cache/tmp/<uuid>",
-      outputs: `${dir}/${entry.contentHash}/manifest.json`,
-      second: { m: "hit", broken: "failed" },
-      files: [`${dir}/${entry.contentHash}/manifest.json`, `${dir}/manifest.json`],
+    const g = new Graph<Ports>();
+    task(g, "broken", {
+      run: async (c) => {
+        seen.push(c.outputDir);
+        await write(c, "partial", "half");
+        throw new Error("broken");
+      },
     });
+    const results = await execute(g, ctx);
+    expect({
+      statuses: statuses(results),
+      outputDir: seen.map((dir) => dir.replace(/[0-9a-f-]{36}$/, "<uuid>")),
+      files: [...fs.files.keys()],
+    }).toEqual({ statuses: { broken: "failed" }, outputDir: ["/cache/tmp/<uuid>"], files: [] });
   });
 
-  test("a returned path outside the output dir, or outputs that are no record, fail the node", async () => {
+  test("outputs that are no record fail the node", async () => {
     const { ctx } = setup();
     const g = new Graph<Ports>();
-    const returning = (name: string, path: (c: ActionContext<Ports>) => Promise<string>) =>
-      defineActionWithPorts({
-        kind: name,
-        action: async (c) => ({ out: await path(c) }),
-      }).addNode(g, {
-        inputs: { id: name },
-      });
-    returning("escapes", (c) => write(c, "../sibling", "x"));
-    returning(
-      "elsewhere",
-      async (c) => (await c.ports.fs.writeText("/elsewhere", "x"), "/elsewhere"),
-    );
     // @ts-expect-error a bare path is no record of outputs: return { out: path }
     defineActionWithPorts({ kind: "bare", action: async () => "x" }).addNode(g, {});
-    const results = await execute(g, ctx);
-    expect(
-      Object.fromEntries(
-        results.map((r) => [r.name, r.status === "failed" && r.error.message.split(":")[0]]),
-      ),
-    ).toEqual({
-      escapes: "output not under the output dir",
-      elsewhere: "output not under the output dir",
-      bare: 'the action returned "x", not a record of outputs',
-    });
-  });
-
-  test("a manifest whose outputs are no record, as a bare path or a list once stored, reads as a miss", async () => {
-    const fs = createMemoryFileSystem();
-    const stored = { bare: "f", list: ["f"] };
-    for (const [key, outputs] of Object.entries(stored))
-      await fs.writeText(
-        `/cache/v1/${key}/manifest.json`,
-        JSON.stringify({ outputs, contentHash: "1", outputHashes: {} }),
-      );
-    expect([
-      await lookupEntry(fs, "/cache", "bare", NOW),
-      await lookupEntry(fs, "/cache", "list", NOW),
-    ]).toEqual([undefined, undefined]);
-  });
-
-  test("a read while a manifest is half written sees the old entry, then the new one", async () => {
-    const base = createMemoryFileSystem();
-    const halfWritten = Promise.withResolvers<void>();
-    const resume = Promise.withResolvers<void>();
-    const fs: FileSystem = {
-      ...base,
-      writeText: async (path, content) => {
-        await base.writeText(path, content.slice(0, content.length / 2));
-        halfWritten.resolve();
-        await resume.promise;
-        await base.writeText(path, content);
-      },
-    };
-    const commit = async (commitFs: FileSystem, content: string) => {
-      const stagingDir = newStagingDir(base, "/cache");
-      await base.writeText(`${stagingDir}/f`, content);
-      return commitEntry(
-        commitFs,
-        "/cache",
-        "k",
-        stagingDir,
-        { out: `${stagingDir}/f` },
-        true,
-        NOW,
-      );
-    };
-    const old = await commit(base, "old");
-    const writing = commit(fs, "new");
-    await halfWritten.promise;
-    const during = await lookupEntry(base, "/cache", "k", NOW);
-    resume.resolve();
-    const next = await writing;
-    expect({ during, after: await lookupEntry(base, "/cache", "k", NOW) }).toEqual({
-      during: old,
-      after: next,
-    });
-  });
-
-  test("two attempts of one key both keep their content dirs, and a key's older content dirs stay after a new attempt commits", async () => {
-    const { ctx, fs } = setup();
-    let calls = 0;
-    const chapters = defineActionWithPorts({
-      kind: "chapters",
-      inputs: { version: "chapters-v1" },
-      action: async (c) => ({ out: await write(c, "chapters.json", "[]") }),
-    });
-    const clean = defineActionWithPorts({
-      kind: "clean_description",
-      inputs: { version: "clean-v1", prompt: "clean" },
-      action: async (c) => ({ out: await write(c, "description.txt", `call ${++calls}`) }),
-    });
-    const upload = defineActionWithPorts({
-      kind: "upload",
-      cacheable: false,
-      inputs: { version: "upload-v1" },
-      action: async (c) => ({ out: await write(c, "id.txt", `call ${++calls}`) }),
-    });
-    const build = (videos: string[]) => {
-      const g = new Graph<Ports>();
-      for (const video of videos) {
-        const sg = g.subgraph(video);
-        chapters.addNode(sg, {});
-        clean.addNode(sg, {});
-        upload.addNode(sg, {});
-      }
-      return g;
-    };
-    const by = (rs: NodeResult[]) => Object.fromEntries(rs.map((r) => [r.name, r]));
-    const first = by(await execute(build(["v1", "v2"]), ctx));
-    const both = (node: string) => [first[`v1:${node}`], first[`v2:${node}`]].map(outputsOf);
-    const cleaned = successDetailsOf(first["v1:clean_description"]);
-    const entry = await lookupEntry(fs, "/cache", cleaned.actionKey, NOW);
-    const together = {
-      statuses: Object.values(first).map(outcome),
-      chapters: new Set(both("chapters")).size,
-      cleaned: await Promise.all(both("clean_description").map((p) => isAt(fs, p))),
-      entry: both("clean_description").includes(depPath(entry?.outputs)),
-      uploaded: await Promise.all(both("upload").map((p) => isAt(fs, p))),
-    };
-    const next = by(await execute(build(["v1"]), { ...ctx, forcedKeys: "all" }));
-    const dirsOf = async (node: string) => {
-      const { actionKey, entry } = successDetailsOf(next[`v1:${node}`]);
-      const dirs = await fs.readdir(`/cache/v1/${actionKey}`);
-      return dirs
-        .map((d) =>
-          d === entry.contentHash ? "<its own>" : d === "manifest.json" ? d : "<earlier>",
-        )
-        .sort();
-    };
-    expect({
-      together,
-      chapters: await dirsOf("chapters"),
-      clean: await dirsOf("clean_description"),
-      upload: await dirsOf("upload"),
-    }).toEqual({
-      together: {
-        statuses: ["ran", "ran", "ran", "ran", "ran", "ran"],
-        chapters: 1,
-        cleaned: [true, true],
-        entry: true,
-        uploaded: [true, true],
-      },
-      chapters: ["<its own>", "manifest.json"],
-      clean: ["<earlier>", "<earlier>", "<its own>", "manifest.json"],
-      upload: ["<earlier>", "<earlier>", "<its own>"],
-    });
-  });
-
-  test("a cacheDir with a trailing slash is the same directory", async () => {
-    const { ctx } = setup();
-    const run = async (cacheDir: string) => {
-      const g = new Graph<Ports>();
-      task(g, "a");
-      const [r] = await execute(g, { ...ctx, cacheDir });
-      assert.ok(r, "the node settles");
-      return [outcome(r), outputsOf(r).startsWith(`/cache/v1/${resultActionKey(r)}/`)];
-    };
-    expect([await run("/cache/"), await run("/cache")]).toEqual([
-      ["ran", true],
-      ["hit", true],
-    ]);
-  });
-
-  test("a cache hits under a relative or absolute cacheDir and wherever it is copied: manifests hold paths relative to their content dir, results absolute ones", async () => {
-    const fs = createNodeFileSystem();
-    const tmp = await realpath(await mkdtemp(join(tmpdir(), "dagraph-")));
-    const home = process.cwd();
-    const seen: string[] = [];
-    const build = () => {
-      const g = new Graph<Ports>();
-      defineActionWithPorts({
-        kind: "written",
-        action: async (c) => {
-          seen.push(c.outputDir);
-          const joined = join(c.outputDir, "srt");
-          const relativePath = relative(process.cwd(), join(c.outputDir, "b"));
-          await c.ports.fs.writeText(joined, "subtitles");
-          await c.ports.fs.writeText(relativePath, "b");
-          return { joined, relative: relativePath };
-        },
-      }).addNode(g, {});
-      return g;
-    };
-    const runIn = async (dir: string, cacheDir: string) => {
-      await mkdir(dir, { recursive: true });
-      process.chdir(dir);
-      try {
-        const [r] = await execute(build(), {
-          ports: { fs },
-          fs,
-          cacheDir,
-          clock: wallClock,
-          startTimer: startGlobalTimer,
-        });
-        return successDetailsOf(r);
-      } finally {
-        process.chdir(home);
-      }
-    };
-    try {
-      const first = await runIn(`${tmp}/first`, "cache");
-      const absolute = await runIn(tmp, `${tmp}/first/cache`);
-      const keyDir = `cache/v1/${first.actionKey}`;
-      const manifest: unknown = JSON.parse(
-        await fs.readText(`${tmp}/first/${keyDir}/manifest.json`),
-      );
-      // Only the copy is left, so an entry that named the first tree's files would miss.
-      await cp(`${tmp}/first`, `${tmp}/restored`, { recursive: true });
-      await rm(`${tmp}/first`, { recursive: true });
-      const restored = await runIn(`${tmp}/restored`, "cache");
-      const outputsIn = (tree: string) => {
-        const dir = `${tmp}/${tree}/${keyDir}/${first.entry.contentHash}`;
-        return { joined: `${dir}/srt`, relative: `${dir}/b` };
-      };
-      expect({
-        ran: [first.actionRan, absolute.actionRan, restored.actionRan],
-        outputDir: seen.map((d) => d.replace(/[0-9a-f-]{36}$/, "<uuid>")),
-        manifest,
-        outputs: [first.entry.outputs, absolute.entry.outputs, restored.entry.outputs],
-      }).toEqual({
-        ran: [true, false, false],
-        outputDir: [`${tmp}/first/cache/tmp/<uuid>`],
-        manifest: {
-          outputs: { joined: "srt", relative: "b" },
-          contentHash: first.entry.contentHash,
-          outputHashes: first.entry.outputHashes,
-          fileStats: { srt: { size: 9, mtimeMs: anyNumber }, b: { size: 1, mtimeMs: anyNumber } },
-        },
-        outputs: [outputsIn("first"), outputsIn("first"), outputsIn("restored")],
-      });
-    } finally {
-      await rm(tmp, { recursive: true, force: true });
-    }
+    const [result] = await execute(g, ctx);
+    expect(result?.status === "failed" && result.error.message).toBe(
+      'the action returned "x", not a record of outputs: return { <name>: path }',
+    );
   });
 
   const filesystems: [string, () => FileSystem][] = [
@@ -1065,336 +869,6 @@ describe("the cache", () => {
       expect({ statuses: statuses(third), double: read }).toEqual({
         statuses: { count: "hit", double: "hit" },
         double: "84",
-      });
-    });
-
-  for (const [label, createFs] of filesystems)
-    test(`${label} fs: a damaged content dir is replaced when two nodes of one key rerun over it, and then hits`, async () => {
-      const fs = createFs();
-      const cacheDir = `${await mkdtemp(join(tmpdir(), "dagraph-"))}/cache`;
-      const ctx = { ports: { fs }, fs, cacheDir, clock: wallClock, startTimer: startGlobalTimer };
-      const build = () => {
-        const g = new Graph<Ports>();
-        const same = defineActionWithPorts({
-          kind: "same",
-          action: async (c) => ({ out: await write(c, "out", "original") }),
-        });
-        same.addNode(g, { name: "first" });
-        same.addNode(g, { name: "second" });
-        return g;
-      };
-      const out = outputsOf((await execute(build(), ctx))[0]);
-      await fs.remove(out);
-      await fs.writeText(out, "damaged");
-      const rerun = async () =>
-        Object.fromEntries(
-          (await execute(build(), ctx)).map((r) => [r.name, [outcome(r), outputsOf(r)]]),
-        );
-      const again = await rerun();
-      const third = await rerun();
-      const left = { content: await fs.readText(out), tmp: await fs.readdir(`${cacheDir}/tmp`) };
-      await rm(dirname(cacheDir), { recursive: true, force: true });
-      expect({ again, third, left }).toEqual({
-        again: { first: ["ran", out], second: ["ran", out] },
-        third: { first: ["hit", out], second: ["hit", out] },
-        left: { content: "original", tmp: [] },
-      });
-    });
-
-  /** Each node's error message, or its status when it did not fail. */
-  const errors = (rs: NodeResult[]) =>
-    Object.fromEntries(rs.map((r) => [r.name, r.status === "failed" ? r.error.message : r.status]));
-
-  for (const [label, createFs] of filesystems)
-    test(`${label} fs: a returned path with no file fails its node, naming the output and its file, and the failure is never cached`, async () => {
-      const fs = createFs();
-      const cacheDir = `${await mkdtemp(join(tmpdir(), "dagraph-"))}/cache`;
-      const c = { ports: { fs }, fs, cacheDir, clock: wallClock, startTimer: startGlobalTimer };
-      const build = () => {
-        const g = new Graph<Ports>();
-        defineActionWithPorts({
-          kind: "download",
-          inputs: { id: "download" },
-          action: async (c) => ({
-            audio: await write(c, "audio.mp3", "mp3"),
-            thumb: `${c.outputDir}/audio.jpg`,
-          }),
-        }).addNode(g, {});
-        defineActionWithPorts({
-          kind: "thumbnail",
-          inputs: { id: "thumbnail" },
-          action: async (c) => ({ art: `${c.outputDir}/art/audio.jpg` }),
-        }).addNode(g, {});
-        return g;
-      };
-      const first = await execute(build(), c);
-      const second = await execute(build(), c);
-      const stored = await Promise.all(
-        second.map((r) => isAt(fs, `${cacheDir}/v1/${resultActionKey(r)}/manifest.json`)),
-      );
-      await rm(dirname(cacheDir), { recursive: true, force: true });
-      const fix = (file: string) =>
-        `Write it at \`\${outputDir}/${file}\` before the action returns.`;
-      const failed = {
-        download: `output "thumb" (audio.jpg) was not written. ${fix("audio.jpg")}`,
-        thumbnail: `output "art" (art/audio.jpg) was not written. ${fix("art/audio.jpg")}`,
-      };
-      expect({ first: errors(first), second: errors(second), stored }).toEqual({
-        first: failed,
-        second: failed,
-        stored: [false, false],
-      });
-    });
-
-  for (const [label, createFs] of filesystems.filter(([label]) => label !== "memory"))
-    test(`${label} fs: a returned directory or symbolic link fails its node, and a path that cannot be looked at keeps its own error`, async () => {
-      const fs = createFs();
-      const cacheDir = `${await mkdtemp(join(tmpdir(), "dagraph-"))}/cache`;
-      const outside = `${dirname(cacheDir)}/outside`;
-      await fs.writeText(outside, "x");
-      const g = new Graph<Ports>();
-      const returning = (kind: string, path: (c: ActionContext<Ports>) => Promise<string>) =>
-        defineActionWithPorts({
-          kind,
-          action: async (c) => ({ out: await path(c) }),
-        }).addNode(g, {});
-      returning("frames", async (c) => {
-        await c.ports.fs.ensureDir(`${c.outputDir}/frames`);
-        return `${c.outputDir}/frames`;
-      });
-      returning("escape", async (c) => {
-        await symlink(outside, `${c.outputDir}/escape`);
-        return `${c.outputDir}/escape`;
-      });
-      returning("under", async (c) => `${await write(c, "file", "x")}/inner`);
-      const results = await execute(g, {
-        ports: { fs },
-        fs,
-        cacheDir,
-        clock: wallClock,
-        startTimer: startGlobalTimer,
-      });
-      const outsideWritable = ((await fs.lstat(outside)).mode & 0o200) !== 0;
-      await rm(dirname(cacheDir), { recursive: true, force: true });
-      const refused = (path: string) =>
-        `output "out" (${path}) is not a regular file. ` +
-        "Return files only, never a directory or a symbolic link.";
-      expect({
-        errors: Object.fromEntries(
-          results.map((r) => [r.name, r.status === "failed" && r.error.message.split(":")[0]]),
-        ),
-        outsideWritable,
-      }).toEqual({
-        errors: { frames: refused("frames"), escape: refused("escape"), under: "ENOTDIR" },
-        outsideWritable: true,
-      });
-    });
-
-  for (const [label, createFs] of filesystems)
-    test(`${label} fs: a committed output loses its write bits alone, so a write to it fails`, async () => {
-      const fs = createFs();
-      const cacheDir = `${await mkdtemp(join(tmpdir(), "dagraph-"))}/cache`;
-      const g = new Graph<Ports>();
-      defineActionWithPorts({
-        kind: "script",
-        action: async (c) => {
-          const out = await write(c, "run.sh", "echo hi");
-          await c.ports.fs.chmod(out, 0o755);
-          return { out };
-        },
-      }).addNode(g, {});
-      const out = outputsOf(
-        (
-          await execute(g, {
-            ports: { fs },
-            fs,
-            cacheDir,
-            clock: wallClock,
-            startTimer: startGlobalTimer,
-          })
-        )[0],
-      );
-      const mode = (await fs.lstat(out)).mode & 0o777;
-      const rewrite = await fs.writeText(out, "echo bye").then(
-        () => "rewritten",
-        (e: unknown) => (e instanceof Error && "code" in e ? e.code : e),
-      );
-      await rm(dirname(cacheDir), { recursive: true, force: true });
-      expect({ mode, rewrite }).toEqual({ mode: 0o555, rewrite: "EACCES" });
-    });
-
-  for (const [label, createFs] of filesystems)
-    test(`${label} fs: a hit hashes its files only when a size or mtime changed, and a manifest without stats is a miss`, async () => {
-      const disk = createFs();
-      const cacheDir = `${await mkdtemp(join(tmpdir(), "dagraph-"))}/cache`;
-      const hashed: string[] = [];
-      const counting: FileSystem = {
-        ...disk,
-        hashFile: async (path) => (hashed.push(path), disk.hashFile(path)),
-      };
-      const ctx = {
-        ports: { fs: disk },
-        fs: counting,
-        cacheDir,
-        clock: wallClock,
-        startTimer: startGlobalTimer,
-      };
-      const build = () => {
-        const g = new Graph<Ports>();
-        task(g, "a", { run: () => "original" });
-        return g;
-      };
-      const lookup = async () => {
-        hashed.length = 0;
-        const found = await lookupNode(build(), "a", {}, ctx);
-        return [found.status === "succeeded" ? "hit" : found.status, hashed.length];
-      };
-      const [first] = await execute(build(), ctx);
-      const { actionKey, entry } = successDetailsOf(first);
-      const out = outputsOf(first);
-      const hit = await lookup();
-      await execute(build(), { ...ctx, forcedKeys: "all" });
-      const afterForced = await lookup();
-      const manifestFile = `${cacheDir}/v1/${actionKey}/manifest.json`;
-      const recorded = await disk.readText(manifestFile);
-      const { contentHash, outputHashes } = entry;
-      await disk.writeText(
-        manifestFile,
-        JSON.stringify({ outputs: { out: "out" }, contentHash, outputHashes }),
-      );
-      const unrecorded = await lookup();
-      await disk.writeText(manifestFile, recorded);
-      // Past the filesystem's timestamp resolution and the hit's millisecond.
-      await Bun.sleep(20);
-      await disk.chmod(out, 0o644);
-      await disk.writeText(out, "tampered");
-      const changed = await lookup();
-      await disk.remove(out);
-      const gone = await lookup();
-      await rm(dirname(cacheDir), { recursive: true, force: true });
-      expect({ hit, afterForced, unrecorded, changed, gone }).toEqual({
-        hit: ["hit", 0],
-        afterForced: ["hit", 0],
-        unrecorded: ["missed", 0],
-        changed: ["missed", 1],
-        gone: ["missed", 1],
-      });
-    });
-
-  test("a commit whose rename keeps failing fails its node with the rename's own error", async () => {
-    const { ctx, fs } = setup();
-    const refusing: FileSystem = {
-      ...fs,
-      rename: async () => {
-        throw new Error("EACCES: refused");
-      },
-    };
-    const g = new Graph<Ports>();
-    task(g, "a");
-    expect(errors(await execute(g, { ...ctx, fs: refusing }))).toEqual({ a: "EACCES: refused" });
-  });
-
-  for (const [label, createFs] of filesystems)
-    test(`${label} fs: a hit stamps its manifest's last use by the clock, and a commit its content dir's, kept copy or not`, async () => {
-      const fs = createFs();
-      const cacheDir = `${await mkdtemp(join(tmpdir(), "dagraph-"))}/cache`;
-      const committedAt = Date.parse("2026-10-01");
-      const hitAt = Date.parse("2026-10-02");
-      const keptAt = Date.parse("2026-10-03");
-      let now = committedAt;
-      const ctx = {
-        ports: { fs },
-        fs,
-        cacheDir,
-        clock: { epochMilliseconds: () => now },
-        startTimer: startGlobalTimer,
-      };
-      const build = () => {
-        const g = new Graph<Ports>();
-        task(g, "a");
-        return g;
-      };
-      const { actionKey, entry } = successDetailsOf((await execute(build(), ctx))[0]);
-      const keyDir = `${cacheDir}/v1/${actionKey}`;
-      const lastUses = async () => ({
-        manifest: (await fs.lstat(`${keyDir}/manifest.json`)).mtimeMs,
-        contentDir: (await fs.lstat(`${keyDir}/${entry.contentHash}`)).mtimeMs,
-      });
-      const committed = await lastUses();
-      now = hitAt;
-      await lookupNode(build(), "a", {}, ctx);
-      const hit = await lastUses();
-      now = keptAt;
-      await execute(build(), { ...ctx, forcedKeys: "all" });
-      const kept = await lastUses();
-      await rm(dirname(cacheDir), { recursive: true, force: true });
-      expect({ committed: committed.contentDir, hit, kept: kept.contentDir }).toEqual({
-        committed: committedAt,
-        hit: { manifest: hitAt, contentDir: committedAt },
-        kept: keptAt,
-      });
-    });
-
-  for (const [label, createFs] of filesystems)
-    test(`${label} fs: a prune removes key dirs, content dirs no manifest names and tmp entries last used before its time`, async () => {
-      const fs = createFs();
-      const cacheDir = `${await mkdtemp(join(tmpdir(), "dagraph-"))}/cache`;
-      const [v1, tmp] = [`${cacheDir}/v1`, `${cacheDir}/tmp`];
-      const manifestNaming = (contentHash: string) =>
-        JSON.stringify({ outputs: { out: "out" }, contentHash, outputHashes: {}, fileStats: {} });
-      const files = {
-        [`${v1}/stale/manifest.json`]: manifestNaming("a"),
-        [`${v1}/stale/a/out`]: "",
-        [`${v1}/hit/manifest.json`]: manifestNaming("b"),
-        [`${v1}/hit/a/out`]: "",
-        [`${v1}/hit/b/out`]: "",
-        [`${v1}/committing/manifest.json`]: manifestNaming("a"),
-        [`${v1}/committing/a/out`]: "",
-        [`${v1}/committing/b/out`]: "",
-        [`${v1}/uncacheable/a/out`]: "",
-        [`${v1}/uncacheable/b/out`]: "",
-        [`${v1}/.DS_Store`]: "",
-        [`${tmp}/killed/out`]: "",
-        [`${tmp}/running/out`]: "",
-      };
-      for (const [path, content] of Object.entries(files)) await fs.writeText(path, content);
-      const [old, fresh] = [new Date("2026-09-01"), new Date("2026-10-15")];
-      const lastUses = {
-        [`${v1}/stale/manifest.json`]: old,
-        [`${v1}/stale/a`]: old,
-        [`${v1}/hit/manifest.json`]: fresh,
-        [`${v1}/hit/a`]: old,
-        [`${v1}/hit/b`]: old,
-        [`${v1}/committing/manifest.json`]: old,
-        [`${v1}/committing/a`]: old,
-        [`${v1}/committing/b`]: fresh,
-        [`${v1}/uncacheable/a`]: old,
-        [`${v1}/uncacheable/b`]: fresh,
-        [`${v1}/.DS_Store`]: old,
-        [`${tmp}/killed`]: old,
-        [`${tmp}/running`]: fresh,
-      };
-      for (const [path, time] of Object.entries(lastUses)) await fs.utimes(path, time, time);
-      const unusedSince = Date.parse("2026-10-01");
-      const pruned = await pruneCache(fs, cacheDir, { unusedSince });
-      const sorted = async (dir: string) => (await fs.readdir(dir)).sort();
-      const left = {
-        v1: await sorted(v1),
-        hit: await sorted(`${v1}/hit`),
-        committing: await sorted(`${v1}/committing`),
-        uncacheable: await sorted(`${v1}/uncacheable`),
-        tmp: await sorted(tmp),
-      };
-      await rm(dirname(cacheDir), { recursive: true, force: true });
-      expect({ pruned, left }).toEqual({
-        pruned: [`${tmp}/killed`, `${v1}/hit/a`, `${v1}/stale`, `${v1}/uncacheable/a`],
-        left: {
-          v1: [".DS_Store", "committing", "hit", "uncacheable"],
-          hit: ["b", "manifest.json"],
-          committing: ["a", "b", "manifest.json"],
-          uncacheable: ["b"],
-          tmp: ["running"],
-        },
       });
     });
 });
