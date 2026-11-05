@@ -538,7 +538,7 @@ Where it lives: `packages/dagraph/src/graph/action-key.ts` (`computeActionKey`),
 
 ## Type-level guarantees
 
-What the compiler stops, and so what a user can rely on not happening in code that type-checks without casts. Most items are pinned by `@ts-expect-error` lines in `src/graph/graph.test.ts`, a context whose ports do not fit its graph's in `src/lookup-or-run/lookup-or-run.test.ts`, and the handle-in-a-string refusal in `src/dag.test.ts`. Two hold but no test pins them: a node's `meta` of the wrong type, and an `Action` retyped as taking other deps.
+What the compiler stops, and so what a user can rely on not happening in code that type-checks without casts. Most items are pinned by `@ts-expect-error` lines in `src/graph/graph.test.ts`, a context whose ports do not fit its graph's in `src/lookup-or-run/lookup-or-run.test.ts`, and the handle-in-a-string refusal in `src/lookup-or-run/lookup-or-run.test.ts`. Two hold but no test pins them: a node's `meta` of the wrong type, and an `Action` retyped as taking other deps.
 
 - **Ports**: an action defined with ports cannot be added to a graph whose `Ports` lack them, and `execute` refuses an execution context without satisfying `ports`. A portless action goes on any graph, and fits where an action needing more ports is expected. `Graph<Ports, Meta>` cannot be widened to another `Ports` or `Meta`. An `Action` cannot be retyped as needing fewer ports, other deps or other inputs.
 - **Groups**: `concurrencyGroup` must be one of the names given to `actionsFor`. Plain `defineAction` takes none.
