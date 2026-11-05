@@ -10,7 +10,7 @@ import {
 import assert from "node:assert/strict";
 import { basename } from "node:path";
 import { describe, test } from "node:test";
-import { processEach } from "./process-each.ts";
+import { fromDagDirectory, processEach } from "./process-each.ts";
 import release from "./release.ts";
 
 const BASH = ["bash", "--noprofile", "--norc", "-eo", "pipefail", "-c"];
@@ -40,7 +40,10 @@ describe("release workflow", () => {
         },
       });
       const graph = new Graph<Ports>();
-      const out = await createWorkflow(graph, ports, await ports.host.context()).compose(release);
+      const context = await ports.host.context();
+      const out = await fromDagDirectory(() =>
+        createWorkflow(graph, ports, context).compose(release),
+      );
       const processed = await processEach(graph, ports);
       const resultOf = (name: string) => processed.get(name)?.result;
       // What a step ran, its deps' outputs resolved to their paths in the cache dir.

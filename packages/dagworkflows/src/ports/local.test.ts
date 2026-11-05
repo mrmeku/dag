@@ -158,7 +158,13 @@ describe("the local cache store, what each checkout holds on disk", () => {
       writeFile("kept/own.txt", "the worktree's");
       const source = await store.restore(["out", "kept", "absent", "~/.npm"], "k-1", []);
       const saved = await store.save(["out"], "k-2");
-      return { source, saved, out: treeOf("out"), kept: treeOf("kept"), files: readdirSync(".") };
+      return {
+        source,
+        saved,
+        out: treeOf("out"),
+        kept: treeOf("kept"),
+        files: readdirSync(".").sort(),
+      };
     });
     assert.deepEqual(
       { inMain, inWorktree },

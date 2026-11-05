@@ -13,8 +13,23 @@ import {
   type NodeResult,
 } from "@mrmeku/dagraph";
 import type { Ports } from "@mrmeku/dagworkflows";
+import { dirname } from "node:path";
 
 const CACHE_DIR = "/cache";
+
+/** Where the workflows run from, as `dag run` runs them: their globs read the working directory. */
+const DAG_DIRECTORY = dirname(import.meta.dirname);
+
+/** `run` with the working directory at `dag/`, whatever directory the tests were started in. */
+export async function fromDagDirectory<T>(run: () => Promise<T>): Promise<T> {
+  const started = process.cwd();
+  process.chdir(DAG_DIRECTORY);
+  try {
+    return await run();
+  } finally {
+    process.chdir(started);
+  }
+}
 
 /** What processing one node showed: its result, the files outside the cache dir its key hashed, the commands it ran and what it printed. */
 export interface Processed {

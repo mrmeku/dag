@@ -3,14 +3,15 @@ import { createTestPorts, createWorkflow, selectNodes, type Ports } from "@mrmek
 import assert from "node:assert/strict";
 import { describe, test } from "node:test";
 import ci from "./ci.ts";
-import { processEach } from "./process-each.ts";
+import { fromDagDirectory, processEach } from "./process-each.ts";
 
 describe("ci workflow", () => {
   test("the cache restore first, checks that order after it and read only their files, the cache save on main only, after every check", async () => {
     const build = async (ref: string) => {
       const { ports } = createTestPorts({ context: { ref } });
       const graph = new Graph<Ports>();
-      await createWorkflow(graph, ports, await ports.host.context()).compose(ci);
+      const context = await ports.host.context();
+      await fromDagDirectory(() => createWorkflow(graph, ports, context).compose(ci));
       // The graph a run executes, where the save waits for every node that reads the cache dir.
       return { nodes: selectNodes(graph).describe(), processed: await processEach(graph, ports) };
     };

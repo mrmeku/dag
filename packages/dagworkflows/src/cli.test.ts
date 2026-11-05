@@ -22,8 +22,6 @@ const workflowOf = (statements: string) =>
 export default defineWorkflow({ implementation: (workflow) => { ${statements} } });
 `;
 const EMPTY = workflowOf("");
-// The CLI tells a terminal from a pipe by `isTTY` alone, which this sets before it looks.
-const AS_IF_A_TERMINAL = ["--import", "data:text/javascript,process.stdout.isTTY = true"];
 
 interface Invocation {
   command?: "run" | "post";
@@ -41,6 +39,10 @@ interface Invocation {
 const LIMIT = { timeout: 10_000 };
 
 const root = mkdtempSync(join(tmpdir(), "dag-cli-"));
+// The CLI tells a terminal from a pipe by `isTTY` alone, which this sets before it looks. A file
+// for `--require`, which Node and Bun both load; Bun ignores an `--import` of a data URL.
+const asIfATerminal = join(root, "as-if-a-terminal.cjs");
+writeFileSync(asIfATerminal, "process.stdout.isTTY = true;\n");
 const children = new Set<ChildProcess>();
 after(() => {
   // A run a regression keeps waiting goes with the tests that gave up on it.
@@ -73,7 +75,7 @@ function cli(
   }
   const child = spawn(
     process.execPath,
-    [...(tty ? AS_IF_A_TERMINAL : []), CLI, command, "ci.ts", ...args],
+    [...(tty ? ["--require", asIfATerminal] : []), CLI, command, "ci.ts", ...args],
     {
       cwd: dir,
       env: {
