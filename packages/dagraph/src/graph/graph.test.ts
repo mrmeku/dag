@@ -1,16 +1,16 @@
 import { describe, expect, test } from "bun:test";
 import assert from "node:assert/strict";
 
-import type { FileSystem } from "./cache/index.ts";
-import { execute, startGlobalTimer, wallClock } from "./execute.ts";
-import { createMemoryFileSystem } from "./filesystem/index.ts";
+import { errorMessage } from "../orchestration/index.ts";
 import {
   actionsFor,
   closure,
+  computeActionKey,
   defineAction,
   dep,
   file,
   Graph,
+  graphNodes,
   maybe,
   nodeInputs,
   pick,
@@ -21,16 +21,10 @@ import {
   type InputValue,
   type NodeRef,
   type OutputRef,
-} from "./graph/index.ts";
-import { lookupOrRunNode, resultActionKey, type NodeResult } from "./lookup-or-run/index.ts";
-import { errorMessage } from "./orchestration/index.ts";
-
-/** How a node settled: its status, or whether its action ran when it succeeded. */
-const outcome = (r: NodeResult) =>
-  r.status === "succeeded" ? (r.details.actionRan ? "ran" : "hit") : r.status;
+} from "./index.ts";
 
 interface Ports {
-  fs: FileSystem;
+  write: (path: string, text: string) => Promise<void>;
 }
 type Meta = { video: string } | { channel: true };
 
@@ -45,7 +39,7 @@ const download = defineActionWithPorts({
   timeoutMs: 60_000,
   action: async (c) => {
     const audio = `${c.outputDir}/audio.mp3`;
-    await c.ports.fs.writeText(audio, `audio of ${c.inputs.videoId}`);
+    await c.ports.write(audio, `audio of ${c.inputs.videoId}`);
     return { audio };
   },
 });
@@ -62,7 +56,7 @@ const entry = defineActionWithPorts({
   cacheable: false,
   action: async (c) => {
     const entry = `${c.outputDir}/entry.json`;
-    await c.ports.fs.writeText(entry, "{}");
+    await c.ports.write(entry, "{}");
     return { entry };
   },
 });
@@ -71,7 +65,7 @@ const feed = defineActionWithPorts({
   deps: anyRole,
   action: async (c) => {
     const feed = `${c.outputDir}/feed.xml`;
-    await c.ports.fs.writeText(feed, "<rss/>");
+    await c.ports.write(feed, "<rss/>");
     return { feed };
   },
 });
@@ -94,13 +88,23 @@ function channel(videoIds: string[]) {
   return g;
 }
 
-function setup() {
-  const fs = createMemoryFileSystem();
-  return {
-    fs,
-    ctx: { ports: { fs }, fs, cacheDir: "/cache", clock: wallClock, startTimer: startGlobalTimer },
-  };
+/**
+ * Each node's action key, in the order added: a `file()` hashes as its path, and a dep's outputs
+ * as `outputHashes` gives them by dep name, or else keys as missing.
+ */
+async function keysOf(
+  graph: Graph<Ports, Meta>,
+  outputHashes: Record<string, Record<string, string>> = {},
+): Promise<Record<string, string>> {
+  const keys: Record<string, string> = {};
+  for (const [name, node] of graphNodes(graph))
+    keys[name] = await computeActionKey(node, outputHashes, async (path) => `hash of ${path}`);
+  return keys;
 }
+
+/** The output hashes of each download a channel holds, as though each had run. */
+const downloaded = (videoIds: string[]) =>
+  Object.fromEntries(videoIds.map((id) => [`${id}:download`, { audio: `audio of ${id}` }]));
 
 const refusal = (declare: () => unknown) => {
   try {
@@ -277,91 +281,43 @@ describe("graphs", () => {
     ]);
   });
 
-  test("closure holds the named nodes and all they depend on, settled deps included, in the order added; executing it hits the whole graph's entries", async () => {
-    const { ctx } = setup();
+  test("closure holds the named nodes and all they depend on, settled deps included, in the order added, each keyed as in the whole graph", async () => {
     const whole = channel(["v1", "v2"]);
-    await execute(whole, ctx);
     const part = closure(whole, ["v2:entry"]);
-    const results = await execute(part, ctx);
+    const wholeKeys = await keysOf(whole, downloaded(["v1", "v2"]));
+    const names = part.describe().map((n) => n.name);
     expect({
-      names: part.describe().map((n) => n.name),
-      statuses: Object.fromEntries(results.map((r) => [r.name, outcome(r)])),
+      names,
+      keys: await keysOf(part, downloaded(["v1", "v2"])),
       unknown: refusal(() => closure(whole, ["v3:entry"])),
     }).toEqual({
       names: ["v2:download", "v2:captions", "v2:entry"],
-      statuses: { "v2:download": "hit", "v2:captions": "failed", "v2:entry": "ran" },
+      keys: Object.fromEntries(Object.entries(wholeKeys).filter(([name]) => names.includes(name))),
       unknown: 'closure: the graph holds no node "v3:entry"',
     });
   });
 
-  test("a subgraph holds the nodes under its prefix and all they depend on; executing it runs only those", async () => {
+  test("a subgraph holds the nodes under its prefix and all they depend on, each keyed as in the whole graph", async () => {
     const whole = channel(["v1", "v10"]);
     const shared = download.addNode(whole, { name: "shared", inputs: { videoId: "shared" } });
     captions.addNode(whole.subgraph("v1"), { name: "extra", deps: { download: shared } });
     const v1 = whole.subgraph("v1");
-    const results = await execute(v1, setup().ctx);
+    const wholeKeys = await keysOf(whole, downloaded(["v1", "v10", "shared"]));
+    const names = v1.describe().map((n) => n.name);
     expect({
-      names: v1.describe().map((n) => n.name),
-      statuses: Object.fromEntries(results.map((r) => [r.name, outcome(r)])),
+      names,
+      keys: await keysOf(v1, downloaded(["v1", "v10", "shared"])),
       outside: refusal(() => closure(v1, ["v10:entry"])),
     }).toEqual({
       names: ["v1:download", "v1:captions", "v1:entry", "shared", "v1:extra"],
-      statuses: {
-        "v1:download": "ran",
-        "v1:captions": "failed",
-        "v1:entry": "ran",
-        shared: "ran",
-        "v1:extra": "failed",
-      },
+      keys: Object.fromEntries(Object.entries(wholeKeys).filter(([name]) => names.includes(name))),
       outside: 'closure: the graph holds no node "v10:entry"',
-    });
-  });
-
-  test("lookupOrRunNode finds a node by name in any graph that declares it the same way, and refuses a name the graph does not hold", async () => {
-    const { ctx } = setup();
-    const results = await execute(channel(["v1", "v2"]), ctx);
-    const entryOf = (name: string) => {
-      const r = results.find((x) => x.name === name);
-      return r?.status === "succeeded" ? r.details.entry : undefined;
-    };
-    const oneVideo = new Graph<Ports, Meta>();
-    addVideo(oneVideo, "v2");
-    const viaOneVideo = await lookupOrRunNode(oneVideo, "v2:download", {}, ctx);
-    const failedDep = await lookupOrRunNode(oneVideo, "v2:captions", {}, ctx);
-    const downloadEntry = entryOf("v2:download");
-    assert.ok(downloadEntry, "v2:download's entry");
-    const settledMissing = await lookupOrRunNode(
-      oneVideo,
-      "v2:entry",
-      { "v2:download": downloadEntry },
-      ctx,
-    );
-    let refused = "";
-    await lookupOrRunNode(oneVideo, "v1:download", {}, ctx).catch(
-      (e: unknown) => (refused = errorMessage(e)),
-    );
-    const downloaded = results.find((r) => r.name === "v2:download");
-    assert.ok(downloaded, "v2:download's result");
-    expect({
-      viaOneVideo: [
-        outcome(viaOneVideo),
-        resultActionKey(viaOneVideo) === resultActionKey(downloaded),
-      ],
-      failedDep,
-      settledMissing: outcome(settledMissing),
-      refused,
-    }).toEqual({
-      viaOneVideo: ["hit", true],
-      failedDep: { name: "v2:captions", status: "dep-failed", dep: "v2:download" },
-      settledMissing: "ran",
-      refused:
-        'the graph holds no node "v1:download". Pass a graph that holds it: the whole graph, a closure of it, or any graph that declares the node the same way. A key is local to its node, so each gives it the same key.',
     });
   });
 });
 
 describe("refs", () => {
-  test("a ref, a node's ref and a file input refuse every conversion to a string while the graph is built; the engine keys and resolves them without one", async () => {
+  test("a ref, a node's ref and a file input refuse every conversion to a string while the graph is built; the key holds them without one", async () => {
     const g = new Graph<Ports, Meta>();
     const dl = download.addNode(g, { inputs: { videoId: "v1" } });
     const conversions = (ref: unknown) => [
@@ -375,7 +331,7 @@ describe("refs", () => {
       deps: anyRole,
       action: async (c) => {
         const read = `${c.outputDir}/read.txt`;
-        await c.ports.fs.writeText(read, "read");
+        await c.ports.write(read, "read");
         return { read };
       },
     });
@@ -390,7 +346,7 @@ describe("refs", () => {
       deps: { dl: settled(dl) },
       inputs: ({ dl }) => ((settledOutput = conversions(dl.audio)), { argv: ["play", dl.audio] }),
     });
-    const results = await execute(g, setup().ctx);
+    const keys = Object.values(await keysOf(g));
     const audio =
       'dl.audio can\'t be part of a string: its path exists only once "download" has run. ' +
       "Make it its own array item or property: [..., dl.audio] or { audio: dl.audio }.";
@@ -407,14 +363,14 @@ describe("refs", () => {
       node: conversions(dl),
       settledNode: conversions(settled(dl)),
       file: conversions(file("bun.lock")),
-      statuses: results.map(outcome),
+      keyed: keys.every((key) => /^[0-9a-f]{64}$/.test(key)),
     }).toEqual({
       output: [audio, audio, audio, audio],
       settledOutput: [audio, audio, audio, audio],
       node: [node, node, node, node],
       settledNode: [settledNode, settledNode, settledNode, settledNode],
       file: [lockfile, lockfile, lockfile, lockfile],
-      statuses: ["ran", "ran", "ran"],
+      keyed: true,
     });
   });
 });
@@ -676,13 +632,6 @@ export function wrongDeclarationsDoNotCompile() {
   void named;
   // @ts-expect-error an action needing ports on a graph that gives none
   feed.addNode(new Graph(), {});
-  // @ts-expect-error ports that do not satisfy the graph's
-  void execute(g, {
-    fs: createMemoryFileSystem(),
-    clock: wallClock,
-    startTimer: startGlobalTimer,
-    cacheDir: "/cache",
-  });
   // @ts-expect-error a graph typed as one that needs no ports: <P extends Ports>(graph: Graph<P>)
   const portlessGraph: Graph<unknown, Meta> = g;
   // @ts-expect-error a graph typed as one whose nodes carry other meta

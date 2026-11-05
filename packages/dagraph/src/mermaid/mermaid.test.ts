@@ -1,16 +1,11 @@
 import { describe, expect, test } from "bun:test";
-import type { Node } from "./graph/index.ts";
-import { mermaidBody } from "./mermaid/index.ts";
+import type { ScheduledNode } from "../orchestration/index.ts";
+import { mermaidBody } from "./index.ts";
 
 const node = (
   name: string,
-  extra: Partial<Node<{ video: string }>> = {},
-): Node<{ video: string }> => ({
-  name,
-  kind: name,
-  deps: [],
-  ...extra,
-});
+  extra: Partial<ScheduledNode<{ video: string }>> = {},
+): ScheduledNode<{ video: string }> => ({ name, deps: [], ...extra });
 
 describe("mermaidBody", () => {
   test("labels that mermaid would read as entities, tags or markdown, and an empty one, still parse", () => {

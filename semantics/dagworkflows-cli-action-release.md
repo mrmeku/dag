@@ -494,7 +494,7 @@ Both packages are `private: true` in the tree and point `exports` at `.ts` sourc
 
 In practice a clone needs **Bun 1.4.0 or later**, and only for the engine's tests. Under Bun 1.3.14 and earlier, `bun test ./packages/dagraph` fails 8 of its 78 tests, so `bun run ci` fails `test:dagraph` and with it `require-all`. Two differences of those Bun versions cause it:
 
-- **A call to `declare` is dropped.** Bun transpiles a statement that calls a function named `declare` as a TypeScript `declare` statement, and removes it. Two test helpers make such a call, each to a parameter named `declare`: `refusal` in `graph.test.ts` and `keyOfUse` in `dag.test.ts`. Renaming those parameters makes 7 of the 8 tests pass.
+- **A call to `declare` is dropped.** Bun transpiles a statement that calls a function named `declare` as a TypeScript `declare` statement, and removes it. Two test helpers make such a call, each to a parameter named `declare`: `refusal` in dagraph's `graph/graph.test.ts` and `keyOfUse` in its `graph/action-key.test.ts`. Renaming those parameters makes 7 of the 8 tests pass.
 - **`JSON.stringify` skips a non-enumerable own `toJSON`** on a plain object. That is how `notAString` makes a node ref refuse JSON (see [dagraph-graphs](dagraph-graphs.md)), so a node ref and a settled ref stringify as `{"name":"download"}` instead of throwing. The eighth test, "a ref, a node's ref and a file input refuse every conversion to a string", fails on this alone.
 
 This was found by running a copy of the repository on 2026-10-26:

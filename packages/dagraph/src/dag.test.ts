@@ -27,7 +27,6 @@ import {
   type FileHandle,
   type FileInput,
   type Handles,
-  type InputRecord,
   type NodeInputs,
   type NodeRef,
   type OutputRef,
@@ -276,91 +275,22 @@ test("forcing a node's key runs it again, and each dependent whose dep's content
   });
 });
 
-describe("the action key", () => {
-  test("the kind, inputs and deps identify an action: not its function or how-to-run fields, nor the node's name or meta", async () => {
+describe("what an action reads", () => {
+  test("a value input reads as written, its undefined properties dropped", async () => {
     const { ctx, fs } = setup();
-    const make = (kind: string, content: string, group?: Group) =>
-      defineActionWithPorts({
-        kind,
-        inputs: { version: 1 },
-        ...(group && { concurrencyGroup: group, timeoutMs: 1000 }),
-        action: async (c) => ({ out: await write(c, "out", content) }),
-      });
-    const first = new Graph<Ports, { video: string }>();
-    make("one", "made by one").addNode(first, { name: "a", meta: { video: "x" } });
-    const second = new Graph<Ports, { video: string }>();
-    make("one", "made again", "heavy").addNode(second.subgraph("v", { video: "y" }), {
-      name: "b",
-    });
-    const third = new Graph<Ports, { video: string }>();
-    make("two", "made by two").addNode(third, { name: "a", meta: { video: "x" } });
-    const [one] = await execute(first, ctx);
-    const [again] = await execute(second, ctx);
-    const [two] = await execute(third, ctx);
-    assert.ok(one && again && two, "each graph settles its node");
-    expect({
-      one: outcome(one),
-      again: [again.name, outcome(again), resultActionKey(again) === resultActionKey(one)],
-      two: [outcome(two), resultActionKey(two) === resultActionKey(one)],
-      read: [await fs.readText(outputsOf(again)), await fs.readText(outputsOf(two))],
-    }).toEqual({
-      one: "ran",
-      again: ["v:b", "hit", true],
-      two: ["ran", false],
-      read: ["made by one", "made by two"],
-    });
+    const g = new Graph<Ports>();
+    task(g, "n", { inputs: { opts: { b: [1, 2], a: 1, c: undefined }, gone: undefined } });
+    const [r] = await execute(g, ctx);
+    expect(await fs.readText(outputsOf(r))).toBe('{"id":"n","opts":{"b":[1,2],"a":1}}');
   });
 
-  test("deps key by role: renaming nodes re-keys nothing, swapping deps between roles re-keys", async () => {
-    const { ctx } = setup();
-    const build = (names: [string, string], swap = false) => {
-      const g = new Graph<Ports>();
-      const a = task(g, names[0], { inputs: { id: "A" } });
-      const b = task(g, names[1], { inputs: { id: "B" } });
-      task(g, "join", { deps: swap ? { left: b, right: a } : { left: a, right: b } });
-      return g;
-    };
-    expect([
-      statuses(await execute(build(["a", "b"]), ctx)),
-      statuses(await execute(build(["x", "y"]), ctx)),
-      statuses(await execute(build(["x", "y"], true), ctx)),
-    ]).toEqual([
-      { a: "ran", b: "ran", join: "ran" },
-      { x: "hit", y: "hit", join: "hit" },
-      { x: "hit", y: "hit", join: "ran" },
-    ]);
-  });
-
-  test("a value input keys as JSON with sorted keys, undefined properties dropped, and reads as written", async () => {
-    const { ctx, fs } = setup();
-    const run = async (inputs: InputRecord) => {
-      const g = new Graph<Ports>();
-      task(g, "n", { inputs });
-      const [r] = await execute(g, ctx);
-      assert.ok(r, "the node settles");
-      return [outcome(r), await fs.readText(outputsOf(r))];
-    };
-    expect([
-      await run({ opts: { a: 1, b: [1, 2] } }),
-      await run({ opts: { b: [1, 2], a: 1, c: undefined }, gone: undefined }),
-      await run({ opts: { a: "1", b: [1, 2] } }),
-      await run({ opts: { a: 1, b: [2, 1] } }),
-    ]).toEqual([
-      ["ran", '{"id":"n","opts":{"a":1,"b":[1,2]}}'],
-      ["hit", '{"id":"n","opts":{"a":1,"b":[1,2]}}'],
-      ["ran", '{"id":"n","opts":{"a":"1","b":[1,2]}}'],
-      ["ran", '{"id":"n","opts":{"a":1,"b":[2,1]}}'],
-    ]);
-  });
-
-  test("a file input keys on its path and content, reads as a handle on the file, and is hashed by each node that declares it", async () => {
+  test("a file input reads as a handle on the file, and each node that declares it hashes it as it is looked up", async () => {
     const { ctx, fs } = setup();
     const hashed: string[] = [];
     const counting = {
       ...ctx,
       fs: { ...fs, hashFile: (p: string) => (hashed.push(p), fs.hashFile(p)) },
     };
-    await fs.writeText("/src/a.ts", "a1");
     const reader = defineActionWithPorts({
       kind: "reader",
       nodeInputs: nodeInputs<{ id: string; src: FileInput }>,
@@ -368,27 +298,21 @@ describe("the action key", () => {
         out: await write(c, "out", `${c.inputs.src.path}: ${await c.inputs.src.text()}`),
       }),
     });
-    const run = async (add: (g: Graph<Ports>, name: string) => void) => {
+    const run = async () => {
       const g = new Graph<Ports>();
-      for (const name of ["one", "two", "three"]) add(g, name);
+      for (const name of ["one", "two", "three"])
+        reader.addNode(g, { name, inputs: { id: name, src: file("/src/a.ts") } });
       const results = await execute(g, counting);
-      return [statuses(results), await fs.readText(outputsOf(results[0]))];
+      return fs.readText(outputsOf(results[0]));
     };
-    const asFile = (g: Graph<Ports>, name: string) =>
-      reader.addNode(g, { name, inputs: { id: name, src: file("/src/a.ts") } });
-    const first = await run(asFile);
+    await fs.writeText("/src/a.ts", "a1");
+    const first = await run();
     const firstHashed = hashed.filter((p) => p === "/src/a.ts").length;
-    const same = await run(asFile);
     await fs.writeText("/src/a.ts", "a2");
-    const edited = await run(asFile);
-    const asValue = await run((g, name) => task(g, name, { inputs: { src: "/src/a.ts" } }));
-    const ran = { one: "ran", two: "ran", three: "ran" } as const;
-    expect({ first, firstHashed, same, edited, asValue }).toEqual({
-      first: [ran, "/src/a.ts: a1"],
+    expect({ first, firstHashed, edited: await run() }).toEqual({
+      first: "/src/a.ts: a1",
       firstHashed: 3,
-      same: [{ one: "hit", two: "hit", three: "hit" }, "/src/a.ts: a1"],
-      edited: [ran, "/src/a.ts: a2"],
-      asValue: [ran, '{"id":"one","src":"/src/a.ts"}'],
+      edited: "/src/a.ts: a2",
     });
   });
 
@@ -419,15 +343,11 @@ describe("the action key", () => {
     ]);
   });
 
-  test("an output ref reads as a handle on the dep's published file and keys by role and output name, not by its path, so a dep rebuilt to the same content keeps it cached", async () => {
+  test("an output ref reads as a handle on the dep's committed file", async () => {
     const { ctx, fs } = setup();
     const pack = defineActionWithPorts({
       kind: "pack",
-      nodeInputs: nodeInputs<{ version: string }>,
-      action: async (c) => ({
-        tarball: await write(c, "pkg.tgz", "pkg"),
-        notes: await write(c, "notes.md", "notes"),
-      }),
+      action: async (c) => ({ tarball: await write(c, "pkg.tgz", "pkg") }),
     });
     const publish = defineActionWithPorts({
       kind: "publish",
@@ -438,38 +358,26 @@ describe("the action key", () => {
         return { out: await write(c, "cmd.json", JSON.stringify(argv)) };
       },
     });
-    const run = async (version: string) => {
-      const g = new Graph<Ports>();
-      const p = pack.addNode(g, { inputs: { version } });
-      publish.addNode(g, {
-        deps: { pack: p },
-        inputs: ({ pack }) => ({ cmd: ["npm", "publish", pack.tarball] }),
-      });
-      const results = await execute(g, ctx);
-      const [packed, published] = results;
-      const tarball = namedOutput(successDetailsOf(packed).entry.outputs, "tarball");
-      return {
-        statuses: statuses(results),
-        reads:
-          (await fs.readText(outputsOf(published))) === JSON.stringify(["npm", "publish", tarball]),
-      };
-    };
-    expect([await run("1.0"), await run("1.1")]).toEqual([
-      { statuses: { pack: "ran", publish: "ran" }, reads: true },
-      { statuses: { pack: "ran", publish: "hit" }, reads: false },
-    ]);
+    const g = new Graph<Ports>();
+    const p = pack.addNode(g, {});
+    publish.addNode(g, {
+      deps: { pack: p },
+      inputs: ({ pack }) => ({ cmd: ["npm", "publish", pack.tarball] }),
+    });
+    const [packed, published] = await execute(g, ctx);
+    const tarball = namedOutput(successDetailsOf(packed).entry.outputs, "tarball");
+    expect(await fs.readText(outputsOf(published))).toBe(
+      JSON.stringify(["npm", "publish", tarball]),
+    );
   });
-});
 
-describe("refs and outputs in the key", () => {
-  test("a role that picks some of its dep's outputs keys on those alone and reads only those, settled or maybe", async () => {
+  test("a role that picks some of its dep's outputs reads only those, settled or maybe", async () => {
     const { ctx } = setup();
     const pair = defineActionWithPorts({
       kind: "pair-of-files",
-      nodeInputs: nodeInputs<{ main: string; extra: string }>,
       action: async (c) => ({
-        main: await write(c, "main.txt", c.inputs.main),
-        extra: await write(c, "extra.txt", c.inputs.extra),
+        main: await write(c, "main.txt", "main"),
+        extra: await write(c, "extra.txt", "extra"),
       }),
     });
     const read: string[][] = [];
@@ -493,137 +401,17 @@ describe("refs and outputs in the key", () => {
       deps: { pair: maybe(pick(pair, "main")) },
       action: (c) => readerOf("maybe")(c, c.depOutputs.pair),
     });
-    const run = async (main: string, extra: string) => {
-      const g = new Graph<Ports>();
-      const p = pair.addNode(g, { inputs: { main, extra } });
-      required.addNode(g, { deps: { pair: p } });
-      settledRole.addNode(g, { deps: { pair: settled(p) } });
-      maybeRole.addNode(g, { deps: { pair: p } });
-      return statuses(await execute(g, ctx));
-    };
-    const first = await run("a", "x");
-    const readFirst = read.splice(0);
-    expect({
-      first,
-      readFirst,
-      extraChanged: await run("a", "y"),
-      mainChanged: await run("b", "y"),
-    }).toEqual({
-      first: { "pair-of-files": "ran", required: "ran", settled: "ran", maybe: "ran" },
-      readFirst: [
-        ["required", "main"],
-        ["settled", "main"],
-        ["maybe", "main"],
-      ],
-      extraChanged: {
-        "pair-of-files": "ran",
-        required: "hit",
-        settled: "hit",
-        maybe: "hit",
-      },
-      mainChanged: { "pair-of-files": "ran", required: "ran", settled: "ran", maybe: "ran" },
-    });
-  });
-
-  type Pair = { main: string; extra: string };
-  const pair = defineActionWithPorts({
-    kind: "pair",
-    inputs: { version: 1 },
-    action: async (c) => ({
-      main: await write(c, "m", "same"),
-      extra: await write(c, "e", "same"),
-    }),
-  });
-  /** The key of `use`, a node `declare` adds beside p and q, two nodes of `pair`. */
-  const keyOfUse = async (
-    ctx: ReturnType<typeof setup>["ctx"],
-    names: [string, string],
-    declare: (g: Graph<Ports>, p: NodeRef<Pair>, q: NodeRef<Pair>) => void,
-  ) => {
-    // p and q share one declaration, so one entry: they differ in name and role only.
     const g = new Graph<Ports>();
-    declare(g, pair.addNode(g, { name: names[0] }), pair.addNode(g, { name: names[1] }));
-    const use = (await execute(g, ctx)).find((r) => r.name === "use");
-    assert.ok(use, "use settles");
-    return resultActionKey(use);
-  };
-  const leftAndRight =
-    (role: "left" | "right", output: keyof Pair) =>
-    (g: Graph<Ports>, p: NodeRef<Pair>, q: NodeRef<Pair>) =>
-      void task(g, "use", {
-        deps: { left: p, right: q },
-        inputs: (refs) => ({ file: refs[role][output] }),
-      });
-  const twoRoles =
-    (role: "main" | "alias", deps: "same" | "reordered" | "split") =>
-    (g: Graph<Ports>, p: NodeRef<Pair>, q: NodeRef<Pair>) =>
-      void task(g, "use", {
-        deps: {
-          same: { main: p, alias: p },
-          reordered: { alias: p, main: p },
-          split: { main: p, alias: q },
-        }[deps],
-        inputs: (refs) => ({ file: refs[role].main }),
-      });
-
-  test("an output ref keys by the role it points through and its output's name, never by its node's name or by the output name alone", async () => {
-    const { ctx } = setup();
-    const leftMain = await keyOfUse(ctx, ["p", "q"], leftAndRight("left", "main"));
-    expect({
-      renamed: (await keyOfUse(ctx, ["x", "y"], leftAndRight("left", "main"))) === leftMain,
-      otherOutput: (await keyOfUse(ctx, ["p", "q"], leftAndRight("left", "extra"))) === leftMain,
-      otherRole: (await keyOfUse(ctx, ["p", "q"], leftAndRight("right", "main"))) === leftMain,
-    }).toEqual({ renamed: true, otherOutput: false, otherRole: false });
-  });
-
-  test("a ref to a node two roles name keys by all its roles, in sorted order, through either role", async () => {
-    const { ctx } = setup();
-    const both = await keyOfUse(ctx, ["p", "q"], twoRoles("main", "same"));
-    expect({
-      reordered: (await keyOfUse(ctx, ["p", "q"], twoRoles("main", "reordered"))) === both,
-      throughAlias: (await keyOfUse(ctx, ["p", "q"], twoRoles("alias", "same"))) === both,
-      oneRole: (await keyOfUse(ctx, ["p", "q"], twoRoles("main", "split"))) === both,
-    }).toEqual({ reordered: true, throughAlias: true, oneRole: false });
-  });
-
-  test("a ref from the inputs function keys as the same ref written from its node did", async () => {
-    const { ctx } = setup();
-    // The keys these nodes had when their refs were written as p.outputs.main (25a5ee4), but
-    // for their kind, which joined the key later.
-    expect({
-      leftMain: await keyOfUse(ctx, ["p", "q"], leftAndRight("left", "main")),
-      twoRoles: await keyOfUse(ctx, ["p", "q"], twoRoles("main", "same")),
-    }).toEqual({
-      leftMain: "592dd623a1ac0eddbeac5e2ff3a61046869ecc409f520fd7057efdebc71564a3",
-      twoRoles: "b97bb03bf57c20b783a577f3f5d9efacdc3cc760527f8e01df06ab27acd0ab76",
-    });
-  });
-
-  test("a content hash covers each output's name, each file's path in its output dir and its content, wherever the dir sits", async () => {
-    const { ctx } = setup();
-    const hashOf = async (version: number, files: Record<string, [string, string]>) => {
-      const g = new Graph<Ports>();
-      defineActionWithPorts({
-        kind: "producer",
-        inputs: { version },
-        action: async (c) => {
-          const outputs: Record<string, string> = {};
-          for (const [name, [path, content]] of Object.entries(files))
-            outputs[name] = await write(c, path, content);
-          return outputs;
-        },
-      }).addNode(g, {});
-      const [r] = await execute(g, ctx);
-      return successDetailsOf(r).entry.contentHash;
-    };
-    const base = await hashOf(1, { main: ["x.txt", "A"], extra: ["y.txt", "B"] });
-    expect({
-      elsewhere: (await hashOf(2, { main: ["x.txt", "A"], extra: ["y.txt", "B"] })) === base,
-      swapped: (await hashOf(3, { main: ["y.txt", "B"], extra: ["x.txt", "A"] })) === base,
-      moved: (await hashOf(4, { main: ["z.txt", "A"], extra: ["y.txt", "B"] })) === base,
-      renamed: (await hashOf(5, { first: ["x.txt", "A"], extra: ["y.txt", "B"] })) === base,
-      edited: (await hashOf(6, { main: ["x.txt", "C"], extra: ["y.txt", "B"] })) === base,
-    }).toEqual({ elsewhere: true, swapped: false, moved: false, renamed: false, edited: false });
+    const p = pair.addNode(g, {});
+    required.addNode(g, { deps: { pair: p } });
+    settledRole.addNode(g, { deps: { pair: settled(p) } });
+    maybeRole.addNode(g, { deps: { pair: p } });
+    await execute(g, ctx);
+    expect(read).toEqual([
+      ["required", "main"],
+      ["settled", "main"],
+      ["maybe", "main"],
+    ]);
   });
 
   test("an input file that cannot be read fails the node before it gets a key", async () => {

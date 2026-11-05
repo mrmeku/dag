@@ -7,6 +7,7 @@ import { createBunFileSystem } from "../filesystem/bun.ts";
 import { createMemoryFileSystem } from "../filesystem/index.ts";
 import { createNodeFileSystem } from "../filesystem/node.ts";
 import { commitEntry, lookupEntry, newStagingDir, pruneCache } from "./cache.ts";
+import { hashOutputFiles } from "./content-addressing.ts";
 import type { FileSystem } from "./ports.ts";
 
 /** The time a test that reads no last use gives the cache. */
@@ -239,6 +240,47 @@ describe("the cache", () => {
         fileStats: { srt: { size: 9, mtimeMs: anyNumber }, b: { size: 1, mtimeMs: anyNumber } },
       },
       outputs: [outputsIn("first"), outputsIn("first"), outputsIn("restored")],
+    });
+  });
+
+  test("a content hash covers each output's name, each file's path in its output dir and its content, wherever the dir sits, and is built as it was", async () => {
+    const fs = createMemoryFileSystem();
+    let dirs = 0;
+    const hashOf = async (files: Record<string, [string, string]>) => {
+      const dir = `/out/${++dirs}`;
+      const outputs: Record<string, string> = {};
+      for (const [name, [path, content]] of Object.entries(files)) {
+        await fs.writeText(`${dir}/${path}`, content);
+        outputs[name] = path;
+      }
+      return (await hashOutputFiles(outputs, fs.hashFile, dir)).contentHash;
+    };
+    const base = await hashOf({ main: ["x.txt", "A"], extra: ["y.txt", "B"] });
+    const dir = `/out/${++dirs}`;
+    await fs.writeText(`${dir}/m`, "same");
+    await fs.writeText(`${dir}/e`, "same");
+    // The hashes graph's tests key a node of "pair" on: a change here changes those keys.
+    const pinned = await hashOutputFiles({ main: "m", extra: "e" }, fs.hashFile, dir);
+    expect({
+      pinned,
+      elsewhere: (await hashOf({ main: ["x.txt", "A"], extra: ["y.txt", "B"] })) === base,
+      swapped: (await hashOf({ main: ["y.txt", "B"], extra: ["x.txt", "A"] })) === base,
+      moved: (await hashOf({ main: ["z.txt", "A"], extra: ["y.txt", "B"] })) === base,
+      renamed: (await hashOf({ first: ["x.txt", "A"], extra: ["y.txt", "B"] })) === base,
+      edited: (await hashOf({ main: ["x.txt", "C"], extra: ["y.txt", "B"] })) === base,
+    }).toEqual({
+      pinned: {
+        contentHash: "a249db94125e668c98eac6361209b5a1121b40810c66314ff925c0f2128403b0",
+        outputHashes: {
+          main: "11512a3e377495cf8b673d3cf67bccc3127646b0ba514134912ba2e1f1bbe5e3",
+          extra: "463c8e0c18bb099e0382ab3e094d3ac18b237bb7c2bfea73cc579bea35bb5181",
+        },
+      },
+      elsewhere: true,
+      swapped: false,
+      moved: false,
+      renamed: false,
+      edited: false,
     });
   });
 
