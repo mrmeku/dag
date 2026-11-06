@@ -5,17 +5,16 @@
  * any other. When the job is cancelled the runner signals this process, the run stops, and the
  * `post` entry runs the post steps it did not reach.
  */
-import { abortOnSignals } from "../ports/real.ts";
-import { runWorkflow } from "../runner.ts";
-import { actionOptions, noticeUnavailableServices } from "./env.ts";
+import { nodejsRuntime } from "../nodejs/index.ts";
+import { runWorkflow } from "../run/index.ts";
+import { actionOptions } from "./env.ts";
 
 export * from "../index.ts";
 
-export async function main(): Promise<void> {
-  noticeUnavailableServices();
+async function main(): Promise<void> {
   const outcome = await runWorkflow({
-    ...(await actionOptions(import.meta.url)),
-    signal: abortOnSignals(),
+    ...(await actionOptions(import.meta.url, "run")),
+    signal: nodejsRuntime.abortOnSignals(),
   });
   process.exitCode = outcome.exitCode;
 }

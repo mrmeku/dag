@@ -14,10 +14,11 @@
   },
   "exports": {
     ".": "./src/index.ts",
-    "./github": "./src/ports/github.ts"
+    "./github": "./src/github.ts",
+    "./local": "./src/local.ts"
   },
   "bin": {
-    "dag": "./src/cli.ts"
+    "dag": "./src/cli/main.ts"
   },
   "scripts": {
     "test": "node --test \"src/**/*.test.ts\"",

@@ -48,7 +48,8 @@ export async function processEach(
   for (const node of graph.describe()) {
     const files: string[] = [];
     const commands: string[][] = [];
-    // A file outside the cache dir is an input, hashed alike whatever it holds.
+    // A file outside the cache dir is an input, hashed alike whatever it holds; actions read the
+    // real files.
     const fs = {
       ...ports.fs,
       hashFile: async (path: string) =>
@@ -61,7 +62,7 @@ export async function processEach(
       node.deps.flatMap((dep) => (entries[dep] ? [[dep, entries[dep]]] : [])),
     );
     const context = {
-      ports: { ...ports, fs, exec },
+      ports: { ...ports, exec },
       fs,
       cacheDir: CACHE_DIR,
       clock: wallClock,

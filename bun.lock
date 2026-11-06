@@ -35,7 +35,7 @@
     "packages/dagworkflows": {
       "name": "@mrmeku/dagworkflows",
       "bin": {
-        "dag": "./src/cli.ts",
+        "dag": "./src/cli/main.ts",
       },
       "dependencies": {
         "@actions/glob": "^0.7.0",

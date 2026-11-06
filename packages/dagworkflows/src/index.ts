@@ -8,8 +8,13 @@ export {
   type SettledOutputRef,
   type SettledRef,
 } from "@mrmeku/dagraph";
-export type { ActionsCacheSpec, ActionsCacheTasks, SaveSpec } from "./cache.ts";
-export type { CmdTaskSpec, ShellTaskSpec } from "./commands.ts";
+export {
+  nullCacheStore,
+  type ActionsCacheSpec,
+  type ActionsCacheTasks,
+  type CacheStore,
+  type SaveSpec,
+} from "./actions-cache/index.ts";
 export {
   DEFAULT_BUILD_LOG_DIR,
   DEFAULT_CACHE_DIR,
@@ -17,87 +22,77 @@ export {
   DEFAULT_EXCLUDES,
   DEFAULT_HISTORY_DIR,
   DEFAULT_SUMMARY_PATH,
-} from "./config.ts";
+} from "./config/index.ts";
+export {
+  artifactServiceAvailable,
+  createActionsArtifactStore,
+  createActionsCacheStore,
+  githubActionsPlatform,
+  type ToolkitLoader,
+} from "./github-actions/index.ts";
+export type { SummaryRenderer } from "./github-step-summary/index.ts";
 export {
   createRunHistory,
   readRunHistory,
   runHistoryLive,
   type RunHistory,
   type RunHistoryFile,
-} from "./history.ts";
-export { failureMessage, formatDuration } from "./kernel/format.ts";
-export type { NodeReport } from "./kernel/report.ts";
-export type {
-  CancelledNodeState,
-  DepFailedNodeState,
-  FailedNodeState,
-  FailureNodeState,
-  InFlightNodeState,
-  NodeAction,
-  NodeState,
-  Pass,
-  PendingNodeState,
-  RunAction,
-  RunLifecycle,
-  RunState,
-  SettledNodeState,
-  SucceededNodeState,
-} from "./kernel/run-slice.ts";
-export * as selectors from "./kernel/selectors.ts";
-export { createRunStore, type RunListener, type RunStore } from "./kernel/store.ts";
-export type {
-  AnnotationLevel,
-  ArtifactStore,
-  ArtifactUploadOptions,
-  CacheStore,
-  CheckUpdate,
-  CiContext,
-  Clock,
-  Exec,
-  ExecOptions,
-  ExecResult,
-  FileSystem,
-  Host,
-  Lockfile,
-  Ports,
-  WorkflowPorts,
-} from "./ports.ts";
+} from "./history/index.ts";
 export {
-  artifactServiceAvailable,
-  createActionsArtifactStore,
+  nullHost,
+  type AnnotationLevel,
+  type CheckUpdate,
+  type CiContext,
+  type Host,
+} from "./host/index.ts";
+export {
+  failureMessage,
+  formatDuration,
+  selectors,
+  type CancelledNodeState,
+  type DepFailedNodeState,
+  type FailedNodeState,
+  type FailureNodeState,
+  type InFlightNodeState,
+  type NodeAction,
+  type NodeReport,
+  type NodeState,
+  type Pass,
+  type PendingNodeState,
+  type RunAction,
+  type RunLifecycle,
+  type RunState,
+  type SettledNodeState,
+  type SucceededNodeState,
+} from "./kernel/index.ts";
+export { createLocalHost } from "./local/local-host.ts";
+export type { Lockfile } from "./lock/index.ts";
+export { clockAt, manualTimer, memoryRuntime, okExec, steppingClock } from "./memory/index.ts";
+export {
+  abortOnSignals,
+  createExec,
+  hashFiles,
+  nodejsRuntime,
+  systemClock,
+} from "./nodejs/index.ts";
+export {
   createMemoryArtifactStore,
-  nullArtifactStore,
-  type MemoryArtifactStore,
-} from "./ports/artifact-store.ts";
-export {
-  createActionsCacheStore,
   createMemoryCacheStore,
-  nullCacheStore,
-  type MemoryCacheStore,
-} from "./ports/cache-store.ts";
-export { createLocalHost, nullHost } from "./ports/local.ts";
-export {
-  clockAt,
   createRecordingHost,
-  createTestPorts,
-  okExec,
-  steppingClock,
+  recordingPlatform,
+  type MemoryArtifactStore,
+  type MemoryCacheStore,
   type RecordedHost,
-} from "./ports/memory.ts";
-export { abortOnSignals, createExec, createFileSystem, systemClock } from "./ports/real.ts";
-export type { PostField, PostSpec } from "./post.ts";
-export { createReporter } from "./reporter.ts";
+} from "./recording/index.ts";
+export { createReporter } from "./reporter/index.ts";
 export {
-  runJob,
-  runPost,
-  runWorkflow,
-  type Implementation,
-  type RunDataPaths,
-  type RunOptions,
-  type RunOutcome,
-} from "./runner.ts";
-export { selectNodes } from "./select.ts";
-export { hashFiles, postNodes, type CommandCause, type UploadArtifactSpec } from "./steps.ts";
+  createRunStore,
+  type RunListener,
+  type RunReport,
+  type RunStore,
+} from "./run-store/index.ts";
+export { runJob, runPost, runWorkflow, type RunOptions, type RunOutcome } from "./run/index.ts";
+export { postNodes, selectNodes } from "./selection/index.ts";
 export {
   DEFAULT_SUMMARY_RENDERERS,
   renderCriticalPath,
@@ -106,15 +101,38 @@ export {
   renderStatus,
   renderTable,
   renderTimeline,
-  type RunReport,
-  type SummaryRenderer,
-} from "./summary.ts";
-export type { ActionTaskSpec } from "./task.ts";
+} from "./summary-renderers/index.ts";
+export type {
+  Clock,
+  CmdTaskSpec,
+  CommandCause,
+  Exec,
+  ExecOptions,
+  ExecResult,
+  ShellTaskSpec,
+} from "./tasks/index.ts";
+export { createTestPorts } from "./test-ports/index.ts";
+export {
+  nullArtifactStore,
+  type ArtifactStore,
+  type ArtifactUploadOptions,
+  type FileMatcher,
+  type UploadArtifactSpec,
+} from "./upload-artifact/index.ts";
+export { processPorts, type Platform, type Runtime } from "./wiring/index.ts";
 export {
   createWorkflow,
   defineWorkflow,
+  type ActionTaskSpec,
   type GroupsOf,
+  type Implementation,
+  type Ports,
+  type PostField,
+  type PostSpec,
+  type RunDataPaths,
   type TaskSpec,
   type Workflow,
   type WorkflowDef,
-} from "./workflow.ts";
+  type WorkflowFileSystem,
+  type WorkflowPorts,
+} from "./workflow/index.ts";

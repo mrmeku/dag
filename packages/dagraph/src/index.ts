@@ -1,6 +1,12 @@
 // The API reference's name for this entry point: TypeDoc names the "." export "".
 /** @module index */
-export { pruneCache, type CacheEntry, type FileSystem, type PruneOptions } from "./cache/index.ts";
+export {
+  isMissingFileError,
+  pruneCache,
+  type CacheEntry,
+  type FileSystem,
+  type PruneOptions,
+} from "./cache/index.ts";
 export {
   execute,
   startGlobalTimer,
@@ -77,6 +83,7 @@ export {
 } from "./lookup-or-run/index.ts";
 export {
   countResultsByStatus,
+  errorMessage,
   isResult,
   isSucceeded,
   orchestrate,

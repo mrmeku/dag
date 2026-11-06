@@ -6,7 +6,8 @@
  * pinned to the same version; then `npm pack` writes `<name>-<version>.tgz` into the out dir and
  * prints its name. Bare imports of a sibling package stay bare: npm resolves them. A package in
  * INLINE_TYPES ships its declarations bundled, one file per export under `types/`, with those
- * packages' types inlined, so they never depend on a package the consumer may not have installed.
+ * packages' types inlined and OPTIONAL_TYPES' imported behind `// @ts-ignore`, so a consumer's
+ * typecheck never needs a package the consumer may not have installed.
  */
 import { spawnSync } from "node:child_process";
 import {
@@ -18,6 +19,7 @@ import {
   rmSync,
   writeFileSync,
 } from "node:fs";
+import { isBuiltin } from "node:module";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { rollup } from "rollup";
@@ -31,10 +33,25 @@ const INLINE_TYPES: Record<string, Record<string, string>> = {
   dagworkflows: {
     "@actions/artifact": "@actions/artifact",
     "@actions/cache": "@actions/cache",
+    "@actions/core": "@actions/core",
     "@actions/github": "@actions/github",
     "proper-lockfile": "@types/proper-lockfile",
     retry: "@types/retry",
   },
+};
+
+/**
+ * Per package, the packages its declarations import behind `// @ts-ignore`, so a consumer without
+ * them reads their types as `any`: an inlined optional peer's own dependencies, too large to
+ * inline. `ToolkitLoader` names `@actions/github`'s `getOctokit`, typed by megabytes of Octokit's
+ * REST API.
+ */
+const OPTIONAL_TYPES: Record<string, string[]> = {
+  dagworkflows: [
+    "@octokit/core",
+    "@octokit/plugin-paginate-rest",
+    "@octokit/plugin-rest-endpoint-methods",
+  ],
 };
 
 const [pkg, version, outDir] = process.argv.slice(2);
@@ -70,6 +87,13 @@ function strings(value: unknown, field: string): Record<string, string> {
   return value;
 }
 
+/** The package a bare specifier names: `@scope/name/sub` is `@scope/name`. */
+const packageOf = (specifier: string) =>
+  specifier
+    .split("/")
+    .slice(0, specifier.startsWith("@") ? 2 : 1)
+    .join("/");
+
 /** Where `name` is installed, looked up from `from` as Node does. */
 const installed = (name: string, from: string): string | undefined => {
   const at = join(from, "node_modules", name);
@@ -78,13 +102,17 @@ const installed = (name: string, from: string): string | undefined => {
 };
 
 /**
- * Bundle the declarations of each export of the staged package into `types/<name>.d.ts`, with
- * `inline`'s types in them, and check that they import nothing but the package's dependencies.
+ * Bundle the declarations of each export of the staged package into `types/<name>.d.ts`, each on
+ * its own so that no type is left in a chunk no export names, with `inline`'s types in them and
+ * `optional`'s imports behind `// @ts-ignore`; and check that they import nothing else but the
+ * package's dependencies and Node's builtins, typed by the `@types/node` that their `NodeJS`
+ * globals need already.
  */
 async function bundleTypes(
   staged: string,
   exports: Record<string, string>,
   inline: Record<string, string>,
+  optional: string[],
   dependencies: Record<string, string>,
 ) {
   // A package is looked up from this one, then from those before it, whose own dependency it may be.
@@ -97,27 +125,41 @@ async function bundleTypes(
       return [name, [at]];
     }),
   );
-  const bundle = await rollup({
-    input: Object.fromEntries(
-      Object.entries(exports).map(([sub, file]) => [
-        sub === "." ? "index" : sub.slice(2),
-        join(staged, file.replace(/\.ts$/, ".d.ts")),
-      ]),
-    ),
-    plugins: [
-      dts({
-        includeExternal: [...Object.keys(inline), ...Object.values(inline)],
-        compilerOptions: { paths },
-      }),
-    ],
-    onwarn: (warning) => {
-      if (warning.code !== "UNRESOLVED_IMPORT") throw new Error(warning.message);
-    },
-  });
-  const { output } = await bundle.write({ dir: join(staged, "types"), format: "es" });
-  const own = new Set(output.map((o) => o.fileName));
-  const imported = output.flatMap((o) => (o.type === "chunk" ? o.imports : []));
-  const stray = imported.filter((i) => !own.has(i) && !(i in dependencies));
+  const outputs = await Promise.all(
+    Object.entries(exports).map(async ([sub, file]) => {
+      const bundle = await rollup({
+        input: join(staged, file.replace(/\.ts$/, ".d.ts")),
+        plugins: [
+          dts({
+            includeExternal: [...Object.keys(inline), ...Object.values(inline)],
+            compilerOptions: { paths },
+          }),
+          {
+            name: "optional-types",
+            renderChunk: (code) =>
+              code.replace(/^import .*'([^']+)';$/gm, (line, from: string) =>
+                optional.includes(packageOf(from))
+                  ? `// @ts-ignore ${packageOf(from)} is an optional peer's dependency\n${line}`
+                  : line,
+              ),
+          },
+        ],
+        onwarn: (warning) => {
+          if (warning.code !== "UNRESOLVED_IMPORT") throw new Error(warning.message);
+        },
+      });
+      const name = sub === "." ? "index" : sub.slice(2);
+      const { output } = await bundle.write({
+        file: join(staged, "types", `${name}.d.ts`),
+        format: "es",
+      });
+      return output;
+    }),
+  );
+  const imported = outputs.flat().flatMap((o) => (o.type === "chunk" ? o.imports : []));
+  const stray = imported.filter(
+    (i) => !isBuiltin(i) && !(packageOf(i) in dependencies) && !optional.includes(packageOf(i)),
+  );
   if (stray.length)
     throw new Error(`${pkg}'s declarations import ${[...new Set(stray)].join(", ")}`);
 }
@@ -136,7 +178,8 @@ try {
   );
   const inline = INLINE_TYPES[pkg];
   const exports = inline && strings(manifest["exports"], "exports");
-  if (exports) await bundleTypes(join(stage, pkg), exports, inline, dependencies);
+  if (exports)
+    await bundleTypes(join(stage, pkg), exports, inline, OPTIONAL_TYPES[pkg] ?? [], dependencies);
   const staged = {
     ...toJsRecord(rest),
     version,

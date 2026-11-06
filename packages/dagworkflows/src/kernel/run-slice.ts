@@ -1,5 +1,6 @@
 import type { ExecutionEvent, Node, NodeResult } from "@mrmeku/dagraph";
-import { isDebugCommand, isWarningCommand, plainLine, textAfterLastReturn } from "./format.ts";
+import { isDebugCommand, warningsOf } from "../github-workflow-commands/index.ts";
+import { plainLine, textAfterLastReturn } from "./format.ts";
 import { isSettled, startedAtOf } from "./selectors.ts";
 
 /** What every node has: the pass's node and what its command printed. */
@@ -100,8 +101,9 @@ export interface RunState {
 }
 
 /**
- * One pass of the runner: the run, or the post pass after a cancel. A post pass that owes
- * nothing is begun and never finished; GitHub still opens its banner's group.
+ * One pass of a run: its main pass, or a post pass paying the post steps a run owes. A post pass
+ * that owes nothing is begun with no banner and no nodes and never finished, so GitHub draws
+ * nothing for it.
  */
 export interface Pass {
   banner?: { title: string; lines: string[] };
@@ -126,7 +128,7 @@ export type RunAction =
 
 export const initialRunState: RunState = { nodes: new Map(), lifecycle: { status: "running" } };
 
-export const initialNodeState = (node: Node): PendingNodeState => ({
+const initialNodeState = (node: Node): PendingNodeState => ({
   node,
   status: "pending",
   unfinishedLine: "",
@@ -166,7 +168,8 @@ function linesAfter(state: NodeState, chunk: string) {
   const ended = completedLines(state.unfinishedLine, chunk);
   return {
     unfinishedLine: unfinishedLineAfter(state.unfinishedLine, chunk),
-    lastLine: ended.findLast((line) => line.trim() && !isWarningCommand(line)) ?? state.lastLine,
+    lastLine:
+      ended.findLast((line) => line.trim() && warningsOf([line]).length === 0) ?? state.lastLine,
     printed: state.printed || ended.length > 0,
   };
 }
@@ -177,59 +180,63 @@ export function settledWithLog(state: SettledNodeState, log: string[]): SettledN
 }
 
 /** A node after `action`. */
-export function nodeReducer(state: NodeState, action: NodeAction): NodeState {
-  switch (action.type) {
-    case "output":
-      return { ...state, ...linesAfter(state, action.chunk) };
-    case "logRead":
-      return isSettled(state) ? settledWithLog(state, action.log) : state;
-  }
-  const { occurredAt } = action;
+function nodeReducer(state: NodeState, action: NodeAction): NodeState {
   const lines = {
     node: state.node,
     unfinishedLine: state.unfinishedLine,
     lastLine: state.lastLine,
     printed: state.printed,
   };
-  if (action.type === "dispatch") return { ...lines, status: "dispatched", startedAt: occurredAt };
-  if (action.type === "pending") return { ...lines, status: "pending" };
-  if (action.type === "start") return { ...lines, status: "running", startedAt: occurredAt };
-  // The command has exited, ending its unfinished line if it left one.
-  const ended = {
-    ...lines,
-    ...(state.unfinishedLine && linesAfter(state, "\n")),
-    unfinishedLine: "",
-    endedAt: occurredAt,
-  };
-  const { result } = action;
-  // From its start, or a cache hit's dispatch; a node settled unheard of is timed from its settle.
-  const startedAt = startedAtOf(state) ?? occurredAt;
-  switch (result.status) {
-    case "succeeded":
-      return { ...ended, status: "succeeded", result, startedAt };
-    case "failed": {
-      const { details, ...rest } = result;
-      if (details && "elapsed" in details)
-        return { ...ended, status: "failed", result: { ...rest, details }, startedAt };
-      return { ...ended, status: "failed", result: { ...rest, ...(details && { details }) } };
-    }
-    case "dep-failed":
-      return { ...ended, status: "dep-failed", result };
-    case "cancelled": {
-      const { details, ...rest } = result;
-      if (details?.elapsed === undefined)
-        return {
-          ...ended,
-          status: "cancelled",
-          result: { ...rest, ...(details && { details: { actionKey: details.actionKey } }) },
-        };
-      const { elapsed, actionKey } = details;
-      return {
-        ...ended,
-        status: "cancelled",
-        result: { ...rest, details: { actionKey, elapsed } },
-        startedAt,
+  switch (action.type) {
+    case "output":
+      return { ...state, ...linesAfter(state, action.chunk) };
+    case "logRead":
+      return isSettled(state) ? settledWithLog(state, action.log) : state;
+    case "dispatch":
+      return { ...lines, status: "dispatched", startedAt: action.occurredAt };
+    case "pending":
+      return { ...lines, status: "pending" };
+    case "start":
+      return { ...lines, status: "running", startedAt: action.occurredAt };
+    case "result": {
+      const { result, occurredAt } = action;
+      // The command has exited, ending its unfinished line if it left one.
+      const ended = {
+        ...lines,
+        ...(state.unfinishedLine && linesAfter(state, "\n")),
+        unfinishedLine: "",
+        endedAt: occurredAt,
       };
+      // From its start, or a cache hit's dispatch; a node settled unheard of is timed from its settle.
+      const startedAt = startedAtOf(state) ?? occurredAt;
+      switch (result.status) {
+        case "succeeded":
+          return { ...ended, status: "succeeded", result, startedAt };
+        case "failed": {
+          const { details, ...rest } = result;
+          if (details && "elapsed" in details)
+            return { ...ended, status: "failed", result: { ...rest, details }, startedAt };
+          return { ...ended, status: "failed", result: { ...rest, ...(details && { details }) } };
+        }
+        case "dep-failed":
+          return { ...ended, status: "dep-failed", result };
+        case "cancelled": {
+          const { details, ...rest } = result;
+          if (details?.elapsed === undefined)
+            return {
+              ...ended,
+              status: "cancelled",
+              result: { ...rest, ...(details && { details: { actionKey: details.actionKey } }) },
+            };
+          const { elapsed, actionKey } = details;
+          return {
+            ...ended,
+            status: "cancelled",
+            result: { ...rest, details: { actionKey, elapsed } },
+            startedAt,
+          };
+        }
+      }
     }
   }
 }

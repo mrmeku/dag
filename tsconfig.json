@@ -45,7 +45,8 @@
       "@mrmeku/dagraph/mermaid": ["./packages/dagraph/src/mermaid/index.ts"],
       "@mrmeku/dagraph/orchestration": ["./packages/dagraph/src/orchestration.ts"],
       "@mrmeku/dagworkflows": ["./packages/dagworkflows/src/index.ts"],
-      "@mrmeku/dagworkflows/github": ["./packages/dagworkflows/src/ports/github.ts"]
+      "@mrmeku/dagworkflows/github": ["./packages/dagworkflows/src/github.ts"],
+      "@mrmeku/dagworkflows/local": ["./packages/dagworkflows/src/local.ts"]
     }
   },
   // The action's bundle is build output: in the program it would reorder unions in the API reference.

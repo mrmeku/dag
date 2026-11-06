@@ -3,6 +3,7 @@ import {
   createMemoryCacheStore,
   createTestPorts,
   createWorkflow,
+  nodejsRuntime,
   okExec,
   selectNodes,
   type Ports,
@@ -20,8 +21,8 @@ describe("release workflow", () => {
     const build = async (ref: string) => {
       // An earlier attempt of this release, and main's cache before it.
       const cacheStore = createMemoryCacheStore(["dag-release-1.2.3-0", "dag-main-1"]);
-      // The $TARBALL each shell line got.
-      const tarballs = new Map<string | undefined, string | undefined>();
+      // The environment each command got, by its last argument.
+      const envs = new Map<string | undefined, Record<string, string | undefined> | undefined>();
       // pack and build:action write the files they declare.
       const { ports, fs, artifactStore } = createTestPorts({
         context: { ref, sha: "abc1234def" },
@@ -34,11 +35,13 @@ describe("release workflow", () => {
             if (script === "build")
               for (const file of ["main.js", "post.js"])
                 await fs.writeText(`${cmd[cmd.indexOf("--outdir") + 1]}/${file}`, file);
-            tarballs.set(cmd.at(-1), opts?.env?.["TARBALL"]);
+            envs.set(cmd.at(-1), opts?.env);
             return okExec.run(cmd, opts);
           },
         },
       });
+      // The packs' inputs are globbed from the real tree.
+      ports.fileMatcher = nodejsRuntime.fileMatcher;
       const graph = new Graph<Ports>();
       const context = await ports.host.context();
       const out = await fromDagDirectory(() =>
@@ -63,10 +66,10 @@ describe("release workflow", () => {
         processed,
         resultOf,
         ran,
-        tarballOf: (name: string) => tarballs.get(ran(name)?.at(-1)),
+        envOf: (name: string) => envs.get(ran(name)?.at(-1)),
         output,
         restored: processed.get("restore:cache")?.log,
-        saved: [...cacheStore.entries].slice(2),
+        saved: [...cacheStore.savedCaches].slice(2),
         uploads: [...artifactStore.uploads].map(([name, { files }]) => [
           name,
           files.map((file) => basename(file)),
@@ -101,13 +104,19 @@ describe("release workflow", () => {
           .get("pack:dagworkflows")
           ?.files.includes("packages/dagworkflows/package.json"),
         publishCmd: tagged.ran("publish:dagraph"),
-        publishTarball: tagged.tarballOf("publish:dagraph"),
+        publishTarball: tagged.envOf("publish:dagraph")?.["TARBALL"],
         dryRunPublishCmd: branch.ran("publish:dagraph"),
-        dryRunPublishTarball: branch.tarballOf("publish:dagraph"),
+        dryRunPublishTarball: branch.envOf("publish:dagraph")?.["TARBALL"],
         publishDagworkflowsDeps: by("publish:dagworkflows").deps.sort(),
         publishDagraphDeps: by("publish:dagraph").deps.sort(),
         actionCmd: tagged.ran("release:action"),
         actionDeps: by("release:action").deps.sort(),
+        endToEnd: {
+          cmd: tagged.ran("test:e2e"),
+          env: tagged.envOf("test:e2e"),
+          deps: by("test:e2e").deps.sort(),
+        },
+        requireAllDeps: by("require-all").deps.sort(),
         releaseDeps: by("release").deps.sort(),
         uploads: tagged.uploads,
         uploadDeps: ["upload:dagraph", "upload:action"].map((n) => by(n).deps),
@@ -117,7 +126,7 @@ describe("release workflow", () => {
         },
         uncached: tagged.nodes.filter((n) => n.cacheable === false).map((n) => n.name),
         checksAfterRestore: tagged.nodes
-          .filter((n) => /^(typecheck|lint|test:)/.test(n.name))
+          .filter((n) => /^(typecheck|lint|test:)/.test(n.name) && n.name !== "test:e2e")
           .every((n) => n.deps.join() === "restore:cache"),
       },
       {
@@ -137,6 +146,7 @@ describe("release workflow", () => {
           "save:cache",
           "test:dagraph",
           "test:dagworkflows",
+          "test:e2e",
           "typecheck",
           "upload:action",
           "upload:dagraph",
@@ -173,6 +183,30 @@ describe("release workflow", () => {
           tagged.output("build:action", "post"),
         ],
         actionDeps: ["build:action", "require-all"],
+        // The tarballs it publishes and the bundle it pushes, installed and run before either.
+        endToEnd: {
+          cmd: [
+            "node",
+            "--test",
+            "packages/dagworkflows/src/cli/main.e2e.ts",
+            "packages/dagworkflows/src/action/bundle.e2e.ts",
+          ],
+          env: {
+            DAGRAPH_TARBALL: tagged.output("pack:dagraph", "tarball"),
+            DAGWORKFLOWS_TARBALL: tagged.output("pack:dagworkflows", "tarball"),
+            ACTION_MAIN: tagged.output("build:action", "main"),
+            ACTION_POST: tagged.output("build:action", "post"),
+          },
+          deps: ["build:action", "pack:dagraph", "pack:dagworkflows"],
+        },
+        requireAllDeps: [
+          "docs",
+          "lint",
+          "test:dagraph",
+          "test:dagworkflows",
+          "test:e2e",
+          "typecheck",
+        ],
         releaseDeps: ["publish:dagraph", "publish:dagworkflows", "release:action"],
         uploads: [
           ["dagraph-1.2.3", ["mrmeku-dagraph-1.2.3.tgz"]],
@@ -196,6 +230,7 @@ describe("release workflow", () => {
             "restore:cache",
             "test:dagraph",
             "test:dagworkflows",
+            "test:e2e",
             "typecheck",
             "upload:action",
             "upload:dagraph",
@@ -215,6 +250,7 @@ describe("release workflow", () => {
             "restore:cache",
             "test:dagraph",
             "test:dagworkflows",
+            "test:e2e",
             "typecheck",
             "upload:action",
             "upload:dagraph",
@@ -226,6 +262,7 @@ describe("release workflow", () => {
           "upload:dagraph",
           "upload:dagworkflows",
           "upload:action",
+          "test:e2e",
           "save:cache",
         ],
         checksAfterRestore: true,

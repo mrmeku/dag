@@ -1,42 +1,40 @@
 /**
  * What the action's two entries share: the inputs, the resolve hook that serves
  * `@mrmeku/dagworkflows` from the running bundle (so the workflow file loads before node_modules
- * exists), and the ports: GitHub's reporter, and the toolkit as the cache and artifact services
- * when this process can reach them.
+ * exists), and the process wired on the bundled toolkit.
  */
-import { DefaultArtifactClient } from "@actions/artifact";
+import * as artifact from "@actions/artifact";
 import * as cache from "@actions/cache";
 import * as core from "@actions/core";
+import * as github from "@actions/github";
 import { registerHooks } from "node:module";
 import { resolve } from "node:path";
 import { pathToFileURL } from "node:url";
-import { check, lock } from "proper-lockfile";
-import { DEFAULT_CACHE_DIR, DEFAULT_HISTORY_DIR } from "../config.ts";
-import {
-  artifactServiceAvailable,
-  createActionsArtifactStore,
-  nullArtifactStore,
-} from "../ports/artifact-store.ts";
-import { createActionsCacheStore, nullCacheStore } from "../ports/cache-store.ts";
-import { createGithubHost } from "../ports/github.ts";
-import { createExec, createFileSystem, systemClock } from "../ports/real.ts";
-import type { RunOptions } from "../runner.ts";
-import { workflowDefOf } from "../workflow.ts";
+import { DEFAULT_CACHE_DIR } from "../config/index.ts";
+import { githubActionsPlatform, type ToolkitLoader } from "../github-actions/index.ts";
+import { nodejsRuntime } from "../nodejs/index.ts";
+import type { RunOptions } from "../run/index.ts";
+import { processPorts, type DagCommand } from "../wiring/index.ts";
+import { workflowOf } from "../workflow/index.ts";
 
-/** Notices for the services this process cannot reach; the main entry's alone, so once a job. */
-export function noticeUnavailableServices(): void {
-  if (!cache.isFeatureAvailable())
-    core.notice("actions/cache is off: no cache service in this environment", {
-      title: "dag",
-    });
-  if (!artifactServiceAvailable(process.env))
-    core.notice("actions/upload-artifact is off: no artifact service in this environment", {
-      title: "dag",
-    });
-}
+const MODULES = {
+  "@actions/core": core,
+  "@actions/github": github,
+  "@actions/cache": cache,
+  "@actions/artifact": artifact,
+};
 
-/** The run options the action's inputs describe; `force` is the main entry's alone. */
-export async function actionOptions(bundleUrl: string): Promise<RunOptions> {
+/** The toolkit as the bundle holds it. */
+const bundledToolkit: ToolkitLoader = {
+  load: async (name) => MODULES[name],
+  notices: {
+    cache: "actions/cache is off: no cache service in this environment",
+    artifact: "actions/upload-artifact is off: no artifact service in this environment",
+  },
+};
+
+/** The run options the action's inputs describe, its process wired for `command`. */
+export async function actionOptions(bundleUrl: string, command: DagCommand): Promise<RunOptions> {
   registerHooks({
     resolve: (specifier, context, next) =>
       specifier === "@mrmeku/dagworkflows"
@@ -44,29 +42,27 @@ export async function actionOptions(bundleUrl: string): Promise<RunOptions> {
         : next(specifier, context),
   });
   const file = core.getInput("workflow", { required: true });
-  const def = workflowDefOf(await import(pathToFileURL(resolve(file)).href), file);
-  const host = createGithubHost({ token: process.env["GITHUB_TOKEN"] });
+  const def = workflowOf(await import(pathToFileURL(resolve(file)).href), file);
   const only = core.getInput("only").split(",").filter(Boolean);
-  return {
-    implementation: def.implementation,
-    workflowFile: file,
-    ports: {
-      exec: createExec(),
-      fs: createFileSystem(),
-      clock: systemClock(),
-      host,
-      cacheStore: cache.isFeatureAvailable() ? createActionsCacheStore(cache) : nullCacheStore,
-      artifactStore: artifactServiceAvailable(process.env)
-        ? createActionsArtifactStore(new DefaultArtifactClient())
-        : nullArtifactStore,
-      lockfile: { lock, check },
-      env: process.env,
-    },
+  const historyDir = core.getInput("history-dir");
+  const paths = {
     cacheDir: core.getInput("cache-dir") || DEFAULT_CACHE_DIR,
-    historyDir: core.getInput("history-dir") || DEFAULT_HISTORY_DIR,
+    ...(historyDir && { historyDir }),
+  };
+  const { ports } = await processPorts({
+    runtime: nodejsRuntime,
+    platforms: [githubActionsPlatform(bundledToolkit)],
+    paths,
+    workflowFile: file,
+    command,
+    notices: command === "run",
+  });
+  return {
+    ...def,
+    ...paths,
+    ports,
+    workflowFile: file,
     force: core.getBooleanInput("force"),
     ...(only.length && { only }),
-    ...(def.schedulerOptions && { schedulerOptions: def.schedulerOptions }),
-    ...(def.summary && { summary: def.summary }),
   };
 }

@@ -4,19 +4,23 @@ import {
   AGENT_TAIL_BUDGET_CHARS,
   AGENT_WARNING_BUDGET_CHARS,
   AGENT_WARNINGS_SHOWN,
-} from "../../config.ts";
-import { plural, textOf } from "../../kernel/format.ts";
-import type { RunListener } from "../../kernel/store.ts";
-import { warningLines, warningsOf, type LocalContext } from "../words.ts";
+} from "../../config/index.ts";
+import { plural, textOf } from "../../kernel/index.ts";
+import type { RunListener } from "../../run-store/index.ts";
 import {
-  blockLog,
   characterCountOf,
   failureBlockLines,
   failureLine,
-  interruptedLines,
-  passLines,
   recapLines,
   tailLines,
+  type LocalContext,
+} from "../words/index.ts";
+import {
+  blockLog,
+  interruptedLines,
+  passLines,
+  warningLines,
+  warningMessagesOf,
 } from "./blocks.ts";
 
 /** A writer of lines while they fit in `budgetChars`, which counts the lines past it. */
@@ -41,7 +45,7 @@ function budgetedWriter(budgetChars: number, writeText: (text: string) => void) 
 
 /**
  * The `failures` style, an agent's: append-only, failures and warnings alone, within the
- * budgets in config.ts. Warnings have a budget of their own, so they never push a failure out.
+ * budgets in `config/`. Warnings have a budget of their own, so they never push a failure out.
  * Lines past a budget are counted, and the recap says where all of it is.
  */
 export function createAgentRenderer(localContext: LocalContext, writeText: (text: string) => void) {
@@ -52,7 +56,7 @@ export function createAgentRenderer(localContext: LocalContext, writeText: (text
   let failureBlocksPrinted = 0;
   /** A node's first warnings, then how many more and where. */
   const warningLinesOf = (name: string, log: string[]) => {
-    const warnings = warningsOf(log);
+    const warnings = warningMessagesOf(log);
     const shown = warningLines(name, warnings.slice(0, AGENT_WARNINGS_SHOWN));
     const moreCount = warnings.length - AGENT_WARNINGS_SHOWN;
     const where = localContext.logFile(name) ?? `${localContext.logDir}/`;
@@ -76,7 +80,7 @@ export function createAgentRenderer(localContext: LocalContext, writeText: (text
           failureBlocksPrinted++;
           const tail = tailLines(blockLog(nodeState), tailBudgetLeft);
           tailBudgetLeft -= characterCountOf(tail);
-          printLines(failureBlockLines(nodeState, run, localContext, tail));
+          printLines(failureBlockLines(nodeState, run, localContext, blockLog(nodeState), tail));
         }
       }
       warningOutput.printLines(warningLinesOf(nodeState.node.name, log));

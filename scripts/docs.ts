@@ -14,7 +14,7 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { format, resolveConfig } from "prettier";
 import { parse } from "yaml";
-import { program } from "../packages/dagworkflows/src/cli.ts";
+import { program } from "../packages/dagworkflows/src/cli/program.ts";
 import {
   DEFAULT_BUILD_LOG_DIR,
   DEFAULT_CACHE_DIR,
@@ -23,7 +23,7 @@ import {
   DEFAULT_HISTORY_DIR,
   DEFAULT_LOG_DIR,
   DEFAULT_SUMMARY_PATH,
-} from "../packages/dagworkflows/src/config.ts";
+} from "../packages/dagworkflows/src/config/index.ts";
 
 const DAG_DIR = fileURLToPath(new URL("..", import.meta.url));
 const PACKAGES = ["dagraph", "dagworkflows"];

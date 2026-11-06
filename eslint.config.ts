@@ -1,31 +1,9 @@
 import { defineConfig } from "eslint/config";
 import tseslint from "typescript-eslint";
 import { dagraphConfigs } from "./eslint.dagraph.ts";
+import { dagworkflowsConfigs } from "./eslint.dagworkflows.ts";
 
 const FS_MODULES = ["node:fs", "node:fs/promises", "fs", "fs/promises"];
-
-/**
- * dagworkflows' index loads no `@actions/*` package: the toolkit is an optional peer, loaded only
- * where GitHub is. Only the GitHub adapter's files import it by value: the action's options, the
- * `./github` subpath and the globber that `workflow.glob` loads lazily, which the rest may load
- * only with `import()`. Type imports and `import()` stay allowed.
- */
-const DAGWORKFLOWS_GITHUB_FILES = ["src/action/env.ts", "src/ports/github.ts", "src/ports/glob.ts"];
-const NO_GITHUB_IN_INDEX = "The index must load no GitHub package";
-const dagworkflowsImports = {
-  patterns: [
-    {
-      group: ["@actions/*"],
-      allowTypeImports: true,
-      message: `${NO_GITHUB_IN_INDEX}: import it lazily, or from the ./github adapter.`,
-    },
-    {
-      regex: "^\\.{1,2}/(?:.*/)?(?:github|glob)\\.ts$",
-      allowTypeImports: true,
-      message: `${NO_GITHUB_IN_INDEX}: load the toolkit's adapters lazily, with import().`,
-    },
-  ],
-};
 
 export default defineConfig(
   {
@@ -96,6 +74,7 @@ export default defineConfig(
     ignores: [
       "packages/*/src/ports/**",
       "packages/dagraph/src/filesystem/{bun,node}.ts",
+      "packages/dagworkflows/src/**",
       "**/*.test.ts",
     ],
     rules: {
@@ -110,14 +89,10 @@ export default defineConfig(
       ],
     },
   },
-  {
-    files: ["packages/dagworkflows/src/**/*.ts"],
-    ignores: DAGWORKFLOWS_GITHUB_FILES.map((file) => `packages/dagworkflows/${file}`),
-    rules: { "@typescript-eslint/no-restricted-imports": ["error", dagworkflowsImports] },
-  },
   ...dagraphConfigs("packages/dagraph"),
+  ...dagworkflowsConfigs("packages/dagworkflows"),
   {
-    files: ["**/*.test.ts"],
+    files: ["**/*.test.ts", "**/*.e2e.ts"],
     rules: { "@typescript-eslint/restrict-template-expressions": "off" },
   },
 );

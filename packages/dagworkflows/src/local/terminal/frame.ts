@@ -1,18 +1,12 @@
 import stringWidth from "string-width";
-import { isDebugCommand, textOf } from "../../kernel/format.ts";
+import { isDebugCommand } from "../../github-workflow-commands/index.ts";
+import { textOf } from "../../kernel/index.ts";
+import type { WriteStreams } from "../../wiring/index.ts";
 
 const BEGIN_SYNCHRONIZED_UPDATE = "\x1b[?2026h";
 const END_SYNCHRONIZED_UPDATE = "\x1b[?2026l";
 const DISABLE_LINE_WRAP = "\x1b[?7l";
 const ENABLE_LINE_WRAP = "\x1b[?7h";
-
-type WriteStream = NodeJS.WriteStream;
-
-export interface WriteStreams {
-  stdout: Pick<WriteStream, "write"> &
-    Partial<Pick<WriteStream, "columns" | "rows" | "isTTY" | "hasColors">>;
-  stderr: Pick<WriteStream, "write">;
-}
 
 /**
  * The footer's writer. Until `restore` it holds other writes to stdout and stderr for the
@@ -29,7 +23,7 @@ export function createFrame(streams: WriteStreams) {
   const endHeldLine = () => {
     if (heldScrollback && !heldScrollback.endsWith("\n")) heldScrollback += "\n";
   };
-  const holdWrite: WriteStream["write"] = (
+  const holdWrite: NodeJS.WriteStream["write"] = (
     chunk: string | Uint8Array,
     encoding?: BufferEncoding | ((err?: Error | null) => void),
     cb?: (err?: Error | null) => void,

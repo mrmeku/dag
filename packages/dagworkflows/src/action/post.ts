@@ -3,13 +3,13 @@
  * became of `main`, in its own process. It runs the post steps the main run's history shows as
  * still owed: those a cancel or a kill kept from finishing, and those that failed every try.
  */
-import { runPost } from "../runner.ts";
+import { runPost } from "../run/index.ts";
 import { actionOptions } from "./env.ts";
 
 export * from "../index.ts";
 
-export async function main(): Promise<void> {
-  process.exitCode = (await runPost(await actionOptions(import.meta.url))).exitCode;
+async function main(): Promise<void> {
+  process.exitCode = (await runPost(await actionOptions(import.meta.url, "post"))).exitCode;
 }
 
 main().catch((e: unknown) => {

@@ -1,3 +1,4 @@
+import type { Clock } from "@mrmeku/dagraph";
 import stringWidth from "string-width";
 import {
   LIVE_FALLBACK_SIZE,
@@ -12,36 +13,38 @@ import {
   LIVE_WAITING_ROWS,
   LIVE_WAITS_ON_SHOWN,
   SPINNER_FRAMES,
+} from "../../config/index.ts";
+import { isDebugCommand, warningsOf } from "../../github-workflow-commands/index.ts";
+import {
   STATUS_ICON,
-} from "../../config.ts";
-import { isDebugCommand, isWarningCommand, plainLine } from "../../kernel/format.ts";
-import type {
-  InFlightNodeState,
-  NodeState,
-  PendingNodeState,
-  RunState,
-  SettledNodeState,
-} from "../../kernel/run-slice.ts";
-import * as selectors from "../../kernel/selectors.ts";
-import type { RunListener } from "../../kernel/store.ts";
-import type { Clock } from "../../ports.ts";
+  plainLine,
+  selectors,
+  type InFlightNodeState,
+  type NodeState,
+  type PendingNodeState,
+  type RunState,
+  type SettledNodeState,
+} from "../../kernel/index.ts";
+import type { RunListener } from "../../run-store/index.ts";
+import type { WriteStreams } from "../../wiring/index.ts";
 import {
   clockOf,
   detailOf,
-  warningLines,
-  warningsOf,
-  type LocalContext,
-  type Paint,
-} from "../words.ts";
-import {
   failureBlockLines,
-  interruptedLines,
   nameWidth,
   padName,
-  passLines,
   recapLines,
+  type LocalContext,
+  type Paint,
+} from "../words/index.ts";
+import {
+  blockLog,
+  interruptedLines,
+  passLines,
+  warningLines,
+  warningMessagesOf,
 } from "./blocks.ts";
-import { createFrame, type WriteStreams } from "./frame.ts";
+import { createFrame } from "./frame.ts";
 
 const graphemeSegmenter = new Intl.Segmenter();
 
@@ -64,7 +67,7 @@ const STATUS_COLOR = {
   cancelled: "gray",
 } as const;
 
-/** A settled node as the scrollback keeps it: a line, a failure's block, or nothing. */
+/** A settled node but a cache hit as the scrollback keeps it: a line, a failure's block, or nothing. */
 function settledNodeLines(
   nodeState: SettledNodeState,
   run: RunState,
@@ -77,9 +80,9 @@ function settledNodeLines(
   ];
   switch (nodeState.status) {
     case "succeeded":
-      return nodeState.result.details.actionRan ? line("succeeded", detailOf(nodeState)) : [];
+      return line("succeeded", detailOf(nodeState));
     case "failed":
-      return failureBlockLines(nodeState, run, localContext);
+      return failureBlockLines(nodeState, run, localContext, blockLog(nodeState));
     case "dep-failed": {
       const causes = selectors.causesOf(nodeState);
       return line(
@@ -123,7 +126,7 @@ function latestLineOf(nodeState: NodeState): string {
     LIVE_LATEST_LINE_MAX_CHARS,
   );
   const latestLine =
-    printing.trim() && !isDebugCommand(printing) && !isWarningCommand(printing)
+    printing.trim() && !isDebugCommand(printing) && warningsOf([printing]).length === 0
       ? printing
       : nodeState.lastLine.slice(0, LIVE_LATEST_LINE_MAX_CHARS);
   // Format characters and tabs take columns a terminal and string-width disagree on.
@@ -210,9 +213,11 @@ function footerRows(
 export function createLiveRenderer(
   localContext: LocalContext,
   streams: WriteStreams,
-  clock: Clock,
-  getState: () => RunState,
+  clock: Pick<Clock, "epochMilliseconds">,
 ) {
+  let getState: () => RunState = () => {
+    throw new Error("the live renderer reads its run once a store attaches it");
+  };
   let frame: ReturnType<typeof createFrame> | undefined;
   // Made at the run's first line, so the implementation's own prints pass straight through.
   const currentFrame = () => (frame ??= createFrame(streams));
@@ -242,6 +247,9 @@ export function createLiveRenderer(
   };
 
   return {
+    attach: (getStoreState) => {
+      getState = getStoreState;
+    },
     begin: (pass, _run, isFirstPass) => {
       printLines(
         passLines(
@@ -253,7 +261,7 @@ export function createLiveRenderer(
       if (isFirstPass) redrawTimer = setInterval(drawFooter, LIVE_FRAME_MS).unref();
     },
     settle: (nodeState, run, log) => {
-      const warnings = warningLines(nodeState.node.name, warningsOf(log));
+      const warnings = warningLines(nodeState.node.name, warningMessagesOf(log));
       if (nodeState.status !== "succeeded" || nodeState.result.details.actionRan)
         return printLines([...settledNodeLines(nodeState, run, localContext), ...warnings]);
       cachedNames.push(nodeState.node.name);

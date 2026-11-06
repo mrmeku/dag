@@ -1,4 +1,5 @@
 import type { Node, NodeResult } from "@mrmeku/dagraph";
+import type { CommandCause, ExecResult } from "../tasks/index.ts";
 import type { NodeReport } from "./report.ts";
 import type {
   FailedNodeState,
@@ -9,7 +10,29 @@ import type {
   SettledNodeState,
 } from "./run-slice.ts";
 
-export { commandOf } from "../step-records.ts";
+const ENDINGS: readonly unknown[] = [
+  "exited",
+  "signalled",
+  "not-started",
+] satisfies ExecResult["ended"][];
+
+const isCommandCause = (cause: unknown): cause is CommandCause =>
+  typeof cause === "object" &&
+  cause !== null &&
+  "argv" in cause &&
+  Array.isArray(cause.argv) &&
+  cause.argv.every((arg) => typeof arg === "string") &&
+  "cwd" in cause &&
+  typeof cause.cwd === "string" &&
+  "code" in cause &&
+  typeof cause.code === "number" &&
+  "ended" in cause &&
+  ENDINGS.includes(cause.ended);
+
+/** The command whose failure failed the node; a node that failed otherwise may carry any cause, or none. */
+export function commandOf(error: { cause?: unknown }): CommandCause | undefined {
+  return isCommandCause(error.cause) ? error.cause : undefined;
+}
 
 export const isSettled = (nodeState: NodeState): nodeState is SettledNodeState =>
   nodeState.status !== "pending" &&

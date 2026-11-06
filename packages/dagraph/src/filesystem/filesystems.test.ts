@@ -183,3 +183,39 @@ test("the memory, bun and node adapters do the same on a directory: an empty one
     node: expected,
   });
 });
+
+const codeOf = (write: () => void) => {
+  try {
+    write();
+    return undefined;
+  } catch (e) {
+    return e instanceof Error && "code" in e ? e.code : e;
+  }
+};
+
+test("the memory filesystem's synchronous writes are its async ones, done when they return, but make no directory", async () => {
+  const fs = createMemoryFileSystem({ "/r/file": "x" });
+  fs.ensureDirSync("/r/logs/empty");
+  fs.writeFileSync("/r/logs/a.log", "one\n");
+  fs.appendFileSync("/r/logs/a.log", "two\n");
+  fs.appendFileSync("/r/logs/b.log", "new\n");
+  const failures = [
+    codeOf(() => fs.writeFileSync("/r/file/under", "y")),
+    codeOf(() => fs.ensureDirSync("/r/file")),
+    codeOf(() => fs.appendFileSync("/r/nowhere/c.log", "y")),
+  ];
+  await fs.chmod("/r/logs/b.log", 0o444);
+  expect({
+    a: await fs.readText("/r/logs/a.log"),
+    b: await fs.readText("/r/logs/b.log"),
+    logs: (await fs.readdir("/r/logs")).sort(),
+    failures,
+    readOnly: codeOf(() => fs.appendFileSync("/r/logs/b.log", "z")),
+  }).toEqual({
+    a: "one\ntwo\n",
+    b: "new\n",
+    logs: ["a.log", "b.log", "empty"],
+    failures: ["ENOTDIR", "EEXIST", "ENOENT"],
+    readOnly: "EACCES",
+  });
+});

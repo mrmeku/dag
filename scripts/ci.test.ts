@@ -1,5 +1,11 @@
 import { Graph } from "@mrmeku/dagraph";
-import { createTestPorts, createWorkflow, selectNodes, type Ports } from "@mrmeku/dagworkflows";
+import {
+  createTestPorts,
+  createWorkflow,
+  nodejsRuntime,
+  selectNodes,
+  type Ports,
+} from "@mrmeku/dagworkflows";
 import assert from "node:assert/strict";
 import { describe, test } from "node:test";
 import ci from "./ci.ts";
@@ -9,6 +15,8 @@ describe("ci workflow", () => {
   test("the cache restore first, checks that order after it and read only their files, the cache save on main only, after every check", async () => {
     const build = async (ref: string) => {
       const { ports } = createTestPorts({ context: { ref } });
+      // The checks' inputs are globbed from the real tree.
+      ports.fileMatcher = nodejsRuntime.fileMatcher;
       const graph = new Graph<Ports>();
       const context = await ports.host.context();
       await fromDagDirectory(() => createWorkflow(graph, ports, context).compose(ci));
@@ -24,7 +32,9 @@ describe("ci workflow", () => {
       assert.ok(node, `${name} was not processed`);
       return node.files.includes(file);
     };
-    const checks = nodes.filter((n) => /^(typecheck|lint|test:)/.test(n.name));
+    const checks = nodes.filter(
+      (n) => /^(typecheck|lint|test:)/.test(n.name) && n.name !== "test:e2e",
+    );
     assert.deepEqual(
       {
         names: nodes.map((n) => n.name).sort(),
@@ -33,9 +43,10 @@ describe("ci workflow", () => {
         typecheckReadsLintConfig: reads("typecheck", "eslint.config.ts"),
         engineTestsIgnoreRunner:
           reads("test:dagraph", "packages/dagraph/src/execute.ts") &&
-          !reads("test:dagraph", "packages/dagworkflows/src/runner.ts"),
+          !reads("test:dagraph", "packages/dagworkflows/src/run/index.ts"),
         runnerTestsReadThisFile: reads("test:dagworkflows", "scripts/ci.test.ts"),
         nobodyReadsReadme: nodes.every((n) => !reads(n.name, "README.md")),
+        endToEndDeps: by("test:e2e")?.deps.sort(),
         requireAllDeps: by("require-all")?.deps.sort(),
         requireAllSettledDeps: by("require-all")?.settledDeps?.length,
         saveCache: onMain.find((n) => n.name === "save:cache"),
@@ -44,6 +55,7 @@ describe("ci workflow", () => {
       },
       {
         names: [
+          "build:action",
           "lint",
           "pack:dagraph",
           "pack:dagworkflows",
@@ -51,6 +63,7 @@ describe("ci workflow", () => {
           "restore:cache",
           "test:dagraph",
           "test:dagworkflows",
+          "test:e2e",
           "typecheck",
         ],
         onlyOnMain: ["save:cache"],
@@ -59,15 +72,18 @@ describe("ci workflow", () => {
         engineTestsIgnoreRunner: true,
         runnerTestsReadThisFile: true,
         nobodyReadsReadme: true,
+        // The packed packages and the bundle exist before the end-to-end tests start.
+        endToEndDeps: ["build:action", "pack:dagraph", "pack:dagworkflows"],
         requireAllDeps: [
           "lint",
           "pack:dagraph",
           "pack:dagworkflows",
           "test:dagraph",
           "test:dagworkflows",
+          "test:e2e",
           "typecheck",
         ],
-        requireAllSettledDeps: 6,
+        requireAllSettledDeps: 7,
         saveCache: {
           name: "save:cache",
           kind: "save:cache",
@@ -76,6 +92,8 @@ describe("ci workflow", () => {
             "restore:cache",
             "pack:dagraph",
             "pack:dagworkflows",
+            "build:action",
+            "test:e2e",
             "typecheck",
             "lint",
             "test:dagraph",
@@ -86,6 +104,8 @@ describe("ci workflow", () => {
             "restore:cache",
             "pack:dagraph",
             "pack:dagworkflows",
+            "build:action",
+            "test:e2e",
             "typecheck",
             "lint",
             "test:dagraph",
@@ -93,7 +113,7 @@ describe("ci workflow", () => {
             "require-all",
           ],
         },
-        uncached: ["restore:cache"],
+        uncached: ["restore:cache", "test:e2e"],
         schedulerOptions: { maxParallelism: 4, concurrencyLimits: { test: 2 } },
       },
     );

@@ -10,7 +10,8 @@
  *   receipts of what already published and skips it. A dry run saves nothing.
  * - checks: the same nodes as CI (scripts/checks.ts), so a tree CI already tested is a cache hit,
  *   and docs, which fails while anything scripts/docs.ts generates is stale: docs are written for
- *   a release.
+ *   a release. test:e2e runs over this release's own tarballs and bundle, so nothing publishes
+ *   that a consumer could not install and run.
  * - pack: one tarball per package, a declared output, content-addressed. One build program emits
  *   both packages, so each pack reads both packages' sources. The engine is published before the
  *   runner that depends on it.
@@ -21,14 +22,14 @@
  *   prerelease version goes under the `next` dist-tag, which npm 11 insists on, so `latest` only
  *   ever moves to a release. npm authenticates through trusted publishing, which also attaches
  *   provenance.
- * - action: the bundle (main and post entries) is an output of build:action; release:action
- *   pushes it to github.com/mrmeku/dagworkflows, the ref consumers use, and tags it.
+ * - action: the bundle (main and post entries) is an output of the checks' build:action;
+ *   release:action pushes it to github.com/mrmeku/dagworkflows, the ref consumers use, and tags it.
  * - upload: each tarball and the bundle go up as artifacts of the run as soon as they are built,
  *   whether or not require-all passes, so what a dry run or a failed publish would have shipped
  *   can be inspected.
  */
 import { defineWorkflow, type NodeRef } from "@mrmeku/dagworkflows";
-import { addChecks, type Package } from "./checks.ts";
+import { addActionBuild, addChecks, addEndToEndTests, type Package } from "./checks.ts";
 
 const TAG = /^refs\/tags\/v(\d+\.\d+\.\d+(?:-[\w.]+)?)$/;
 const TOOLCHAIN = ["tsconfig.json", "tsconfig.build.json", "bun.lock", "scripts/pack.ts"];
@@ -62,8 +63,6 @@ export default defineWorkflow({
       ),
       ...afterRestore,
     });
-    const requireAll = await addChecks(workflow, cache.restore, { docs });
-
     const sources = await workflow.glob(
       "packages/*/src/**",
       "packages/*/package.json",
@@ -87,28 +86,17 @@ export default defineWorkflow({
       return tarball;
     };
     const tarballs = { dagraph: pack("dagraph"), dagworkflows: pack("dagworkflows") };
-    const bundle = workflow.task({
-      name: "build:action",
-      cmd: ({ outputDir }) => [
-        "bun",
-        "build",
-        "packages/dagworkflows/src/action/main.ts",
-        "packages/dagworkflows/src/action/post.ts",
-        "--target=node",
-        "--format=esm",
-        "--outdir",
-        outputDir,
-      ],
-      outputs: { main: "main.js", post: "post.js" },
-      inputs: sources,
-      ...afterRestore,
-    });
+    const bundle = await addActionBuild(workflow, cache.restore);
 
     workflow.uploadArtifact({
       name: "upload:action",
       artifact: `action-${version}`,
       path: ({ bundle }) => [bundle.main, bundle.post],
       deps: { bundle },
+    });
+    const requireAll = await addChecks(workflow, cache.restore, {
+      docs,
+      "test:e2e": addEndToEndTests(workflow, tarballs, bundle),
     });
 
     const publish = (pkg: Package, after: { engine?: NodeRef }) =>

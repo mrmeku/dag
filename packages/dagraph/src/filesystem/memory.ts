@@ -16,16 +16,25 @@ interface MemoryDirectory {
 export type MemoryFileSystem = FileSystem & {
   files: Map<string, MemoryFile>;
   writeFile: (path: string, data: string | Uint8Array) => Promise<void>;
+  /**
+   * `writeFile`, done when it returns, but making no directory: as `node:fs`'s, it fails with
+   * `ENOENT` when the file's directory is missing.
+   */
+  writeFileSync: (path: string, data: string | Uint8Array) => void;
+  /** Appends to the file, making it when missing, and fails as `writeFileSync` does. */
+  appendFileSync: (path: string, data: string | Uint8Array) => void;
+  /** `ensureDir`, done when it returns. */
+  ensureDirSync: (path: string) => void;
 };
 
 /**
  * The in-memory double of the cache's `FileSystem`, for tests. It does on a directory what the
- * disk adapters do, failing with their codes: a write makes its file's directories, `ensureDir`
- * makes an empty one, and adding, removing or renaming an entry of a directory changes its mtime.
- * `files` is exposed so a test can inspect or seed it directly; a file seeded there makes the
- * directories above it exist. A path is its own absolute form: `resolve` returns it as given, and
- * the root always exists. A write to a read-only file fails with `EACCES`. Each write, and each
- * change to a directory, gives it an mtime a millisecond later than any before.
+ * disk adapters do, failing with their codes: an async write makes its file's directories,
+ * `ensureDir` makes an empty one, and adding, removing or renaming an entry of a directory changes
+ * its mtime. `files` is exposed so a test can inspect or seed it directly; a file seeded there
+ * makes the directories above it exist. A path is its own absolute form: `resolve` returns it as
+ * given, and the root always exists. A write to a read-only file fails with `EACCES`. Each write,
+ * and each change to a directory, gives it an mtime a millisecond later than any before.
  */
 export function createMemoryFileSystem(
   initial: Record<string, string | Uint8Array> = {},
@@ -104,20 +113,30 @@ export function createMemoryFileSystem(
   };
   for (const [path, data] of Object.entries(initial)) write(path, data);
   const writeFile = async (path: string, data: string | Uint8Array) => write(path, data);
+  const writeFileSync = (path: string, data: string | Uint8Array) => {
+    if (!holdsEntries(parentOf(path))) throw missing(path);
+    write(path, data);
+  };
+  const textOf = (data: string | Uint8Array) =>
+    typeof data === "string" ? data : new TextDecoder().decode(data);
+  const ensureDirSync = (path: string) => {
+    if (files.has(path)) throw failure("EEXIST", path);
+    makeDirectories(trimmed(path));
+  };
 
   return {
     files,
     writeFile,
-    readText: async (path) => {
-      const { data } = fileAt(path);
-      return typeof data === "string" ? data : new TextDecoder().decode(data);
+    writeFileSync,
+    appendFileSync: (path, data) => {
+      const before = files.get(path);
+      writeFileSync(path, before === undefined ? data : textOf(before.data) + textOf(data));
     },
+    ensureDirSync,
+    readText: async (path) => textOf(fileAt(path).data),
     writeText: writeFile,
     hashFile: async (path) => hashBytes(fileAt(path).data),
-    ensureDir: async (path) => {
-      if (files.has(path)) throw failure("EEXIST", path);
-      makeDirectories(trimmed(path));
-    },
+    ensureDir: async (path) => ensureDirSync(path),
     rename: async (from, to) => {
       const file = files.get(from);
       const directory = file ? undefined : directoryAt(from);

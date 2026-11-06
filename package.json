@@ -6,8 +6,8 @@
     "packages/*"
   ],
   "scripts": {
-    "ci": "node packages/dagworkflows/src/cli.ts run scripts/ci.ts",
-    "release": "node packages/dagworkflows/src/cli.ts run scripts/release.ts",
+    "ci": "node packages/dagworkflows/src/cli/main.ts run scripts/ci.ts",
+    "release": "node packages/dagworkflows/src/cli/main.ts run scripts/release.ts",
     "build:action": "cd packages/dagworkflows && bun run build:action",
     "typecheck": "tsgo --noEmit",
     "lint": "bun --bun eslint .",

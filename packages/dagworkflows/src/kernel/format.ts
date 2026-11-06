@@ -1,11 +1,20 @@
-import { countResultsByStatus } from "@mrmeku/dagraph";
+import { countResultsByStatus, type NodeResult } from "@mrmeku/dagraph";
 import { stripVTControlCharacters } from "node:util";
-import { quote } from "shlex";
-import { STATUS_ICON } from "../config.ts";
-import type { AnnotationLevel } from "../ports.ts";
 import { namesOf, type NodeReport } from "./report.ts";
-import type { FailureNodeState, NodeState } from "./run-slice.ts";
-import { timedOut } from "./selectors.ts";
+import type { FailureNodeState, NodeState, RunState } from "./run-slice.ts";
+import { nodeReports, timedOut } from "./selectors.ts";
+
+/**
+ * A node's status as an icon, in log group titles, the summary and the DAG's labels: Nx's
+ * terminal set (figures' tick and cross; its TUI's skipped and stopped), where a cache hit is a
+ * success and the word "cached" says the rest. U+FE0E keeps a browser from drawing an emoji.
+ */
+export const STATUS_ICON: Record<NodeResult["status"], string> = {
+  succeeded: "✔\uFE0E",
+  failed: "✖\uFE0E",
+  "dep-failed": "⏭\uFE0E",
+  cancelled: "◼\uFE0E",
+};
 
 const CONTROL_CHARACTERS = /[\x00-\x08\x0b-\x1f\x7f-\x9f]/g;
 
@@ -16,15 +25,12 @@ export function formatDuration(ms: number): string {
 export const plural = (count: number, word: string): string =>
   `${count} ${word}${count === 1 ? "" : "s"}`;
 
-export const errorMessage = (error: unknown): string =>
-  error instanceof Error ? error.message : String(error);
-
 /** A node's own timeout in the words of GitHub's runner. */
 function timeoutMessage(name: string, timeoutMs: number): string {
-  const minutes = timeoutMs / 60_000;
+  const minutes = +(timeoutMs / 60_000).toFixed(2);
   const after =
-    minutes >= 1
-      ? `${+minutes.toFixed(2)} minute${minutes === 1 ? "" : "s"}`
+    timeoutMs >= 60_000
+      ? `${minutes} minute${minutes === 1 ? "" : "s"}`
       : formatDuration(timeoutMs);
   return `The action '${name}' has timed out after ${after}.`;
 }
@@ -59,40 +65,6 @@ export function logLines(text: string): string[] {
 
 export const textOf = (lines: string[]): string => lines.map((line) => `${line}\n`).join("");
 
-/** A toolkit `::debug::` command (the globber writes one per file) is for GitHub's debug mode alone. */
-export const isDebugCommand = (text: string): boolean => text.startsWith("::debug::");
-
-/** An annotation as the local host prints it: `[warning] lint: 2 files skipped`. */
-export const annotationLine = (level: AnnotationLevel, title: string, message: string): string =>
-  `[${level}] ${title}: ${message}`;
-
-/**
- * The message of each line of `log` that is a `::warning` workflow command, at its index, as
- * GitHub's runner reads one: after leading whitespace, in any case, unescaped, and none while a
- * `::stop-commands::` holds the commands off. Any other line has `undefined`.
- */
-export function warningMessages(log: string[]): Array<string | undefined> {
-  let stopToken: string | undefined;
-  return log.map((line) => {
-    // .NET's TrimStart, which the runner uses, also strips U+0085.
-    const trimmed = line.replace(/^[\s\u0085]+/, "");
-    const end = trimmed.startsWith("::") ? trimmed.indexOf("::", 2) : -1;
-    if (end < 0) return undefined;
-    const command = trimmed.slice(2, end).split(" ")[0]?.toLowerCase();
-    const data = trimmed.slice(end + 2);
-    if (stopToken !== undefined) {
-      if (command === stopToken.toLowerCase()) stopToken = undefined;
-      return undefined;
-    }
-    if (command === "stop-commands") stopToken = data;
-    if (command !== "warning") return undefined;
-    return data.replaceAll("%0D", "\r").replaceAll("%0A", "\n").replaceAll("%25", "%");
-  });
-}
-
-/** Whether a line is a `::warning` workflow command, which the terminal prints apart. */
-export const isWarningCommand = (line: string): boolean => warningMessages([line])[0] !== undefined;
-
 /** What a terminal shows of a line: the text after its last carriage return, a trailing one aside. */
 export const textAfterLastReturn = (line: string): string =>
   line.slice(line.replace(/\r+$/, "").lastIndexOf("\r") + 1);
@@ -105,12 +77,35 @@ export function plainLine(line: string, maxLength = Infinity): string {
   return plainText.length > maxLength ? `${plainText.slice(0, maxLength)}…` : plainText;
 }
 
-export const cancelledHeadline = (notRunCount: number): string =>
+const cancelledHeadline = (notRunCount: number): string =>
   `${STATUS_ICON.cancelled} cancelled, ${plural(notRunCount, "node")} not run`;
 
-/** The command that reruns `nodeNames`, shell-quoted: `npx --no dag run ci.ts --only 'lint docs'`. */
+/**
+ * A word as a POSIX shell reads it back, by `shlex.quote`'s rules: bare when every character is
+ * safe, else single-quoted, each run of quotes double-quoted between.
+ */
+function shellWord(word: string): string {
+  if (word === "") return "''";
+  if (!/[^\w@%+=:,./-]/.test(word)) return word;
+  return `'${word.replace(/'+/g, (run) => `'"${run}"'`)}'`.replace(/^''|''$/g, "");
+}
+
+/** The `--only` argument naming `nodeNames`, quoted when a shell needs it: `--only 'lint docs'`. */
+export const onlyArgument = (nodeNames: string[]): string =>
+  `--only ${shellWord(nodeNames.join(","))}`;
+
+/** The command that reruns `nodeNames`: `npx --no dag run ci.ts --only 'lint docs'`. */
 export const rerunLine = (rerunCommand: string, nodeNames: string[]): string =>
-  `${rerunCommand} --only ${quote(nodeNames.join(","))}`;
+  `${rerunCommand} ${onlyArgument(nodeNames)}`;
+
+/**
+ * What a run's banner says it runs: `3 nodes`, `1 node`, or under `--only`
+ * `2 of 5 nodes (--only lint,test)`.
+ */
+export const scopeOf = (total: number, only: string[] | undefined, selected: number): string =>
+  only?.length
+    ? `${selected} of ${plural(total, "node")} (--only ${only.join(",")})`
+    : plural(total, "node");
 
 /** What the run came to, in a few words. */
 export function reportHeadline(nodes: NodeReport[]): string {
@@ -143,5 +138,24 @@ export function groupLines(nodeState: NodeState, log: string[]): string[] {
       return [failureMessage(nodeState)];
     default:
       return log;
+  }
+}
+
+/** That the run errored, its failures, that it was cancelled, or else what it came to. */
+export function runHeadline(run: RunState): string {
+  switch (run.lifecycle.status) {
+    case "errored":
+      return `${STATUS_ICON.failed} errored: ${logLines(run.lifecycle.error)[0] ?? ""}`;
+    case "cancelling":
+    case "cancelled": {
+      const reports = nodeReports(run);
+      return namesOf(reports, "failed").length > 0
+        ? reportHeadline(reports)
+        : cancelledHeadline(
+            namesOf(reports, "cancelled").length + namesOf(reports, "dep-failed").length,
+          );
+    }
+    default:
+      return reportHeadline(nodeReports(run));
   }
 }
